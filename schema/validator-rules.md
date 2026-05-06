@@ -1,4 +1,4 @@
-# vk8s Validator Rules (v0.1)
+# vk8s Validator Rules (v0.2)
 
 검증 룰 카탈로그. 각 룰은 `id`, `severity`(`block` | `warn`), `scope`(검사 단위), 발동 조건, 메시지 템플릿을 가진다.
 
@@ -179,3 +179,155 @@
 - **scope**: project
 - **when**: `project.mode == "onprem"` 인데 `cloud` Site 존재 (또는 반대)
 - **msg**: `프로젝트 모드 {mode}와 Site 종류({kinds}) 불일치.`
+
+---
+
+## 8. Namespace & NetworkPolicy
+
+### `WORKLOAD_NAMESPACE_NOT_DECLARED` — block
+- **scope**: cluster, per workload
+- **when**: `workload.namespace` 값이 `cluster.namespaces[].name`에 없음
+- **msg**: `{workload.name}: namespace '{ns}'가 클러스터에 정의되지 않음.`
+
+### `NS_DEFAULT_DENY_NO_ALLOW_RULES` — warn
+- **scope**: cluster, per namespace
+- **when**: `namespace.default_deny == true`인데 해당 NS의 NetworkPolicy 중 ingress allow 룰 없음
+- **msg**: `Namespace '{ns}': default-deny 적용되어 있고 allow 룰 없음 — 모든 트래픽 차단됨.`
+
+### `WORKLOAD_DEPS_BLOCKED_BY_NETPOL` — block
+- **scope**: cluster, per depends_on edge
+- **when**: A→B 호출 경로가 B의 namespace NetworkPolicy에 의해 차단됨 (ingress 룰이 A의 ns/labels 매칭 안함)
+- **msg**: `{a.name}({a.ns}) → {b.name}({b.ns}): NetworkPolicy '{policy}'에 의해 차단. allow 룰 추가 필요.`
+
+### `WORKLOAD_EGRESS_BLOCKED_BY_NETPOL` — block
+- **scope**: cluster, per depends_on edge
+- **when**: A의 ns가 default_deny egress이고 A→B 허용 egress 룰 없음
+- **msg**: `{a.name}: namespace '{ns}' egress default-deny — {b.name} 호출 불가.`
+
+### `NETPOL_TARGETS_NONEXISTENT_POD` — warn
+- **scope**: cluster, per network_policy
+- **when**: `pod_selector.match_labels`가 namespace 내 어떤 워크로드 라벨에도 매칭되지 않음
+- **msg**: `NetworkPolicy '{policy}': 매칭되는 pod 없음 (의도한 라벨 확인).`
+
+### `NETPOL_FROM_NS_NONEXISTENT` — warn
+- **scope**: cluster, per network_policy
+- **when**: `ingress.from_namespaces`에 클러스터에 없는 namespace 참조
+- **msg**: `NetworkPolicy '{policy}': from_namespaces에 존재하지 않는 ns '{ns}'.`
+
+### `NS_RESOURCE_QUOTA_EXCEEDED_BY_WORKLOADS` — block
+- **scope**: cluster, per namespace
+- **when**: `Σ(workload.replicas × workload.requests.cpu)` > `namespace.resource_quota.cpu` (memory/gpu/pods 동일)
+- **msg**: `Namespace '{ns}': CPU {needed}c 요구, quota {limit}c.`
+
+### `PROD_NS_NO_DEFAULT_DENY` — warn
+- **scope**: cluster, per namespace
+- **when**: `namespace.labels.tier == "prod"` (or name contains "prod"), `default_deny == false`
+- **msg**: `Namespace '{ns}': production 추정인데 default-deny 미설정 — 보안 권장.`
+
+---
+
+## 9. 의존성 그래프 (depends_on)
+
+### `DEPENDS_ON_TARGET_NOT_FOUND` — block
+- **scope**: cluster, per depends_on
+- **when**: `target_workload_id`가 같은 cluster.workloads에 없음
+- **msg**: `{workload.name}: 의존 대상 '{target}' 워크로드 없음.`
+
+### `DEPENDS_ON_CYCLE` — warn
+- **scope**: cluster
+- **when**: depends_on 그래프에 사이클 발견
+- **msg**: `의존성 사이클 감지: {a → b → c → a}. 순환 호출은 동기 호출 시 데드락 위험.`
+
+### `DEPENDS_ON_CROSS_CLUSTER` — warn
+- **scope**: project
+- **when**: `target_workload_id`가 다른 클러스터에 위치
+- **msg**: `{workload.name} → {target}: 다른 클러스터의 워크로드 호출 — 외부 노출 + 네트워크 비용 검토.`
+
+---
+
+## 10. 정적 병목 분석 (runtime + traffic_profile + depends_on)
+
+병목 룰은 사용자 데이터(runtime/traffic) 기반의 추정이며 모두 **warn** 또는 **info**. 차단 안 함. Little's Law 기반.
+
+> **표기**: `R` = target_rps, `S` = avg_request_ms (ms), `T` = max_threads, `N` = replicas, `pool` = connection_pool_per_replica.
+
+### `THREAD_POOL_SATURATION` — warn
+- **scope**: workload
+- **when**: `runtime.concurrency.model == "thread-pool"` 그리고
+  `R × (S/1000) > T × N × 0.8`
+- **msg**: `{workload.name}: 동시 처리 {needed} 스레드 필요, 가용 {capacity} (사용률 {pct}%). Tomcat 스레드 고갈 가능.`
+- **rationale**: Little's Law. 80%부터 latency 급증.
+
+### `EVENT_LOOP_CPU_BOUND` — warn
+- **scope**: workload
+- **when**: `runtime.concurrency.model == "event-loop"` 그리고 `S > 50ms` 그리고 다운스트림 의존성 적음(< 2)
+- **msg**: `{workload.name}: 평균 응답 {S}ms은 이벤트 루프에 비교적 길어 CPU 바운드 의심. worker/replicas 증대 검토.`
+
+### `WORKER_POOL_SATURATION` — warn
+- **scope**: workload
+- **when**: `runtime.concurrency.model == "process-pool"` 그리고 `R × (S/1000) > workers × N × 0.8`
+- **msg**: `{workload.name}: gunicorn worker 부족. 권장 {recommended_workers}, 현재 {workers}.`
+
+### `DB_CONNECTION_POOL_EXHAUSTED` — warn
+- **scope**: workload (caller)
+- **when**: 다운스트림 dep에 대해 `dep.fanout_pct/100 × dep.calls_per_request × R × (dep.avg_call_ms/1000) > pool × N × 0.8`
+- **msg**: `{a.name} → {b.name}: 호출 풀 {pool×N}로 부족 ({needed} 필요). HikariCP/HTTP 풀 고갈 가능.`
+
+### `DB_MAX_CONNECTIONS_EXCEEDED` — warn
+- **scope**: workload (DB target)
+- **when**: target이 `runtime.max_connections` 가지고, `Σ(callers의 pool × replicas) > max_connections × 0.8`
+- **msg**: `{db.name}: 인입 연결 {incoming} > max_connections {limit} 80%. PgBouncer/PgPool 권장.`
+
+### `TIMEOUT_CASCADE_RISK` — warn
+- **scope**: workload (caller chain)
+- **when**: caller의 `client_timeout_ms < Σ(downstream chain의 p99 sum)`
+- **msg**: `{a.name}: client_timeout={t}ms < 다운스트림 체인 p99 합 {sum}ms. 타임아웃 캐스케이드 가능.`
+
+### `JVM_HEAP_TOO_SMALL` — warn
+- **scope**: workload
+- **when**: `runtime.language in [Java, Kotlin]` 그리고 `runtime.concurrency.heap_gb < requests.memory_gb × 0.5`
+- **msg**: `{workload.name}: heap {h}GB가 memory request {m}GB의 절반 미만 — GC 부담 또는 메모리 낭비.`
+
+### `JVM_HEAP_GT_REQUEST` — block
+- **scope**: workload
+- **when**: `runtime.concurrency.heap_gb > requests.memory_gb`
+- **msg**: `{workload.name}: heap {h}GB > memory request {m}GB. OOMKilled 거의 확정.`
+
+### `SPOF_RISK` — warn
+- **scope**: workload
+- **when**: `replicas == 1` 그리고 `category in [API, WAS, DB, Cache, Queue]`
+- **msg**: `{workload.name}: replicas=1, 단일 장애점. 카테고리 {cat}는 다중화 권장.`
+
+### `STATEFUL_NO_PVC` — warn
+- **scope**: workload
+- **when**: `category == "DB"` 또는 `kind == "StatefulSet"` 그리고 `persistent_volumes` 비어있음
+- **msg**: `{workload.name}: stateful 워크로드인데 PVC 없음 — 데이터 손실 위험.`
+
+### `RPS_NEVER_REACHED_BY_DEPS` — info
+- **scope**: workload (downstream)
+- **when**: target_rps 설정 X, depends_on 그래프 합산이 더 작음
+- **msg**: `{workload.name}: 업스트림 의존성 합산 RPS {sum} — target_rps 자동 추정.`
+
+### `KEEPALIVE_HIGH_RPS_DISABLED` — warn
+- **scope**: workload
+- **when**: `traffic_profile.target_rps > 100` 그리고 `keepalive == false`
+- **msg**: `{workload.name}: RPS {n}인데 keepalive=false — TCP 핸드셰이크 오버헤드 큼.`
+
+---
+
+## 11. Helm Export 무결성
+
+### `HELM_DUPLICATE_CHART_NAME` — block
+- **scope**: project
+- **when**: 둘 이상의 워크로드가 같은 `helm.chart_name` 사용
+- **msg**: `chart_name '{name}' 중복: {workloads}`
+
+### `HELM_INGRESS_NO_HOST` — warn
+- **scope**: workload
+- **when**: `helm.expose.ingress == true`, `helm.expose.ingress_host` 미설정
+- **msg**: `{workload.name}: ingress 활성화됐는데 host 미설정 — wildcard로 export됨.`
+
+### `HELM_NO_IMAGE_REPO` — warn
+- **scope**: workload
+- **when**: `helm.image_repo` 미설정
+- **msg**: `{workload.name}: image_repo 미설정 — chart values에 placeholder만 들어감.`

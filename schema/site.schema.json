@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.vk8s.aiotool.net/v0.1/site.json",
+  "$id": "https://schemas.vk8s.aiotool.net/v0.2/site.json",
   "title": "Site",
   "description": "배포 환경 단위. onprem이면 IDC 1개, cloud면 region 1개에 해당.",
   "type": "object",

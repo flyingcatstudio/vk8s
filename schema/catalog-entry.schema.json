@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.vk8s.aiotool.net/v0.1/catalog-entry.json",
+  "$id": "https://schemas.vk8s.aiotool.net/v0.2/catalog-entry.json",
   "title": "Catalog Entry",
   "description": "브랜드별 서버/인스턴스 프리셋. data/catalog/{cloud,onprem}/{brand}.json 의 항목 단위.",
   "type": "object",

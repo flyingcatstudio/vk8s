@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.vk8s.aiotool.net/v0.1/node-spec.json",
+  "$id": "https://schemas.vk8s.aiotool.net/v0.2/node-spec.json",
   "title": "Node Spec",
   "description": "노드 하드웨어 스펙. Node와 CatalogEntry가 공유하는 정의.",
   "type": "object",

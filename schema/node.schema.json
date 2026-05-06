@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.vk8s.aiotool.net/v0.1/node.json",
+  "$id": "https://schemas.vk8s.aiotool.net/v0.2/node.json",
   "title": "Node",
   "description": "프로젝트에 배치된 단일 서버/인스턴스. 카탈로그에서 시드되거나 사용자 커스텀.",
   "type": "object",

@@ -1,0 +1,138 @@
+{
+  "$schema_version": "0.2",
+  "description": "런타임 프리셋. Workload 추가 시 시드값으로 제공. 사용자가 override 가능.",
+  "profiles": {
+    "spring-boot-17": {
+      "language": "Java",
+      "framework": "Spring-Boot",
+      "version": "17",
+      "concurrency": {
+        "model": "thread-pool",
+        "max_threads": 200,
+        "heap_gb": 2
+      },
+      "connection_pool_per_replica": 10,
+      "notes": "Tomcat 기본 max-threads=200, HikariCP 기본 maximumPoolSize=10. 가상 스레드(JDK 21+) 사용 시 별도 프로파일 권장."
+    },
+    "spring-boot-21-virtual": {
+      "language": "Java",
+      "framework": "Spring-Boot",
+      "version": "21",
+      "concurrency": {
+        "model": "thread-pool",
+        "max_threads": 10000,
+        "heap_gb": 2
+      },
+      "connection_pool_per_replica": 20,
+      "notes": "JDK 21 가상 스레드. 동시 처리는 사실상 DB pool/CPU에 의해 제한됨."
+    },
+    "spring-webflux-17": {
+      "language": "Java",
+      "framework": "Spring-WebFlux",
+      "version": "17",
+      "concurrency": {
+        "model": "event-loop",
+        "max_threads": 16,
+        "heap_gb": 2
+      },
+      "connection_pool_per_replica": 50,
+      "notes": "Netty 기본 worker = 2×CPU 코어. Reactive 스택은 thread 고갈보다는 backpressure 이슈."
+    },
+    "node-express-20": {
+      "language": "Node.js",
+      "framework": "Express",
+      "version": "20",
+      "concurrency": {
+        "model": "event-loop",
+        "max_threads": 1
+      },
+      "connection_pool_per_replica": 10,
+      "notes": "단일 이벤트 루프. 동시 처리는 I/O 대기 시간에 의존. CPU 바운드 시 클러스터 모듈 또는 replicas 증대."
+    },
+    "node-fastify-20": {
+      "language": "Node.js",
+      "framework": "Fastify",
+      "version": "20",
+      "concurrency": {
+        "model": "event-loop",
+        "max_threads": 1
+      },
+      "connection_pool_per_replica": 10,
+      "notes": "Express 대비 30-40% 빠른 처리량."
+    },
+    "fastapi-3.12": {
+      "language": "Python",
+      "framework": "FastAPI",
+      "version": "3.12",
+      "concurrency": {
+        "model": "async-await",
+        "workers": 4
+      },
+      "connection_pool_per_replica": 10,
+      "notes": "uvicorn workers=4 + async I/O. CPU 바운드 작업은 GIL 영향. workers는 코어 수와 비슷하게."
+    },
+    "django-3.12": {
+      "language": "Python",
+      "framework": "Django",
+      "version": "3.12",
+      "concurrency": {
+        "model": "process-pool",
+        "workers": 4
+      },
+      "connection_pool_per_replica": 5,
+      "notes": "gunicorn sync workers. 동시 처리 = workers 수. 권장: workers = (2×CPU) + 1."
+    },
+    "go-gin": {
+      "language": "Go",
+      "framework": "Gin",
+      "version": "1.22",
+      "concurrency": {
+        "model": "goroutine"
+      },
+      "connection_pool_per_replica": 25,
+      "notes": "goroutine은 사실상 무제한. CPU/메모리/DB pool이 실제 한계."
+    },
+    "go-echo": {
+      "language": "Go",
+      "framework": "Echo",
+      "version": "1.22",
+      "concurrency": {
+        "model": "goroutine"
+      },
+      "connection_pool_per_replica": 25
+    },
+    "nginx-static": {
+      "language": "Static",
+      "framework": "Nginx",
+      "version": "1.27",
+      "concurrency": {
+        "model": "event-loop",
+        "workers": 4
+      },
+      "notes": "정적 파일 서빙. worker_processes auto, worker_connections 기본 1024."
+    },
+    "postgres-16": {
+      "language": "Other",
+      "framework": "PostgreSQL",
+      "version": "16",
+      "max_connections": 100,
+      "notes": "기본 max_connections=100. PgBouncer로 프록시 권장. 단일 인스턴스 전제 (HA는 별도)."
+    },
+    "redis-7": {
+      "language": "Other",
+      "framework": "Redis",
+      "version": "7",
+      "max_connections": 10000,
+      "concurrency": {
+        "model": "event-loop"
+      },
+      "notes": "단일 스레드 명령 실행. 큰 키 / blocking 명령 주의."
+    },
+    "kafka-3.7": {
+      "language": "Other",
+      "framework": "Kafka",
+      "version": "3.7",
+      "notes": "처리량은 파티션 수와 broker 대수에 비례."
+    }
+  }
+}

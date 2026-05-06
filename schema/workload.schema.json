@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.vk8s.aiotool.net/v0.1/workload.json",
+  "$id": "https://schemas.vk8s.aiotool.net/v0.2/workload.json",
   "title": "Workload",
   "description": "클러스터에 배포되는 단일 서비스. Pod 그룹 (Deployment/StatefulSet 단위).",
   "type": "object",
@@ -26,6 +26,16 @@
         "Batch",
         "Other"
       ]
+    },
+    "namespace": {
+      "type": "string",
+      "default": "default",
+      "description": "k8s namespace. Cluster.namespaces[].name 중 하나여야 함 (validator가 검증)."
+    },
+    "labels": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "Pod 라벨. NetworkPolicy.pod_selector / Service selector / depends_on 매칭에 사용."
     },
     "replicas": {
       "type": "integer",
@@ -62,12 +72,11 @@
                 "count": { "type": "integer", "minimum": 1 },
                 "model": {
                   "type": "string",
-                  "description": "선택. 특정 GPU 모델 요구 시 (예: H100-SXM)"
+                  "description": "선택. 특정 GPU 모델 요구 (예: H100-SXM)"
                 },
                 "vram_gb": {
                   "type": "number",
-                  "exclusiveMinimum": 0,
-                  "description": "선택. 최소 VRAM 요구치"
+                  "exclusiveMinimum": 0
                 }
               }
             }
@@ -106,8 +115,6 @@
           }
         },
         "anti_affinity": {
-          "type": "string",
-          "description": "단순화. 'spread-by-node' | 'spread-by-zone' | 'none'.",
           "enum": ["spread-by-node", "spread-by-zone", "none"],
           "default": "none"
         }
@@ -132,6 +139,168 @@
           "size_gb": { "type": "number", "exclusiveMinimum": 0 },
           "storage_class": { "type": "string" },
           "access_mode": { "enum": ["RWO", "ROX", "RWX"], "default": "RWO" }
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "description": "런타임 프로파일. 병목 분석에 사용. data/runtime-profiles.json의 프리셋을 시드로 사용 가능.",
+      "additionalProperties": false,
+      "properties": {
+        "language": {
+          "enum": ["Java", "Kotlin", "Node.js", "Python", "Go", "Rust", "C#", "Static", "Other"]
+        },
+        "framework": {
+          "type": "string",
+          "description": "예: Spring-Boot, Spring-WebFlux, Express, Fastify, FastAPI, Django, Gin, Echo, ASP.NET, Nginx"
+        },
+        "version": {
+          "type": "string",
+          "description": "예: '17' (Java), '20' (Node), '3.12' (Python)"
+        },
+        "concurrency": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "model": {
+              "enum": ["thread-pool", "event-loop", "goroutine", "process-pool", "async-await"]
+            },
+            "max_threads": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "thread-pool 모델: Tomcat 기본 200, Jetty 기본 200"
+            },
+            "workers": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "process-pool 모델: gunicorn/uwsgi 워커 수"
+            },
+            "heap_gb": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "description": "JVM 등 GC 언어의 힙 크기"
+            }
+          }
+        },
+        "max_connections": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "DB/Cache류: 동시 수용 가능한 클라이언트 연결 (예: PostgreSQL max_connections)"
+        },
+        "connection_pool_per_replica": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "다른 워크로드를 호출할 때 사용하는 클라이언트 풀 크기 (예: HikariCP)"
+        }
+      }
+    },
+    "traffic_profile": {
+      "type": "object",
+      "description": "예상 트래픽. 병목 분석의 입력.",
+      "additionalProperties": false,
+      "properties": {
+        "target_rps": {
+          "type": "number",
+          "minimum": 0,
+          "description": "전체 워크로드 기준 초당 요청 수 (replicas 합산 기준)"
+        },
+        "avg_request_ms": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "p99_request_ms": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "keepalive": { "type": "boolean", "default": true },
+        "client_timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "이 워크로드를 호출하는 클라이언트의 타임아웃"
+        }
+      }
+    },
+    "depends_on": {
+      "type": "array",
+      "description": "이 워크로드가 호출하는 다운스트림. 의존성 그래프 + 트래픽 전파 + NetworkPolicy 검증.",
+      "items": {
+        "type": "object",
+        "required": ["target_workload_id"],
+        "additionalProperties": false,
+        "properties": {
+          "target_workload_id": { "type": "string" },
+          "protocol": {
+            "enum": ["HTTP", "gRPC", "TCP", "UDP", "AMQP", "Kafka", "JDBC", "Redis"],
+            "default": "HTTP"
+          },
+          "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+          "avg_call_ms": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "이 다운스트림 호출의 평균 응답 시간 (호출 측 관점)"
+          },
+          "fanout_pct": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100,
+            "default": 100,
+            "description": "들어온 요청 중 몇 %가 이 다운스트림을 호출하는가"
+          },
+          "calls_per_request": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 1,
+            "description": "한 요청당 이 다운스트림 호출 횟수 (N+1 등)"
+          }
+        }
+      }
+    },
+    "helm": {
+      "type": "object",
+      "description": "Helm export 메타. Workload 1개 = chart 1개 (또는 umbrella의 sub-chart).",
+      "additionalProperties": false,
+      "properties": {
+        "chart_name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$"
+        },
+        "chart_version": {
+          "type": "string",
+          "default": "0.1.0"
+        },
+        "image_repo": {
+          "type": "string",
+          "description": "예: registry.example.com/user-api"
+        },
+        "image_tag": {
+          "type": "string",
+          "default": "latest"
+        },
+        "expose": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "service": {
+              "enum": ["ClusterIP", "NodePort", "LoadBalancer", "None"],
+              "default": "ClusterIP"
+            },
+            "ingress": { "type": "boolean", "default": false },
+            "ingress_host": { "type": "string" },
+            "ports": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["port"],
+                "additionalProperties": false,
+                "properties": {
+                  "name": { "type": "string" },
+                  "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+                  "target_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+                  "protocol": { "enum": ["TCP", "UDP"], "default": "TCP" }
+                }
+              }
+            }
+          }
         }
       }
     }

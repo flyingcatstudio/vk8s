@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.vk8s.aiotool.net/v0.1/cluster.json",
+  "$id": "https://schemas.vk8s.aiotool.net/v0.2/cluster.json",
   "title": "Cluster",
   "description": "단일 k8s 클러스터. 노드 ID들을 묶고 워크로드를 호스트.",
   "type": "object",
@@ -29,7 +29,7 @@
       "type": "array",
       "uniqueItems": true,
       "items": { "type": "string" },
-      "description": "이 클러스터에 속한 Node.id 목록. 한 노드는 한 클러스터에만 속함."
+      "description": "이 클러스터에 속한 Node.id 목록. 한 노드는 한 클러스터에만."
     },
     "addons": {
       "type": "object",
@@ -40,21 +40,156 @@
         },
         "csi": {
           "type": "array",
-          "items": { "type": "string" },
-          "description": "예: ['ebs.csi.aws.com', 'rook-ceph']"
+          "items": { "type": "string" }
         },
         "ingress": {
           "enum": ["NGINX", "Traefik", "AWS-ALB", "Istio-Gateway", "None"]
         },
         "metrics_server": { "type": "boolean", "default": true },
-        "gpu_operator": {
-          "type": "boolean",
-          "default": false,
-          "description": "NVIDIA GPU Operator. GPU 노드 있으면 validator가 권장."
-        },
+        "gpu_operator": { "type": "boolean", "default": false },
         "service_mesh": {
           "enum": ["Istio", "Linkerd", "None"],
           "default": "None"
+        }
+      }
+    },
+    "namespaces": {
+      "type": "array",
+      "description": "클러스터의 namespace 정의. 워크로드는 이 중 하나에 배치.",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "description": { "type": "string" },
+          "labels": {
+            "type": "object",
+            "additionalProperties": { "type": "string" }
+          },
+          "default_deny": {
+            "type": "boolean",
+            "default": false,
+            "description": "true면 이 namespace에 default-deny ingress/egress NetworkPolicy 자동 생성. validator가 NP 누락 검증."
+          },
+          "resource_quota": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "cpu": { "type": "number", "minimum": 0 },
+              "memory_gb": { "type": "number", "minimum": 0 },
+              "gpu": { "type": "integer", "minimum": 0 },
+              "max_pods": { "type": "integer", "minimum": 1 }
+            }
+          }
+        }
+      }
+    },
+    "network_policies": {
+      "type": "array",
+      "description": "NetworkPolicy 정의. namespace 간/내 통신 제어.",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "namespace"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "name": { "type": "string" },
+          "namespace": {
+            "type": "string",
+            "description": "이 정책이 적용될 namespace"
+          },
+          "preset": {
+            "enum": ["default-deny", "allow-from-same-ns", "allow-from-ingress", "custom"],
+            "default": "custom",
+            "description": "프리셋 적용 시 ingress/egress 자동 생성. custom은 직접 정의."
+          },
+          "pod_selector": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "match_labels": {
+                "type": "object",
+                "additionalProperties": { "type": "string" },
+                "description": "비어 있으면 namespace 내 전체 pod"
+              }
+            }
+          },
+          "policy_types": {
+            "type": "array",
+            "items": { "enum": ["Ingress", "Egress"] },
+            "uniqueItems": true,
+            "default": ["Ingress"]
+          },
+          "ingress": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "from_namespaces": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "from_pod_labels": {
+                  "type": "object",
+                  "additionalProperties": { "type": "string" }
+                },
+                "from_cidrs": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "ports": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["port"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+                      "protocol": { "enum": ["TCP", "UDP"], "default": "TCP" }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "egress": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "to_namespaces": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "to_pod_labels": {
+                  "type": "object",
+                  "additionalProperties": { "type": "string" }
+                },
+                "to_cidrs": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "ports": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["port"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+                      "protocol": { "enum": ["TCP", "UDP"], "default": "TCP" }
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       }
     },

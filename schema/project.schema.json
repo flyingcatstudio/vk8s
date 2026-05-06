@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.vk8s.aiotool.net/v0.1/project.json",
+  "$id": "https://schemas.vk8s.aiotool.net/v0.2/project.json",
   "title": "vk8s Project",
   "description": "vk8s 프로젝트의 루트. 사이트, 노드, 클러스터, 워크로드를 모두 포함.",
   "type": "object",
@@ -8,8 +8,8 @@
   "additionalProperties": false,
   "properties": {
     "version": {
-      "const": "0.1",
-      "description": "스키마 버전. 마이그레이션 키."
+      "enum": ["0.2"],
+      "description": "스키마 버전. 마이그레이션 키. 0.1 프로젝트는 자동 마이그레이션 대상."
     },
     "name": {
       "type": "string",
