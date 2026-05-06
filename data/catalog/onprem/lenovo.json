@@ -1,0 +1,134 @@
+{
+  "$schema_version": "0.2",
+  "brand": "Lenovo",
+  "source": "onprem",
+  "notes": "Lenovo ThinkSystem V3 (2023~). IBM x86 사업은 2014년 Lenovo로 이전됨 — 'IBM 서버'는 현재 Lenovo로 표기.",
+  "entries": [
+    {
+      "key": "ThinkSystem-SR630-V3",
+      "brand": "Lenovo",
+      "source": "onprem",
+      "category": "General",
+      "display_name": "Lenovo ThinkSystem SR630 V3",
+      "generation": "V3",
+      "release_year": 2023,
+      "tags": ["1u", "general", "rack", "dual-socket"],
+      "notes": "1U 범용. 라이트 GPU(L4) 최대 3장.",
+      "spec": {
+        "vcpu": 64,
+        "memory_gb": 512,
+        "disks": [{ "size_gb": 960, "type": "NVMe", "count": 8 }],
+        "nics": [{ "speed_gbps": 25, "count": 2 }],
+        "form_factor": "1U",
+        "power": {
+          "psu_max_w": 1100,
+          "typical_w_base": 280,
+          "psu_redundancy": "1+1"
+        },
+        "gpu_chassis": {
+          "max_count": 3,
+          "supported_form_factors": ["PCIe-LP"],
+          "supported_models": ["L4"],
+          "nvlink_topology": "none"
+        },
+        "gpu": []
+      }
+    },
+    {
+      "key": "ThinkSystem-SR650-V3",
+      "brand": "Lenovo",
+      "source": "onprem",
+      "category": "General",
+      "display_name": "Lenovo ThinkSystem SR650 V3",
+      "generation": "V3",
+      "release_year": 2023,
+      "tags": ["2u", "general", "rack", "dual-socket"],
+      "notes": "2U 범용. 더블폭 PCIe-FH GPU 3장까지.",
+      "spec": {
+        "vcpu": 64,
+        "memory_gb": 1024,
+        "disks": [{ "size_gb": 1920, "type": "NVMe", "count": 8 }],
+        "nics": [{ "speed_gbps": 25, "count": 2 }],
+        "form_factor": "2U",
+        "power": {
+          "psu_max_w": 1800,
+          "typical_w_base": 400,
+          "psu_redundancy": "1+1"
+        },
+        "gpu_chassis": {
+          "max_count": 3,
+          "supported_form_factors": ["PCIe-FH", "PCIe-LP"],
+          "supported_models": ["L40S", "L4", "H100-PCIe", "A100-PCIe-80G"],
+          "nvlink_topology": "none"
+        },
+        "gpu": []
+      }
+    },
+    {
+      "key": "ThinkSystem-SR675-V3",
+      "brand": "Lenovo",
+      "source": "onprem",
+      "category": "GPU",
+      "display_name": "Lenovo ThinkSystem SR675 V3",
+      "generation": "V3",
+      "release_year": 2023,
+      "tags": ["3u", "gpu", "amd-epyc", "sxm", "pcie", "training"],
+      "notes": "3U AMD EPYC. SXM5 (HGX H100 4장) 또는 PCIe-FH 8장 옵션.",
+      "spec": {
+        "vcpu": 96,
+        "memory_gb": 1536,
+        "disks": [{ "size_gb": 1920, "type": "NVMe", "count": 8 }],
+        "nics": [
+          { "speed_gbps": 200, "count": 4, "interconnect": "InfiniBand" },
+          { "speed_gbps": 25, "count": 2 }
+        ],
+        "form_factor": "3U",
+        "power": {
+          "psu_max_w": 3200,
+          "typical_w_base": 800,
+          "psu_redundancy": "N+N"
+        },
+        "gpu_chassis": {
+          "max_count": 8,
+          "supported_form_factors": ["SXM", "PCIe-FH"],
+          "supported_models": ["H100-SXM", "H100-PCIe", "A100-PCIe-80G", "L40S"],
+          "nvlink_topology": "nvswitch-mesh"
+        },
+        "gpu": []
+      }
+    },
+    {
+      "key": "ThinkSystem-SR685a-V3",
+      "brand": "Lenovo",
+      "source": "onprem",
+      "category": "GPU",
+      "display_name": "Lenovo ThinkSystem SR685a V3",
+      "generation": "V3",
+      "release_year": 2024,
+      "tags": ["8u", "gpu", "amd-epyc", "sxm", "h200", "training", "liquid-ready"],
+      "notes": "8U AMD EPYC. HGX H200 SXM 8장. 대규모 LLM 훈련. 액냉 옵션.",
+      "spec": {
+        "vcpu": 192,
+        "memory_gb": 2304,
+        "disks": [{ "size_gb": 3840, "type": "NVMe", "count": 8 }],
+        "nics": [
+          { "speed_gbps": 400, "count": 8, "interconnect": "InfiniBand" },
+          { "speed_gbps": 100, "count": 2 }
+        ],
+        "form_factor": "8U",
+        "power": {
+          "psu_max_w": 12000,
+          "typical_w_base": 3000,
+          "psu_redundancy": "N+N"
+        },
+        "gpu_chassis": {
+          "max_count": 8,
+          "supported_form_factors": ["SXM"],
+          "supported_models": ["H100-SXM", "H200-SXM"],
+          "nvlink_topology": "nvswitch-mesh"
+        },
+        "gpu": []
+      }
+    }
+  ]
+}

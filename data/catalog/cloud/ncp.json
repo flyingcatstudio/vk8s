@@ -1,0 +1,124 @@
+{
+  "$schema_version": "0.2",
+  "brand": "NCP",
+  "source": "cloud",
+  "notes": "Naver Cloud Platform. NCP 서버 스펙은 제너레이션과 리전마다 차이가 있어 주문 전 콘솔에서 재확인 권장. v0.1은 대표 라인업만 포함.",
+  "entries": [
+    {
+      "key": "ncp-standard-g3-8c-32g",
+      "brand": "NCP",
+      "source": "cloud",
+      "category": "General",
+      "display_name": "NCP Standard g3 8c/32g",
+      "generation": "g3",
+      "release_year": 2023,
+      "tags": ["general", "vpc"],
+      "notes": "VPC 환경 g3 세대 범용 인스턴스. 일반 Web/API.",
+      "spec": {
+        "vcpu": 8,
+        "memory_gb": 32,
+        "nics": [{ "speed_gbps": 10, "count": 1 }]
+      }
+    },
+    {
+      "key": "ncp-standard-g3-16c-64g",
+      "brand": "NCP",
+      "source": "cloud",
+      "category": "General",
+      "display_name": "NCP Standard g3 16c/64g",
+      "generation": "g3",
+      "release_year": 2023,
+      "tags": ["general", "vpc"],
+      "spec": {
+        "vcpu": 16,
+        "memory_gb": 64,
+        "nics": [{ "speed_gbps": 10, "count": 1 }]
+      }
+    },
+    {
+      "key": "ncp-standard-g3-32c-128g",
+      "brand": "NCP",
+      "source": "cloud",
+      "category": "General",
+      "display_name": "NCP Standard g3 32c/128g",
+      "generation": "g3",
+      "release_year": 2023,
+      "tags": ["general", "vpc"],
+      "spec": {
+        "vcpu": 32,
+        "memory_gb": 128,
+        "nics": [{ "speed_gbps": 25, "count": 1 }]
+      }
+    },
+    {
+      "key": "ncp-cpu-intensive-16c-32g",
+      "brand": "NCP",
+      "source": "cloud",
+      "category": "Compute",
+      "display_name": "NCP CPU Intensive 16c/32g",
+      "tags": ["compute", "high-cpu"],
+      "notes": "CPU 집약 워크로드. 코어 대비 메모리 비율 낮음.",
+      "spec": {
+        "vcpu": 16,
+        "memory_gb": 32,
+        "nics": [{ "speed_gbps": 10, "count": 1 }]
+      }
+    },
+    {
+      "key": "ncp-mem-intensive-16c-128g",
+      "brand": "NCP",
+      "source": "cloud",
+      "category": "Memory",
+      "display_name": "NCP Memory Intensive 16c/128g",
+      "tags": ["memory", "high-memory"],
+      "spec": {
+        "vcpu": 16,
+        "memory_gb": 128,
+        "nics": [{ "speed_gbps": 10, "count": 1 }]
+      }
+    },
+    {
+      "key": "ncp-gpu-t4-1",
+      "brand": "NCP",
+      "source": "cloud",
+      "category": "GPU",
+      "display_name": "NCP GPU T4 ×1 (16c/64g)",
+      "release_year": 2022,
+      "tags": ["gpu", "t4", "inference"],
+      "notes": "T4 1장 라이트 추론. 실제 제공 옵션은 콘솔에서 확인.",
+      "spec": {
+        "vcpu": 16,
+        "memory_gb": 64,
+        "nics": [{ "speed_gbps": 10, "count": 1 }],
+        "gpu_chassis": {
+          "max_count": 1,
+          "supported_form_factors": ["PCIe-LP"],
+          "supported_models": ["L4"],
+          "nvlink_topology": "none"
+        },
+        "gpu": [{ "model": "L4", "form_factor": "PCIe-LP", "count": 1 }]
+      }
+    },
+    {
+      "key": "ncp-gpu-a100-8",
+      "brand": "NCP",
+      "source": "cloud",
+      "category": "GPU",
+      "display_name": "NCP GPU A100 ×8 (HGX)",
+      "tags": ["gpu", "a100", "training", "sxm"],
+      "notes": "HGX A100 8장. 대규모 학습. 제공 가능 리전 제한적일 수 있음.",
+      "spec": {
+        "vcpu": 96,
+        "memory_gb": 1024,
+        "nics": [{ "speed_gbps": 100, "count": 1 }],
+        "gpu_chassis": {
+          "max_count": 8,
+          "supported_form_factors": ["SXM"],
+          "supported_models": ["A100-SXM-80G"],
+          "nvlink_topology": "nvswitch-mesh"
+        },
+        "gpu": [{ "model": "A100-SXM-80G", "form_factor": "SXM", "count": 8, "nvlink_enabled": true }]
+      }
+    }
+  ]
+}

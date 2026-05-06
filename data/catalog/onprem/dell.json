@@ -1,0 +1,164 @@
+{
+  "$schema_version": "0.2",
+  "brand": "Dell",
+  "source": "onprem",
+  "notes": "Dell PowerEdge 16세대 (2023~). 스펙은 공개 자료 기준 대표값이며, 실제 주문 옵션에 따라 달라질 수 있음.",
+  "entries": [
+    {
+      "key": "PowerEdge-R660",
+      "brand": "Dell",
+      "source": "onprem",
+      "category": "General",
+      "display_name": "Dell PowerEdge R660",
+      "generation": "16G",
+      "release_year": 2023,
+      "tags": ["1u", "general", "rack", "dual-socket"],
+      "notes": "범용 1U 서버. GPU 미지원. 일반 워크로드(Web/API/DB) 호스팅에 적합.",
+      "spec": {
+        "vcpu": 64,
+        "memory_gb": 512,
+        "disks": [{ "size_gb": 960, "type": "NVMe", "count": 8 }],
+        "nics": [{ "speed_gbps": 25, "count": 2 }],
+        "form_factor": "1U",
+        "power": {
+          "psu_max_w": 1400,
+          "typical_w_base": 300,
+          "psu_redundancy": "1+1"
+        },
+        "gpu_chassis": {
+          "max_count": 0,
+          "supported_form_factors": [],
+          "supported_models": [],
+          "nvlink_topology": "none"
+        },
+        "gpu": []
+      }
+    },
+    {
+      "key": "PowerEdge-R760",
+      "brand": "Dell",
+      "source": "onprem",
+      "category": "General",
+      "display_name": "Dell PowerEdge R760",
+      "generation": "16G",
+      "release_year": 2023,
+      "tags": ["2u", "general", "rack", "dual-socket", "gpu-light"],
+      "notes": "범용 2U. 라이트 GPU(L4/L40S 1-2장)까지 가능. 고밀도 GPU는 R760xa 권장.",
+      "spec": {
+        "vcpu": 64,
+        "memory_gb": 1024,
+        "disks": [{ "size_gb": 1920, "type": "NVMe", "count": 8 }],
+        "nics": [{ "speed_gbps": 25, "count": 2 }],
+        "form_factor": "2U",
+        "power": {
+          "psu_max_w": 1800,
+          "typical_w_base": 400,
+          "psu_redundancy": "1+1"
+        },
+        "gpu_chassis": {
+          "max_count": 3,
+          "supported_form_factors": ["PCIe-FH", "PCIe-LP"],
+          "supported_models": ["L40S", "L4", "H100-PCIe", "A100-PCIe-80G"],
+          "nvlink_topology": "none"
+        },
+        "gpu": []
+      }
+    },
+    {
+      "key": "PowerEdge-R760xa",
+      "brand": "Dell",
+      "source": "onprem",
+      "category": "GPU",
+      "display_name": "Dell PowerEdge R760xa",
+      "generation": "16G",
+      "release_year": 2023,
+      "tags": ["2u", "gpu", "pcie", "nvlink-bridge", "inference"],
+      "notes": "2U GPU 가속 서버. 4× 더블폭 PCIe-FH GPU. NVLink는 Bridge로 2장 페어링.",
+      "spec": {
+        "vcpu": 64,
+        "memory_gb": 1024,
+        "disks": [{ "size_gb": 1920, "type": "NVMe", "count": 4 }],
+        "nics": [{ "speed_gbps": 100, "count": 2 }],
+        "form_factor": "2U",
+        "power": {
+          "psu_max_w": 2400,
+          "typical_w_base": 500,
+          "psu_redundancy": "N+N"
+        },
+        "gpu_chassis": {
+          "max_count": 4,
+          "supported_form_factors": ["PCIe-FH"],
+          "supported_models": ["H100-PCIe", "A100-PCIe-80G", "L40S"],
+          "nvlink_topology": "bridge-pair"
+        },
+        "gpu": []
+      }
+    },
+    {
+      "key": "PowerEdge-XE8640",
+      "brand": "Dell",
+      "source": "onprem",
+      "category": "GPU",
+      "display_name": "Dell PowerEdge XE8640",
+      "generation": "16G",
+      "release_year": 2023,
+      "tags": ["4u", "gpu", "sxm", "hgx", "training"],
+      "notes": "4U HGX H100 4장 (SXM5, NVSwitch). 공냉. 훈련/추론 모두.",
+      "spec": {
+        "vcpu": 112,
+        "memory_gb": 2048,
+        "disks": [{ "size_gb": 3840, "type": "NVMe", "count": 8 }],
+        "nics": [
+          { "speed_gbps": 200, "count": 4, "interconnect": "InfiniBand" },
+          { "speed_gbps": 25, "count": 2 }
+        ],
+        "form_factor": "4U",
+        "power": {
+          "psu_max_w": 3200,
+          "typical_w_base": 1500,
+          "psu_redundancy": "N+N"
+        },
+        "gpu_chassis": {
+          "max_count": 4,
+          "supported_form_factors": ["SXM"],
+          "supported_models": ["H100-SXM"],
+          "nvlink_topology": "nvswitch-mesh"
+        },
+        "gpu": []
+      }
+    },
+    {
+      "key": "PowerEdge-XE9680",
+      "brand": "Dell",
+      "source": "onprem",
+      "category": "GPU",
+      "display_name": "Dell PowerEdge XE9680",
+      "generation": "16G",
+      "release_year": 2023,
+      "tags": ["6u", "gpu", "sxm", "hgx", "training", "h200"],
+      "notes": "6U HGX 8장 (H100 또는 H200 SXM5). NVSwitch 풀 메시. 대규모 LLM 훈련의 표준 노드.",
+      "spec": {
+        "vcpu": 112,
+        "memory_gb": 2048,
+        "disks": [{ "size_gb": 3840, "type": "NVMe", "count": 8 }],
+        "nics": [
+          { "speed_gbps": 400, "count": 8, "interconnect": "InfiniBand" },
+          { "speed_gbps": 100, "count": 2 }
+        ],
+        "form_factor": "6U",
+        "power": {
+          "psu_max_w": 10800,
+          "typical_w_base": 2500,
+          "psu_redundancy": "N+N"
+        },
+        "gpu_chassis": {
+          "max_count": 8,
+          "supported_form_factors": ["SXM"],
+          "supported_models": ["H100-SXM", "H200-SXM"],
+          "nvlink_topology": "nvswitch-mesh"
+        },
+        "gpu": []
+      }
+    }
+  ]
+}

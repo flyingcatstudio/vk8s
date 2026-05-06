@@ -1,0 +1,222 @@
+{
+  "$schema_version": "0.2",
+  "brand": "AWS",
+  "source": "cloud",
+  "notes": "AWS EC2 대표 인스턴스 타입. cloud는 form_factor/power 미설정 (관련 없음). GPU 인스턴스의 GPU 구성은 고정 (사용자 변경 불가).",
+  "entries": [
+    {
+      "key": "m6i.4xlarge",
+      "brand": "AWS",
+      "source": "cloud",
+      "category": "General",
+      "display_name": "AWS m6i.4xlarge",
+      "generation": "Ice Lake",
+      "release_year": 2021,
+      "tags": ["general", "intel", "ebs"],
+      "notes": "범용 인스턴스. 대부분의 Web/API/WAS 워크로드에 적합. EBS 부착.",
+      "spec": {
+        "vcpu": 16,
+        "memory_gb": 64,
+        "nics": [{ "speed_gbps": 12.5, "count": 1 }]
+      }
+    },
+    {
+      "key": "m6i.12xlarge",
+      "brand": "AWS",
+      "source": "cloud",
+      "category": "General",
+      "display_name": "AWS m6i.12xlarge",
+      "generation": "Ice Lake",
+      "release_year": 2021,
+      "tags": ["general", "intel"],
+      "spec": {
+        "vcpu": 48,
+        "memory_gb": 192,
+        "nics": [{ "speed_gbps": 18.75, "count": 1 }]
+      }
+    },
+    {
+      "key": "c7i.8xlarge",
+      "brand": "AWS",
+      "source": "cloud",
+      "category": "Compute",
+      "display_name": "AWS c7i.8xlarge",
+      "generation": "Sapphire Rapids",
+      "release_year": 2023,
+      "tags": ["compute", "intel", "high-cpu"],
+      "notes": "CPU 집약 워크로드 (배치, 미디어 인코딩 등).",
+      "spec": {
+        "vcpu": 32,
+        "memory_gb": 64,
+        "nics": [{ "speed_gbps": 12.5, "count": 1 }]
+      }
+    },
+    {
+      "key": "r7i.4xlarge",
+      "brand": "AWS",
+      "source": "cloud",
+      "category": "Memory",
+      "display_name": "AWS r7i.4xlarge",
+      "generation": "Sapphire Rapids",
+      "release_year": 2023,
+      "tags": ["memory", "intel", "in-memory-db", "cache"],
+      "notes": "메모리 집약. Redis/Memcached/in-memory analytics.",
+      "spec": {
+        "vcpu": 16,
+        "memory_gb": 128,
+        "nics": [{ "speed_gbps": 12.5, "count": 1 }]
+      }
+    },
+    {
+      "key": "r7i.16xlarge",
+      "brand": "AWS",
+      "source": "cloud",
+      "category": "Memory",
+      "display_name": "AWS r7i.16xlarge",
+      "generation": "Sapphire Rapids",
+      "release_year": 2023,
+      "tags": ["memory", "intel"],
+      "spec": {
+        "vcpu": 64,
+        "memory_gb": 512,
+        "nics": [{ "speed_gbps": 25, "count": 1 }]
+      }
+    },
+    {
+      "key": "i4i.8xlarge",
+      "brand": "AWS",
+      "source": "cloud",
+      "category": "Storage",
+      "display_name": "AWS i4i.8xlarge",
+      "generation": "Ice Lake",
+      "release_year": 2022,
+      "tags": ["storage", "nvme", "local"],
+      "notes": "로컬 NVMe SSD. 고IOPS DB/검색 인덱스.",
+      "spec": {
+        "vcpu": 32,
+        "memory_gb": 256,
+        "disks": [{ "size_gb": 1875, "type": "NVMe", "count": 4, "iops_hint": 220000 }],
+        "nics": [{ "speed_gbps": 18.75, "count": 1 }]
+      }
+    },
+    {
+      "key": "g6.4xlarge",
+      "brand": "AWS",
+      "source": "cloud",
+      "category": "GPU",
+      "display_name": "AWS g6.4xlarge (1× L4)",
+      "generation": "Ada Lovelace",
+      "release_year": 2024,
+      "tags": ["gpu", "l4", "inference", "video"],
+      "notes": "L4 1장. 라이트 ML 추론, 비디오 인코딩, 그래픽.",
+      "spec": {
+        "vcpu": 16,
+        "memory_gb": 64,
+        "disks": [{ "size_gb": 600, "type": "NVMe", "count": 1 }],
+        "nics": [{ "speed_gbps": 25, "count": 1 }],
+        "gpu_chassis": {
+          "max_count": 1,
+          "supported_form_factors": ["PCIe-LP"],
+          "supported_models": ["L4"],
+          "nvlink_topology": "none"
+        },
+        "gpu": [{ "model": "L4", "form_factor": "PCIe-LP", "count": 1 }]
+      }
+    },
+    {
+      "key": "g6.12xlarge",
+      "brand": "AWS",
+      "source": "cloud",
+      "category": "GPU",
+      "display_name": "AWS g6.12xlarge (4× L4)",
+      "generation": "Ada Lovelace",
+      "release_year": 2024,
+      "tags": ["gpu", "l4", "inference", "multi-gpu"],
+      "spec": {
+        "vcpu": 48,
+        "memory_gb": 192,
+        "disks": [{ "size_gb": 1800, "type": "NVMe", "count": 1 }],
+        "nics": [{ "speed_gbps": 40, "count": 1 }],
+        "gpu_chassis": {
+          "max_count": 4,
+          "supported_form_factors": ["PCIe-LP"],
+          "supported_models": ["L4"],
+          "nvlink_topology": "none"
+        },
+        "gpu": [{ "model": "L4", "form_factor": "PCIe-LP", "count": 4 }]
+      }
+    },
+    {
+      "key": "p4d.24xlarge",
+      "brand": "AWS",
+      "source": "cloud",
+      "category": "GPU",
+      "display_name": "AWS p4d.24xlarge (8× A100 40GB)",
+      "generation": "Ampere",
+      "release_year": 2020,
+      "tags": ["gpu", "a100", "training", "sxm"],
+      "notes": "HGX A100 8장 (40GB SXM4). EFA 400 Gbps.",
+      "spec": {
+        "vcpu": 96,
+        "memory_gb": 1152,
+        "disks": [{ "size_gb": 1000, "type": "NVMe", "count": 8 }],
+        "nics": [{ "speed_gbps": 400, "count": 1, "interconnect": "Ethernet" }],
+        "gpu_chassis": {
+          "max_count": 8,
+          "supported_form_factors": ["SXM"],
+          "supported_models": ["A100-SXM-80G"],
+          "nvlink_topology": "nvswitch-mesh"
+        },
+        "gpu": [{ "model": "A100-SXM-80G", "form_factor": "SXM", "count": 8, "nvlink_enabled": true }]
+      }
+    },
+    {
+      "key": "p5.48xlarge",
+      "brand": "AWS",
+      "source": "cloud",
+      "category": "GPU",
+      "display_name": "AWS p5.48xlarge (8× H100 80GB)",
+      "generation": "Hopper",
+      "release_year": 2023,
+      "tags": ["gpu", "h100", "training", "sxm", "efa"],
+      "notes": "HGX H100 8장 (80GB SXM5, NVSwitch). EFA 3200 Gbps. 대규모 LLM 훈련.",
+      "spec": {
+        "vcpu": 192,
+        "memory_gb": 2048,
+        "disks": [{ "size_gb": 3840, "type": "NVMe", "count": 8 }],
+        "nics": [{ "speed_gbps": 3200, "count": 1, "interconnect": "Ethernet" }],
+        "gpu_chassis": {
+          "max_count": 8,
+          "supported_form_factors": ["SXM"],
+          "supported_models": ["H100-SXM"],
+          "nvlink_topology": "nvswitch-mesh"
+        },
+        "gpu": [{ "model": "H100-SXM", "form_factor": "SXM", "count": 8, "nvlink_enabled": true }]
+      }
+    },
+    {
+      "key": "p5e.48xlarge",
+      "brand": "AWS",
+      "source": "cloud",
+      "category": "GPU",
+      "display_name": "AWS p5e.48xlarge (8× H200 141GB)",
+      "generation": "Hopper",
+      "release_year": 2024,
+      "tags": ["gpu", "h200", "training", "sxm", "efa"],
+      "notes": "HGX H200 8장 (141GB SXM5, NVSwitch). EFA. p5 대비 VRAM ~80%↑.",
+      "spec": {
+        "vcpu": 192,
+        "memory_gb": 2048,
+        "disks": [{ "size_gb": 3840, "type": "NVMe", "count": 8 }],
+        "nics": [{ "speed_gbps": 3200, "count": 1, "interconnect": "Ethernet" }],
+        "gpu_chassis": {
+          "max_count": 8,
+          "supported_form_factors": ["SXM"],
+          "supported_models": ["H200-SXM"],
+          "nvlink_topology": "nvswitch-mesh"
+        },
+        "gpu": [{ "model": "H200-SXM", "form_factor": "SXM", "count": 8, "nvlink_enabled": true }]
+      }
+    }
+  ]
+}

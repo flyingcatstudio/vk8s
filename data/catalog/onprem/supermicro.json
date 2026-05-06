@@ -1,0 +1,104 @@
+{
+  "$schema_version": "0.2",
+  "brand": "Supermicro",
+  "source": "onprem",
+  "notes": "Supermicro GPU SuperServer 라인. v0.1에서는 GPU 시스템만 등재 (범용 1U/2U는 다른 브랜드 사용 가정).",
+  "entries": [
+    {
+      "key": "AS-4125GS-TNRT",
+      "brand": "Supermicro",
+      "source": "onprem",
+      "category": "GPU",
+      "display_name": "Supermicro AS-4125GS-TNRT",
+      "generation": "X13",
+      "release_year": 2023,
+      "tags": ["4u", "gpu", "amd-epyc", "pcie", "h100-nvl", "h200-nvl"],
+      "notes": "4U AMD EPYC. 8× 더블폭 PCIe GPU (H100 NVL/H200 NVL/L40S). NVLink Bridge 페어링.",
+      "spec": {
+        "vcpu": 96,
+        "memory_gb": 1536,
+        "disks": [{ "size_gb": 3840, "type": "NVMe", "count": 8 }],
+        "nics": [{ "speed_gbps": 200, "count": 4, "interconnect": "InfiniBand" }],
+        "form_factor": "4U",
+        "power": {
+          "psu_max_w": 6600,
+          "typical_w_base": 1500,
+          "psu_redundancy": "N+N"
+        },
+        "gpu_chassis": {
+          "max_count": 8,
+          "supported_form_factors": ["PCIe-FH"],
+          "supported_models": ["H100-PCIe", "A100-PCIe-80G", "L40S"],
+          "nvlink_topology": "bridge-pair"
+        },
+        "gpu": []
+      }
+    },
+    {
+      "key": "SYS-821GE-TNHR",
+      "brand": "Supermicro",
+      "source": "onprem",
+      "category": "GPU",
+      "display_name": "Supermicro SYS-821GE-TNHR (HGX H100)",
+      "generation": "X13",
+      "release_year": 2023,
+      "tags": ["8u", "gpu", "sxm", "hgx", "h100", "training"],
+      "notes": "8U HGX H100 8장 (SXM5, NVSwitch). Intel Xeon. 대규모 LLM 훈련 표준.",
+      "spec": {
+        "vcpu": 112,
+        "memory_gb": 2048,
+        "disks": [{ "size_gb": 3840, "type": "NVMe", "count": 16 }],
+        "nics": [
+          { "speed_gbps": 400, "count": 8, "interconnect": "InfiniBand" },
+          { "speed_gbps": 100, "count": 2 }
+        ],
+        "form_factor": "8U",
+        "power": {
+          "psu_max_w": 10000,
+          "typical_w_base": 2400,
+          "psu_redundancy": "N+N"
+        },
+        "gpu_chassis": {
+          "max_count": 8,
+          "supported_form_factors": ["SXM"],
+          "supported_models": ["H100-SXM"],
+          "nvlink_topology": "nvswitch-mesh"
+        },
+        "gpu": []
+      }
+    },
+    {
+      "key": "SYS-821GV-TNR",
+      "brand": "Supermicro",
+      "source": "onprem",
+      "category": "GPU",
+      "display_name": "Supermicro SYS-821GV-TNR (HGX H200)",
+      "generation": "X13",
+      "release_year": 2024,
+      "tags": ["8u", "gpu", "sxm", "hgx", "h200", "training", "liquid-ready"],
+      "notes": "8U HGX H200 8장 (SXM5, NVSwitch). H100 대비 VRAM 80GB→141GB. 액냉 옵션.",
+      "spec": {
+        "vcpu": 112,
+        "memory_gb": 2048,
+        "disks": [{ "size_gb": 3840, "type": "NVMe", "count": 16 }],
+        "nics": [
+          { "speed_gbps": 400, "count": 8, "interconnect": "InfiniBand" },
+          { "speed_gbps": 100, "count": 2 }
+        ],
+        "form_factor": "8U",
+        "power": {
+          "psu_max_w": 12000,
+          "typical_w_base": 2700,
+          "psu_redundancy": "N+N"
+        },
+        "gpu_chassis": {
+          "max_count": 8,
+          "supported_form_factors": ["SXM"],
+          "supported_models": ["H100-SXM", "H200-SXM"],
+          "nvlink_topology": "nvswitch-mesh"
+        },
+        "gpu": []
+      }
+    }
+  ]
+}
