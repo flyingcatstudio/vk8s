@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vk8s.aiotool.net/v0.1/node-spec.json",
+  "title": "Node Spec",
+  "description": "노드 하드웨어 스펙. Node와 CatalogEntry가 공유하는 정의.",
+  "type": "object",
+  "required": ["vcpu", "memory_gb"],
+  "additionalProperties": false,
+  "properties": {
+    "vcpu": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "vCPU 코어 수 (cloud) 또는 물리 코어×스레드 (onprem)"
+    },
+    "memory_gb": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "총 메모리 (GiB)"
+    },
+    "disks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["size_gb", "type"],
+        "additionalProperties": false,
+        "properties": {
+          "size_gb": { "type": "number", "exclusiveMinimum": 0 },
+          "type": { "enum": ["NVMe", "SSD", "HDD"] },
+          "iops_hint": { "type": "integer", "minimum": 0 },
+          "count": { "type": "integer", "minimum": 1, "default": 1 }
+        }
+      }
+    },
+    "nics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["speed_gbps"],
+        "additionalProperties": false,
+        "properties": {
+          "speed_gbps": { "type": "number", "exclusiveMinimum": 0 },
+          "count": { "type": "integer", "minimum": 1, "default": 1 },
+          "interconnect": {
+            "enum": ["Ethernet", "InfiniBand", "RoCE"],
+            "default": "Ethernet"
+          }
+        }
+      }
+    },
+    "form_factor": {
+      "description": "랙 점유 단위. onprem 전용 (cloud는 미설정).",
+      "enum": ["1U", "2U", "3U", "4U", "5U", "6U", "8U", "Tower"]
+    },
+    "power": {
+      "type": "object",
+      "description": "전력 정보. onprem 전용.",
+      "additionalProperties": false,
+      "properties": {
+        "psu_max_w": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "PSU 정격 합계 (W)"
+        },
+        "typical_w_base": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "GPU 미장착 베이스 부하 (W). GPU TDP는 별도 합산."
+        },
+        "psu_redundancy": {
+          "enum": ["none", "1+1", "N+1", "N+N"],
+          "default": "none"
+        }
+      }
+    },
+    "gpu_chassis": {
+      "type": "object",
+      "description": "이 새시가 받아줄 수 있는 GPU 호환성 정의. 카탈로그가 채움.",
+      "additionalProperties": false,
+      "properties": {
+        "max_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "장착 가능한 최대 GPU 수. 0이면 GPU 미지원."
+        },
+        "supported_form_factors": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["SXM", "PCIe-FH", "PCIe-LP"] }
+        },
+        "supported_models": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string" },
+          "description": "gpu-models.json의 키 목록"
+        },
+        "nvlink_topology": {
+          "enum": ["none", "bridge-pair", "nvswitch-mesh"],
+          "default": "none"
+        }
+      }
+    },
+    "gpu": {
+      "type": "array",
+      "description": "실제 장착된 GPU 구성. Validator가 gpu_chassis와 대조.",
+      "items": {
+        "type": "object",
+        "required": ["model", "count"],
+        "additionalProperties": false,
+        "properties": {
+          "model": {
+            "type": "string",
+            "description": "gpu-models.json 키 (예: H200-SXM, A100-PCIe-80G)"
+          },
+          "form_factor": { "enum": ["SXM", "PCIe-FH", "PCIe-LP"] },
+          "count": { "type": "integer", "minimum": 1 },
+          "nvlink_enabled": { "type": "boolean", "default": false }
+        }
+      }
+    }
+  }
+}

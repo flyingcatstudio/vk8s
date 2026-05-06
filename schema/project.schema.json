@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vk8s.aiotool.net/v0.1/project.json",
+  "title": "vk8s Project",
+  "description": "vk8s 프로젝트의 루트. 사이트, 노드, 클러스터, 워크로드를 모두 포함.",
+  "type": "object",
+  "required": ["version", "name", "mode", "sites", "clusters"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "const": "0.1",
+      "description": "스키마 버전. 마이그레이션 키."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "description": { "type": "string" },
+    "mode": {
+      "enum": ["onprem", "cloud", "hybrid"],
+      "description": "프로젝트 모드. onprem이면 cloud Site 추가 불가, 그 반대도 동일. hybrid는 둘 다 허용."
+    },
+    "sites": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "site.json" }
+    },
+    "nodes": {
+      "type": "array",
+      "items": { "$ref": "node.json" },
+      "description": "프로젝트의 모든 노드. site_id로 사이트와 연결."
+    },
+    "clusters": {
+      "type": "array",
+      "items": { "$ref": "cluster.json" }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "created_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" },
+        "author": { "type": "string" }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "mode": { "const": "onprem" } }, "required": ["mode"] },
+      "then": {
+        "properties": {
+          "sites": {
+            "type": "array",
+            "items": { "properties": { "kind": { "const": "onprem" } } }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "mode": { "const": "cloud" } }, "required": ["mode"] },
+      "then": {
+        "properties": {
+          "sites": {
+            "type": "array",
+            "items": { "properties": { "kind": { "const": "cloud" } } }
+          }
+        }
+      }
+    }
+  ]
+}

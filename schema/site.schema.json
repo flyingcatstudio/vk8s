@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vk8s.aiotool.net/v0.1/site.json",
+  "title": "Site",
+  "description": "배포 환경 단위. onprem이면 IDC 1개, cloud면 region 1개에 해당.",
+  "type": "object",
+  "required": ["id", "name", "kind"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "name": { "type": "string" },
+    "kind": {
+      "enum": ["onprem", "cloud"],
+      "description": "Site 유형"
+    },
+    "cloud_provider": {
+      "description": "kind=cloud일 때 사용",
+      "enum": ["AWS", "NCP", "Azure", "GCP"]
+    },
+    "region": {
+      "type": "string",
+      "description": "예: ap-northeast-2, KR-1, koreacentral"
+    },
+    "capacity": {
+      "type": "object",
+      "description": "onprem 전용. cloud Site는 무시됨 (사실상 무한).",
+      "additionalProperties": false,
+      "properties": {
+        "rack_units": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "사용 가능한 총 U (예: 42U×2랙 = 84)"
+        },
+        "power_kw": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "PDU 전력 예산 (kW). N+N 중복이면 단일 회로 기준."
+        },
+        "cooling_kw": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "냉방 capacity (kW). 미지정시 power_kw로 추정."
+        }
+      }
+    },
+    "node_ids": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "이 Site에 위치한 노드의 id 목록. Node.site_id와 양방향 일치."
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "kind": { "const": "cloud" } }, "required": ["kind"] },
+      "then": { "required": ["cloud_provider"] }
+    }
+  ]
+}

@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vk8s.aiotool.net/v0.1/workload.json",
+  "title": "Workload",
+  "description": "클러스터에 배포되는 단일 서비스. Pod 그룹 (Deployment/StatefulSet 단위).",
+  "type": "object",
+  "required": ["id", "name", "category", "replicas", "resources"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "name": { "type": "string" },
+    "category": {
+      "enum": [
+        "Frontend",
+        "API",
+        "WAS",
+        "DB",
+        "Cache",
+        "Queue",
+        "ML-Inference",
+        "ML-Training",
+        "Video",
+        "Batch",
+        "Other"
+      ]
+    },
+    "replicas": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "kind": {
+      "enum": ["Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"],
+      "default": "Deployment"
+    },
+    "resources": {
+      "type": "object",
+      "required": ["requests"],
+      "additionalProperties": false,
+      "properties": {
+        "requests": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cpu": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "description": "코어 단위 (k8s milli-CPU의 1000분의 1)"
+            },
+            "memory_gb": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "storage_gb": { "type": "number", "minimum": 0 },
+            "gpu": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["count"],
+              "properties": {
+                "count": { "type": "integer", "minimum": 1 },
+                "model": {
+                  "type": "string",
+                  "description": "선택. 특정 GPU 모델 요구 시 (예: H100-SXM)"
+                },
+                "vram_gb": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "description": "선택. 최소 VRAM 요구치"
+                }
+              }
+            }
+          }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cpu": { "type": "number", "exclusiveMinimum": 0 },
+            "memory_gb": { "type": "number", "exclusiveMinimum": 0 }
+          }
+        }
+      }
+    },
+    "scheduling": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "node_selector": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "tolerations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["key"],
+            "additionalProperties": false,
+            "properties": {
+              "key": { "type": "string" },
+              "operator": { "enum": ["Equal", "Exists"], "default": "Equal" },
+              "value": { "type": "string" },
+              "effect": { "enum": ["NoSchedule", "PreferNoSchedule", "NoExecute"] }
+            }
+          }
+        },
+        "anti_affinity": {
+          "type": "string",
+          "description": "단순화. 'spread-by-node' | 'spread-by-zone' | 'none'.",
+          "enum": ["spread-by-node", "spread-by-zone", "none"],
+          "default": "none"
+        }
+      }
+    },
+    "hpa": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "min": { "type": "integer", "minimum": 1 },
+        "max": { "type": "integer", "minimum": 1 },
+        "cpu_target_pct": { "type": "integer", "minimum": 1, "maximum": 100 }
+      }
+    },
+    "persistent_volumes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["size_gb"],
+        "additionalProperties": false,
+        "properties": {
+          "size_gb": { "type": "number", "exclusiveMinimum": 0 },
+          "storage_class": { "type": "string" },
+          "access_mode": { "enum": ["RWO", "ROX", "RWX"], "default": "RWO" }
+        }
+      }
+    }
+  }
+}

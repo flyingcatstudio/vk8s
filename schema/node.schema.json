@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vk8s.aiotool.net/v0.1/node.json",
+  "title": "Node",
+  "description": "프로젝트에 배치된 단일 서버/인스턴스. 카탈로그에서 시드되거나 사용자 커스텀.",
+  "type": "object",
+  "required": ["id", "source", "brand", "model", "spec"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "description": "프로젝트 내 고유 ID"
+    },
+    "name": { "type": "string" },
+    "source": {
+      "enum": ["onprem", "cloud"],
+      "description": "배포 환경"
+    },
+    "brand": {
+      "type": "string",
+      "description": "AWS, NCP, Dell, HPE, Lenovo, Supermicro 등"
+    },
+    "model": {
+      "type": "string",
+      "description": "카탈로그 키 (예: p5.48xlarge, PowerEdge-XE9680). custom=true면 자유 입력."
+    },
+    "custom": {
+      "type": "boolean",
+      "default": false,
+      "description": "true면 카탈로그 프리셋이 아닌 사용자 커스텀 스펙"
+    },
+    "site_id": {
+      "type": "string",
+      "description": "이 노드가 속한 Site의 id"
+    },
+    "cluster_role": {
+      "enum": ["control-plane", "worker", "etcd", "unassigned"],
+      "default": "unassigned"
+    },
+    "labels": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "k8s 노드 라벨 (스케줄링 nodeSelector용)"
+    },
+    "taints": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["key", "effect"],
+        "additionalProperties": false,
+        "properties": {
+          "key": { "type": "string" },
+          "value": { "type": "string" },
+          "effect": { "enum": ["NoSchedule", "PreferNoSchedule", "NoExecute"] }
+        }
+      }
+    },
+    "spec": {
+      "$ref": "node-spec.json"
+    }
+  }
+}

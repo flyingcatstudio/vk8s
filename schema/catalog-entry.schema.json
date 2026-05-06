@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vk8s.aiotool.net/v0.1/catalog-entry.json",
+  "title": "Catalog Entry",
+  "description": "브랜드별 서버/인스턴스 프리셋. data/catalog/{cloud,onprem}/{brand}.json 의 항목 단위.",
+  "type": "object",
+  "required": ["key", "brand", "source", "category", "display_name", "spec"],
+  "additionalProperties": false,
+  "properties": {
+    "key": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "description": "고유 키. cloud는 인스턴스 타입(p5.48xlarge), onprem은 모델명 슬러그(PowerEdge-XE9680)."
+    },
+    "brand": {
+      "type": "string",
+      "description": "AWS, NCP, Dell, HPE, Lenovo, Supermicro 등"
+    },
+    "source": { "enum": ["onprem", "cloud"] },
+    "category": {
+      "enum": ["General", "Compute", "Memory", "Storage", "GPU"],
+      "description": "필터링/그룹핑용"
+    },
+    "display_name": {
+      "type": "string",
+      "description": "사용자에게 보여줄 라벨 (예: 'Dell PowerEdge XE9680 (8x H200 SXM)')"
+    },
+    "generation": {
+      "type": "string",
+      "description": "선택. 세대 라벨 (예: 'Gen11', '15G', 'Sapphire Rapids')"
+    },
+    "release_year": {
+      "type": "integer",
+      "minimum": 2015
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "검색용 태그. 예: ['ai', 'training', 'h200', 'sxm']"
+    },
+    "notes": {
+      "type": "string",
+      "description": "사용자에게 보여줄 한 줄 설명/주의사항"
+    },
+    "spec": {
+      "$ref": "node-spec.json"
+    }
+  }
+}

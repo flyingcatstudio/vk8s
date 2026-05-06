@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vk8s.aiotool.net/v0.1/cluster.json",
+  "title": "Cluster",
+  "description": "단일 k8s 클러스터. 노드 ID들을 묶고 워크로드를 호스트.",
+  "type": "object",
+  "required": ["id", "name", "node_ids"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "name": { "type": "string" },
+    "environment_tag": {
+      "type": "string",
+      "description": "예: cloud-prod, onprem-gpu, onprem-dr"
+    },
+    "k8s_version": {
+      "type": "string",
+      "description": "예: 1.30.4"
+    },
+    "ha_control_plane": {
+      "type": "boolean",
+      "default": false,
+      "description": "true면 control plane 노드 ≥3 권장 (validator가 검증)"
+    },
+    "node_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string" },
+      "description": "이 클러스터에 속한 Node.id 목록. 한 노드는 한 클러스터에만 속함."
+    },
+    "addons": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cni": {
+          "enum": ["Calico", "Cilium", "Flannel", "AWS-VPC-CNI", "Azure-CNI", "None"]
+        },
+        "csi": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "예: ['ebs.csi.aws.com', 'rook-ceph']"
+        },
+        "ingress": {
+          "enum": ["NGINX", "Traefik", "AWS-ALB", "Istio-Gateway", "None"]
+        },
+        "metrics_server": { "type": "boolean", "default": true },
+        "gpu_operator": {
+          "type": "boolean",
+          "default": false,
+          "description": "NVIDIA GPU Operator. GPU 노드 있으면 validator가 권장."
+        },
+        "service_mesh": {
+          "enum": ["Istio", "Linkerd", "None"],
+          "default": "None"
+        }
+      }
+    },
+    "workloads": {
+      "type": "array",
+      "items": { "$ref": "workload.json" }
+    }
+  }
+}
