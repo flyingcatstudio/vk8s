@@ -1020,7 +1020,7 @@
 //============================================================
 
 //============ Constants ============
-const SCHEMA_VERSION = "0.3";
+const SCHEMA_VERSION = "0.4";
 const STORAGE_KEY    = "vk8s.project.current";
 const CATALOG_FILES  = [
   "data/gpu-models.json",
@@ -1290,6 +1290,100 @@ const HELP = {
     body: "트래픽 출발지 namespace. allow-from-namespace 패턴에서 사용. 예: 'data' ns에 'backend' ns에서 들어오는 것만 허용.",
   },
 
+  // ───── Network ─────
+  "cluster.network": {
+    cat: "네트워크",
+    title: "Cluster Network",
+    body: "k8s 클러스터의 네트워크 CIDR. Pod IP / Service IP / Node IP 범위가 겹치면 라우팅 충돌.",
+    reco: "기본값(Pod 10.244.0.0/16, Service 10.96.0.0/12) 그대로 OK. 사내 다른 네트워크와 겹치면 조정.",
+  },
+  "cluster.pod_cidr": {
+    cat: "네트워크",
+    title: "Pod CIDR",
+    body: "Pod에 부여될 IP 범위. CNI(Calico/Cilium 등)가 노드별로 /24 정도씩 쪼개서 할당.",
+    reco: "kubeadm 기본 10.244.0.0/16 (Calico/Flannel 권장). 사내 네트워크와 안 겹치게.",
+  },
+  "cluster.service_cidr": {
+    cat: "네트워크",
+    title: "Service CIDR",
+    body: "Service의 ClusterIP가 부여되는 범위. 가상 IP — kube-proxy가 라우팅.",
+    reco: "kubeadm 기본 10.96.0.0/12. Pod CIDR과 겹치면 안됨.",
+  },
+  "cluster.node_subnet": {
+    cat: "네트워크",
+    title: "Node Subnet",
+    body: "노드의 관리 IP가 속한 서브넷. 새 노드 클러스터 할당 시 이 범위에서 자동 할당.",
+    reco: "사내 IDC 네트워크 또는 VPC 서브넷. /24가 일반적 (254 노드 수용).",
+  },
+  "cluster.dns_domain": {
+    cat: "네트워크",
+    title: "DNS Domain",
+    body: "클러스터 내 서비스 FQDN의 최상위 (예: my-svc.my-ns.svc.cluster.local의 'cluster.local').",
+    reco: "기본 'cluster.local' 그대로. 변경 시 모든 service mesh / DNS 설정에 영향.",
+  },
+  "cluster.lb_pool": {
+    cat: "네트워크",
+    title: "LoadBalancer Pool",
+    body: "type=LoadBalancer인 Service가 가져갈 외부 IP 풀. onprem은 MetalLB/Cilium L2 등이 이 풀에서 IP를 빌려줌.",
+    reco: "Cloud(EKS/GKE)는 자동으로 LB 프로비저닝되니 미설정 OK. Onprem은 사내 네트워크 빈 IP 범위 지정 필요.",
+  },
+  "cluster.ingress_rules": {
+    cat: "네트워크",
+    title: "Ingress Rules",
+    body: "외부 HTTP(S) 트래픽 라우팅. host + path → 내부 service 매핑. nginx-ingress / Traefik 등이 실제 동작 담당.",
+    reco: "각 외부 도메인마다 1개 룰. TLS는 cert-manager로 자동 발급 가능.",
+  },
+  "node.ip": {
+    cat: "네트워크",
+    title: "Node Management IP",
+    body: "노드의 관리 IP (SSH, kubelet API 등). 비워두면 클러스터 할당 시 cluster.network.node_subnet에서 자동 부여.",
+    reco: "보통 자동 할당으로 충분. 정적 할당이 필요하면 직접 지정 (DHCP 환경 외).",
+  },
+  "service.type": {
+    cat: "네트워크",
+    title: "Service Type",
+    body: "Service 노출 방식. None=헤드리스, ClusterIP=내부만, NodePort=노드 IP:포트로 외부 접근, LoadBalancer=외부 LB IP.",
+    reco: "내부 통신만이면 ClusterIP. 외부 노출은 보통 LoadBalancer(+Ingress) 또는 NodePort(테스트용).",
+  },
+  "service.cluster_ip": {
+    cat: "네트워크",
+    title: "Cluster IP",
+    body: "Service의 가상 IP. service_cidr 범위에서 자동 할당이 일반적. 비우면 k8s가 할당.",
+  },
+  "service.lb_ip": {
+    cat: "네트워크",
+    title: "LoadBalancer IP",
+    body: "외부에서 접근하는 IP. cloud는 LB 자동 프로비저닝, onprem은 MetalLB pool에서 할당.",
+  },
+  "service.ports": {
+    cat: "네트워크",
+    title: "Service Ports",
+    body: "Service가 노출하는 포트 목록. port=서비스 포트, target_port=Pod 포트 (보통 같음).",
+    reco: "이름 부여 (http, grpc 등) 권장. Ingress에서 port로 매칭.",
+  },
+  "service.node_port": {
+    cat: "네트워크",
+    title: "Node Port",
+    body: "type=NodePort/LoadBalancer일 때 모든 노드의 이 포트로 외부 접근 가능. 30000-32767 범위.",
+    reco: "비워두면 자동 할당. 명시 시 다른 워크로드와 충돌 안 나게 관리 필요.",
+  },
+  "ingress.host": {
+    cat: "네트워크",
+    title: "Ingress Host",
+    body: "외부에서 접근할 도메인 (예: api.example.com). DNS는 별도 설정 필요 (Ingress IP를 가리키도록).",
+  },
+  "ingress.tls": {
+    cat: "네트워크",
+    title: "TLS",
+    body: "HTTPS 활성화. 인증서는 별도 Secret으로 (또는 cert-manager가 Let's Encrypt에서 자동 발급).",
+    reco: "production은 항상 ON. dev/internal은 OFF 무방.",
+  },
+  "ingress.workload": {
+    cat: "네트워크",
+    title: "Target Workload",
+    body: "Ingress가 트래픽을 보낼 내부 서비스. 해당 워크로드의 Service.type이 None이 아니어야 함.",
+  },
+
   // ───── 워크로드 ─────
   "workload.category": {
     cat: "워크로드",
@@ -1534,6 +1628,58 @@ function lbl(text, helpId) {
   return lab;
 }
 
+// === IP / CIDR utilities ===
+function parseCidr(cidr) {
+  if (!cidr || typeof cidr !== "string") return null;
+  const m = cidr.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)\/(\d+)$/);
+  if (!m) return null;
+  const parts = [parseInt(m[1]), parseInt(m[2]), parseInt(m[3]), parseInt(m[4])];
+  const prefix = parseInt(m[5]);
+  if (parts.some(p => p < 0 || p > 255) || prefix < 0 || prefix > 32) return null;
+  const base = ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;
+  const mask = prefix === 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) >>> 0;
+  const network = base & mask;
+  const size = prefix === 32 ? 1 : (2 ** (32 - prefix));
+  return { network, prefix, size, mask };
+}
+function ipFromInt(n) {
+  return [(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff].join(".");
+}
+function ipToInt(ip) {
+  if (!ip) return null;
+  const m = ip.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (!m) return null;
+  const parts = [parseInt(m[1]), parseInt(m[2]), parseInt(m[3]), parseInt(m[4])];
+  if (parts.some(p => p < 0 || p > 255)) return null;
+  return ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;
+}
+function ipInCidr(ip, cidr) {
+  const c = parseCidr(cidr);
+  const i = ipToInt(ip);
+  if (c === null || i === null) return false;
+  return (i & c.mask) === c.network;
+}
+function nextNodeIp(cluster, project) {
+  if (!cluster?.network?.node_subnet) return null;
+  const c = parseCidr(cluster.network.node_subnet);
+  if (!c) return null;
+  const used = new Set();
+  for (const nid of cluster.node_ids || []) {
+    const n = project.nodes.find(x => x.id === nid);
+    const ip = n?.network?.ip;
+    if (ip) used.add(ip);
+  }
+  // Reserve first 10 (gateway/dhcp/etc) + last (broadcast for /24).
+  // Try .11 onward, skip used, fall within subnet, not all-ones.
+  const startIdx = Math.min(11, c.size - 2);
+  const endIdx = c.size - 1; // exclude broadcast
+  for (let i = startIdx; i < endIdx; i++) {
+    const ip = ipFromInt(c.network + i);
+    if (!used.has(ip)) return ip;
+  }
+  return null;
+}
+
 //============ Catalog loader ============
 async function loadCatalog() {
   const results = await Promise.all(CATALOG_FILES.map(async p => {
@@ -1579,6 +1725,22 @@ function migrateProject(p) {
     }
     p.version = "0.3";
     console.log("Project migrated to v0.3");
+  }
+  if (p.version === "0.3") {
+    // 0.3 → 0.4: optional network fields. Add defaults to clusters that lack them.
+    for (const c of p.clusters || []) {
+      if (!c.network) {
+        c.network = {
+          pod_cidr: "10.244.0.0/16",
+          service_cidr: "10.96.0.0/12",
+          node_subnet: "192.168.10.0/24",
+          dns_domain: "cluster.local",
+        };
+      }
+      if (!Array.isArray(c.ingress_rules)) c.ingress_rules = [];
+    }
+    p.version = "0.4";
+    console.log("Project migrated to v0.4");
   }
   return p;
 }
@@ -1713,6 +1875,13 @@ function addCluster(seed) {
     k8s_version: seed.k8s_version || "1.30",
     ha_control_plane: !!seed.ha_control_plane,
     node_ids: [],
+    network: {
+      pod_cidr: seed.pod_cidr || "10.244.0.0/16",
+      service_cidr: seed.service_cidr || "10.96.0.0/12",
+      node_subnet: seed.node_subnet || "192.168.10.0/24",
+      dns_domain: seed.dns_domain || "cluster.local",
+    },
+    ingress_rules: [],
     addons: {
       cni: seed.cni || "Calico",
       ingress: seed.ingress || "NGINX",
@@ -1748,9 +1917,14 @@ function assignNodeToCluster(nodeId, clusterId, defaultRole, silent = false) {
   }
   if (!c.node_ids.includes(nodeId)) c.node_ids.push(nodeId);
   if (!Array.isArray(n.cluster_roles)) n.cluster_roles = [];
-  // If node has no roles yet, default to ["worker"] (or specified defaultRole)
   if (n.cluster_roles.length === 0) {
     n.cluster_roles = [defaultRole || "worker"];
+  }
+  // Auto-allocate node IP from cluster.network.node_subnet if not in subnet
+  if (!n.network) n.network = {};
+  if (!n.network.ip || !ipInCidr(n.network.ip, c.network?.node_subnet)) {
+    const ip = nextNodeIp(c, state.project);
+    if (ip) n.network.ip = ip;
   }
   if (!silent) { emit(); saveSoon(); }
 }
@@ -1862,6 +2036,25 @@ function addWorkload(clusterId, seed) {
   if (seed.gpu_count && seed.gpu_count > 0) {
     wl.resources.requests.gpu = { count: parseInt(seed.gpu_count) };
     if (seed.gpu_model) wl.resources.requests.gpu.model = seed.gpu_model;
+  }
+  // Default network.service based on category
+  const wantsService = ["API", "Frontend", "WAS", "DB", "Cache", "Queue", "ML-Inference"].includes(wl.category);
+  if (wantsService) {
+    const portByCategory = {
+      "Frontend": [{ name: "http", port: 80, target_port: 80, protocol: "TCP" }],
+      "API": [{ name: "http", port: 8080, target_port: 8080, protocol: "TCP" }],
+      "WAS": [{ name: "http", port: 8080, target_port: 8080, protocol: "TCP" }],
+      "DB": [{ name: "pg", port: 5432, target_port: 5432, protocol: "TCP" }],
+      "Cache": [{ name: "redis", port: 6379, target_port: 6379, protocol: "TCP" }],
+      "Queue": [{ name: "kafka", port: 9092, target_port: 9092, protocol: "TCP" }],
+      "ML-Inference": [{ name: "http", port: 8080, target_port: 8080, protocol: "TCP" }],
+    };
+    wl.network = {
+      service: {
+        type: "ClusterIP",
+        ports: portByCategory[wl.category] || [{ name: "http", port: 80, target_port: 80, protocol: "TCP" }],
+      },
+    };
   }
   // Apply runtime preset if chosen
   if (seed.runtime_preset && state.catalog.runtime[seed.runtime_preset]) {
@@ -2007,6 +2200,64 @@ function deleteNetworkPolicy(clusterId, npId) {
   const c = state.project.clusters.find(x => x.id === clusterId);
   if (!c || !c.network_policies) return;
   c.network_policies = c.network_policies.filter(np => np.id !== npId);
+  emit(); saveSoon();
+}
+
+//============ Ingress rule actions ============
+function addIngressRule(clusterId, seed) {
+  const c = state.project.clusters.find(x => x.id === clusterId);
+  if (!c) return;
+  if (!c.ingress_rules) c.ingress_rules = [];
+  const id = slug(seed.host) + "-" + uid();
+  c.ingress_rules.push({
+    id,
+    name: seed.name || seed.host,
+    host: seed.host,
+    tls: !!seed.tls,
+    paths: seed.paths || [],
+  });
+  emit(); saveSoon();
+}
+function deleteIngressRule(clusterId, ruleId) {
+  const c = state.project.clusters.find(x => x.id === clusterId);
+  if (!c?.ingress_rules) return;
+  c.ingress_rules = c.ingress_rules.filter(r => r.id !== ruleId);
+  emit(); saveSoon();
+}
+
+//============ Workload service helpers ============
+function ensureWorkloadService(w, defaultType = "ClusterIP") {
+  if (!w.network) w.network = {};
+  if (!w.network.service) w.network.service = { type: defaultType, ports: [] };
+  if (!Array.isArray(w.network.service.ports)) w.network.service.ports = [];
+  return w.network.service;
+}
+function addServicePort(workloadId) {
+  const found = findWorkload(workloadId);
+  if (!found) return;
+  const svc = ensureWorkloadService(found.workload);
+  const defaults = { name: "http", port: 80, target_port: 8080, protocol: "TCP" };
+  // Choose unique name
+  const usedNames = new Set(svc.ports.map(p => p.name));
+  let n = "http";
+  if (usedNames.has(n)) {
+    let i = 2;
+    while (usedNames.has(`port-${i}`)) i++;
+    n = `port-${i}`;
+  }
+  svc.ports.push({ ...defaults, name: n });
+  emit(); saveSoon();
+}
+function updateServicePort(workloadId, idx, patch) {
+  const found = findWorkload(workloadId);
+  if (!found?.workload?.network?.service?.ports?.[idx]) return;
+  Object.assign(found.workload.network.service.ports[idx], patch);
+  emit(); saveSoon();
+}
+function removeServicePort(workloadId, idx) {
+  const found = findWorkload(workloadId);
+  if (!found?.workload?.network?.service?.ports) return;
+  found.workload.network.service.ports.splice(idx, 1);
   emit(); saveSoon();
 }
 
@@ -2240,6 +2491,123 @@ function runValidator(project) {
     if (inCluster.length > 1) {
       F("NODE_IN_MULTIPLE_CLUSTERS", "error",
         `${n.name}: ${inCluster.length}개 클러스터에 속함`, { kind: "node", id: n.id });
+    }
+  }
+
+  // 7a. Cluster network: CIDR overlap + node IP integrity
+  for (const c of project.clusters || []) {
+    const net = c.network || {};
+    const cidrs = ["pod_cidr", "service_cidr", "node_subnet"]
+      .map(k => ({ name: k, val: net[k], parsed: parseCidr(net[k]) }))
+      .filter(x => x.parsed);
+    for (let i = 0; i < cidrs.length; i++) {
+      for (let j = i + 1; j < cidrs.length; j++) {
+        const a = cidrs[i], b = cidrs[j];
+        // overlap if ranges intersect
+        const aEnd = a.parsed.network + a.parsed.size - 1;
+        const bEnd = b.parsed.network + b.parsed.size - 1;
+        if (a.parsed.network <= bEnd && b.parsed.network <= aEnd) {
+          F("CLUSTER_CIDR_OVERLAP", "error",
+            `${c.name}: ${a.name} (${a.val})와 ${b.name} (${b.val}) 범위 겹침`,
+            { kind: "cluster", id: c.id }, "cluster.network");
+        }
+      }
+    }
+    // Node IP checks
+    const nodeIps = new Map(); // ip → nodeName
+    for (const nid of c.node_ids || []) {
+      const n = project.nodes.find(x => x.id === nid);
+      if (!n?.network?.ip) continue;
+      const ip = n.network.ip;
+      // Duplicate
+      if (nodeIps.has(ip)) {
+        F("NODE_IP_DUPLICATE", "error",
+          `${n.name}: IP ${ip} 중복 (다른 노드: ${nodeIps.get(ip)})`,
+          { kind: "node", id: n.id }, "node.ip");
+      } else {
+        nodeIps.set(ip, n.name);
+      }
+      // Out of node_subnet
+      if (net.node_subnet && !ipInCidr(ip, net.node_subnet)) {
+        F("NODE_IP_OUT_OF_SUBNET", "warn",
+          `${n.name}: IP ${ip}가 ${net.node_subnet} 밖`,
+          { kind: "node", id: n.id }, "node.ip");
+      }
+    }
+
+    // 7b. Workload service + NodePort
+    const nodePortsUsed = new Map();
+    for (const w of c.workloads || []) {
+      const svc = w.network?.service;
+      if (!svc) continue;
+      // ClusterIP within service_cidr
+      if (svc.cluster_ip && net.service_cidr && !ipInCidr(svc.cluster_ip, net.service_cidr)) {
+        F("SERVICE_IP_OUT_OF_CIDR", "warn",
+          `${w.name}: cluster_ip ${svc.cluster_ip}가 service_cidr ${net.service_cidr} 밖`,
+          { kind: "workload", id: w.id }, "service.cluster_ip");
+      }
+      // NodePort range + duplicates
+      for (const p of svc.ports || []) {
+        if (p.node_port == null) continue;
+        if (p.node_port < 30000 || p.node_port > 32767) {
+          F("NODE_PORT_OUT_OF_RANGE", "warn",
+            `${w.name}: node_port ${p.node_port}는 30000-32767 권장 범위 밖`,
+            { kind: "workload", id: w.id }, "service.node_port");
+        }
+        if (nodePortsUsed.has(p.node_port)) {
+          F("NODE_PORT_DUPLICATE", "error",
+            `${w.name}: node_port ${p.node_port} 중복 (${nodePortsUsed.get(p.node_port)})`,
+            { kind: "workload", id: w.id });
+        } else {
+          nodePortsUsed.set(p.node_port, w.name);
+        }
+      }
+      // LoadBalancer in onprem without lb_pool
+      if (svc.type === "LoadBalancer" && !net.lb_pool) {
+        const onpremNode = (c.node_ids || []).some(nid => {
+          const n = project.nodes.find(x => x.id === nid);
+          return n?.source === "onprem";
+        });
+        if (onpremNode) {
+          F("LB_ONPREM_NO_POOL", "warn",
+            `${w.name}: onprem LoadBalancer인데 cluster.network.lb_pool 미설정 (MetalLB 등 필요)`,
+            { kind: "workload", id: w.id }, "cluster.lb_pool");
+        }
+      }
+    }
+
+    // 7c. Ingress rules validation
+    const seenHosts = new Map();
+    for (const r of c.ingress_rules || []) {
+      if (seenHosts.has(r.host)) {
+        F("INGRESS_HOST_DUPLICATE", "warn",
+          `Ingress: host '${r.host}' 중복 (${seenHosts.get(r.host)})`,
+          { kind: "cluster", id: c.id });
+      } else {
+        seenHosts.set(r.host, r.name);
+      }
+      for (const p of r.paths || []) {
+        const target = (c.workloads || []).find(w => w.id === p.workload_id);
+        if (!target) {
+          F("INGRESS_TARGET_NOT_FOUND", "error",
+            `Ingress '${r.host}${p.path}': 대상 workload 없음`,
+            { kind: "cluster", id: c.id });
+          continue;
+        }
+        const svc = target.network?.service;
+        if (!svc || svc.type === "None") {
+          F("INGRESS_TARGET_NO_SERVICE", "error",
+            `Ingress '${r.host}${p.path}': '${target.name}'에 Service 미설정 (Network 탭)`,
+            { kind: "workload", id: target.id }, "service.type");
+        } else {
+          const portMatch = (svc.ports || []).some(sp => sp.port === p.port);
+          if (!portMatch) {
+            F("INGRESS_PORT_MISMATCH", "warn",
+              `Ingress '${r.host}${p.path}': port ${p.port}이 '${target.name}' service ports에 없음`,
+              { kind: "workload", id: target.id });
+          }
+        }
+      }
     }
   }
 
@@ -2657,6 +3025,18 @@ function renderNodeInspector(root, id) {
     }, siteOpts),
   ]));
 
+  // Network IP
+  const ipVal = n.network?.ip || "";
+  root.appendChild(el("div", { class: "field" }, [
+    lbl("Management IP", "node.ip"),
+    el("input", {
+      "data-focus-key": `node.${id}.ip`,
+      value: ipVal,
+      placeholder: "192.168.10.11 (cluster 할당 시 자동)",
+      oninput: e => updateNodeField(id, "network.ip", e.target.value),
+    }),
+  ]));
+
   // Cluster
   const myCluster = getNodeCluster(id);
   const clusters = state.project.clusters || [];
@@ -2915,6 +3295,89 @@ function renderClusterInspector(root, id) {
     helpIcon("cluster.gpu_operator"),
   ]));
 
+  // Network section
+  const net = c.network || {};
+  const netTitle = el("div", { class: "section-title" }, ["Network"]);
+  netTitle.appendChild(helpIcon("cluster.network"));
+  root.appendChild(netTitle);
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [
+      lbl("Pod CIDR", "cluster.pod_cidr"),
+      el("input", {
+        "data-focus-key": `cluster.${id}.pod_cidr`,
+        value: net.pod_cidr || "", placeholder: "10.244.0.0/16",
+        oninput: e => updateClusterField(id, "network.pod_cidr", e.target.value),
+      }),
+    ]),
+    el("div", { class: "field" }, [
+      lbl("Service CIDR", "cluster.service_cidr"),
+      el("input", {
+        "data-focus-key": `cluster.${id}.service_cidr`,
+        value: net.service_cidr || "", placeholder: "10.96.0.0/12",
+        oninput: e => updateClusterField(id, "network.service_cidr", e.target.value),
+      }),
+    ]),
+  ]));
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [
+      lbl("Node Subnet", "cluster.node_subnet"),
+      el("input", {
+        "data-focus-key": `cluster.${id}.node_subnet`,
+        value: net.node_subnet || "", placeholder: "192.168.10.0/24",
+        oninput: e => updateClusterField(id, "network.node_subnet", e.target.value),
+      }),
+    ]),
+    el("div", { class: "field" }, [
+      lbl("DNS Domain", "cluster.dns_domain"),
+      el("input", {
+        "data-focus-key": `cluster.${id}.dns_domain`,
+        value: net.dns_domain || "", placeholder: "cluster.local",
+        oninput: e => updateClusterField(id, "network.dns_domain", e.target.value),
+      }),
+    ]),
+  ]));
+  root.appendChild(el("div", { class: "field" }, [
+    lbl("LoadBalancer Pool (optional)", "cluster.lb_pool"),
+    el("input", {
+      "data-focus-key": `cluster.${id}.lb_pool`,
+      value: net.lb_pool || "", placeholder: "192.168.20.0/24 (MetalLB 등 — onprem)",
+      oninput: e => updateClusterField(id, "network.lb_pool", e.target.value),
+    }),
+  ]));
+
+  // Ingress Rules section
+  const irules = c.ingress_rules || [];
+  const irTitle = el("div", { class: "section-title" }, [`Ingress Rules (${irules.length})`]);
+  irTitle.appendChild(helpIcon("cluster.ingress_rules"));
+  root.appendChild(irTitle);
+  if (!irules.length) {
+    root.appendChild(el("div", { class: "empty-hint" }, ["Ingress 룰 없음. 외부 HTTP(S) 라우팅이 필요하면 추가."]));
+  } else {
+    const list = el("div", { class: "row-list" });
+    for (const r of irules) {
+      const numPaths = (r.paths || []).length;
+      list.appendChild(el("div", { class: "row" }, [
+        el("span", { class: "icon" }, [r.tls ? "🔒" : "🌐"]),
+        el("span", { class: "name", style: { fontSize: "12px", fontFamily: "JetBrains Mono" } }, [
+          `${r.tls ? "https" : "http"}://${r.host}`,
+        ]),
+        el("span", { style: { fontSize: "10px", color: "var(--text3)", fontFamily: "JetBrains Mono" } }, [`${numPaths} path${numPaths === 1 ? "" : "s"}`]),
+        el("button", {
+          class: "x", onclick: () => { if (confirm(`'${r.name}' 삭제?`)) deleteIngressRule(id, r.id); },
+        }, ["✕"]),
+      ]));
+    }
+    root.appendChild(list);
+  }
+  if ((c.workloads || []).length) {
+    root.appendChild(el("button", {
+      class: "add-btn", style: { width: "100%", marginTop: "6px" },
+      onclick: () => openAddIngressRule(id),
+    }, ["＋ Add Ingress Rule"]));
+  } else {
+    root.appendChild(el("div", { class: "empty-hint" }, ["워크로드 추가 후 ingress 룰 가능"]));
+  }
+
   // Nodes assigned
   const assignedNodes = (c.node_ids || []).map(nid => state.project.nodes.find(n => n.id === nid)).filter(Boolean);
   root.appendChild(el("div", { class: "section-title" }, [`Nodes in cluster (${assignedNodes.length})`]));
@@ -2951,6 +3414,9 @@ function renderClusterInspector(root, id) {
       list.appendChild(el("div", { class: "row" }, [
         el("span", { class: "icon" }, ["▣"]),
         el("span", { class: "name", style: { cursor: "pointer" }, onclick: () => selectEntity("node", n.id) }, [n.name]),
+        n.network?.ip ? el("span", {
+          style: { fontSize: "10px", color: "var(--text3)", fontFamily: "JetBrains Mono" },
+        }, [n.network.ip]) : null,
         roleChips,
         el("button", { class: "x", title: "remove", onclick: () => removeNodeFromCluster(n.id, id) }, ["✕"]),
       ]));
@@ -3133,7 +3599,7 @@ function renderWorkloadInspector(root, id) {
 
   // Tabs
   if (!state.ui.workloadTab) state.ui.workloadTab = "basic";
-  const tabs = ["basic", "resources", "runtime"];
+  const tabs = ["basic", "resources", "runtime", "network"];
   const tabBar = el("div", {
     style: { display: "flex", gap: "2px", borderBottom: "1px solid var(--border)", marginBottom: "12px" },
   }, tabs.map(t =>
@@ -3331,6 +3797,141 @@ function renderWorkloadInspector(root, id) {
         }),
       ]),
     ]));
+  }
+  else if (state.ui.workloadTab === "network") {
+    const svc = w.network?.service || { type: "ClusterIP", ports: [] };
+    root.appendChild(el("div", { class: "field" }, [
+      lbl("Service Type", "service.type"),
+      el("select", {
+        "data-focus-key": `workload.${id}.svc.type`,
+        onchange: e => {
+          ensureWorkloadService(w);
+          updateWorkloadField(id, "network.service.type", e.target.value);
+        },
+      }, ["None", "ClusterIP", "NodePort", "LoadBalancer"].map(t =>
+        el("option", { value: t, selected: t === svc.type ? "" : null }, [t]))),
+    ]));
+
+    if (svc.type !== "None") {
+      const showNodePort = svc.type === "NodePort" || svc.type === "LoadBalancer";
+      root.appendChild(el("div", { class: "field" }, [
+        lbl("Cluster IP (auto)", "service.cluster_ip"),
+        el("input", {
+          "data-focus-key": `workload.${id}.svc.cluster_ip`,
+          value: svc.cluster_ip || "",
+          placeholder: `${cluster.network?.service_cidr || "service_cidr"} 범위`,
+          oninput: e => updateWorkloadField(id, "network.service.cluster_ip", e.target.value),
+        }),
+      ]));
+      if (svc.type === "LoadBalancer") {
+        root.appendChild(el("div", { class: "field" }, [
+          lbl("LoadBalancer IP", "service.lb_ip"),
+          el("input", {
+            "data-focus-key": `workload.${id}.svc.lb_ip`,
+            value: svc.lb_ip || "",
+            placeholder: `${cluster.network?.lb_pool || "lb_pool"} 범위 (또는 cloud LB)`,
+            oninput: e => updateWorkloadField(id, "network.service.lb_ip", e.target.value),
+          }),
+        ]));
+      }
+
+      // Ports
+      const portsTitle = el("div", { class: "section-title" }, [`Service Ports (${(svc.ports || []).length})`]);
+      portsTitle.appendChild(helpIcon("service.ports"));
+      root.appendChild(portsTitle);
+
+      const ports = svc.ports || [];
+      if (!ports.length) {
+        root.appendChild(el("div", { class: "empty-hint" }, ["포트 없음. + Add Port로 추가."]));
+      }
+      for (let i = 0; i < ports.length; i++) {
+        const p = ports[i];
+        root.appendChild(el("div", {
+          style: { background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: "5px", padding: "8px 10px", marginBottom: "6px" },
+        }, [
+          el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr auto", gap: "6px", alignItems: "end" } }, [
+            el("div", { class: "field", style: { margin: 0 } }, [
+              el("label", { style: { fontSize: "10px" } }, ["name"]),
+              el("input", {
+                "data-focus-key": `workload.${id}.svc.ports.${i}.name`,
+                value: p.name || "",
+                style: { padding: "4px 6px", fontSize: "11px" },
+                oninput: e => updateServicePort(id, i, { name: e.target.value }),
+              }),
+            ]),
+            el("div", { class: "field", style: { margin: 0 } }, [
+              el("label", { style: { fontSize: "10px" } }, ["port"]),
+              el("input", {
+                "data-focus-key": `workload.${id}.svc.ports.${i}.port`,
+                type: "number", value: p.port || 0,
+                style: { padding: "4px 6px", fontSize: "11px" },
+                oninput: e => updateServicePort(id, i, { port: parseInt(e.target.value) || 0 }),
+              }),
+            ]),
+            el("div", { class: "field", style: { margin: 0 } }, [
+              el("label", { style: { fontSize: "10px" } }, ["target"]),
+              el("input", {
+                "data-focus-key": `workload.${id}.svc.ports.${i}.target_port`,
+                type: "number", value: p.target_port || p.port || 0,
+                style: { padding: "4px 6px", fontSize: "11px" },
+                oninput: e => updateServicePort(id, i, { target_port: parseInt(e.target.value) || 0 }),
+              }),
+            ]),
+            el("button", {
+              class: "x", style: { padding: "4px 8px" },
+              onclick: () => removeServicePort(id, i),
+            }, ["✕"]),
+          ]),
+          showNodePort ? el("div", { class: "field-row", style: { marginTop: "6px" } }, [
+            el("div", { class: "field", style: { margin: 0 } }, [
+              el("label", { style: { fontSize: "10px" } }, [
+                "node_port (30000-32767)",
+                helpIcon("service.node_port"),
+              ]),
+              el("input", {
+                "data-focus-key": `workload.${id}.svc.ports.${i}.node_port`,
+                type: "number", min: "30000", max: "32767",
+                value: p.node_port || "",
+                style: { padding: "4px 6px", fontSize: "11px" },
+                oninput: e => updateServicePort(id, i, { node_port: parseInt(e.target.value) || undefined }),
+              }),
+            ]),
+            el("div", { class: "field", style: { margin: 0 } }, [
+              el("label", { style: { fontSize: "10px" } }, ["protocol"]),
+              el("select", {
+                onchange: e => updateServicePort(id, i, { protocol: e.target.value }),
+                style: { padding: "4px 6px", fontSize: "11px" },
+              }, ["TCP", "UDP"].map(v => el("option", { value: v, selected: v === (p.protocol || "TCP") ? "" : null }, [v]))),
+            ]),
+          ]) : null,
+        ]));
+      }
+      root.appendChild(el("button", {
+        class: "add-btn", style: { width: "100%", marginTop: "4px" },
+        onclick: () => addServicePort(id),
+      }, ["＋ Add Port"]));
+
+      // Show ingress rules referencing this workload
+      const refs = (cluster.ingress_rules || []).filter(r =>
+        (r.paths || []).some(p => p.workload_id === w.id));
+      if (refs.length) {
+        root.appendChild(el("div", { class: "section-title" }, [`Exposed via Ingress (${refs.length})`]));
+        const list = el("div", { class: "row-list" });
+        for (const r of refs) {
+          const ports = (r.paths || []).filter(p => p.workload_id === w.id).map(p => `${p.path}:${p.port}`).join(", ");
+          list.appendChild(el("div", { class: "row" }, [
+            el("span", { class: "icon" }, [r.tls ? "🔒" : "🌐"]),
+            el("span", { class: "name", style: { fontSize: "11px", fontFamily: "JetBrains Mono" } }, [
+              `${r.tls ? "https" : "http"}://${r.host}`,
+            ]),
+            el("span", { style: { fontSize: "10px", color: "var(--text3)", fontFamily: "JetBrains Mono" } }, [ports]),
+          ]));
+        }
+        root.appendChild(list);
+      }
+    } else {
+      root.appendChild(el("div", { class: "empty-hint" }, ["Headless / no service. 직접 IP 접근 또는 다른 메커니즘."]));
+    }
   }
 }
 
@@ -4235,6 +4836,16 @@ function openAddCluster() {
     el("div", { class: "field" }, [lbl("Ingress", "cluster.ingress"), ingressSel]),
   ]));
 
+  // Network CIDRs
+  const podCidrInput = el("input", { value: "10.244.0.0/16" });
+  const svcCidrInput = el("input", { value: "10.96.0.0/12" });
+  const nodeSubnetInput = el("input", { value: "192.168.10.0/24" });
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [lbl("Pod CIDR", "cluster.pod_cidr"), podCidrInput]),
+    el("div", { class: "field" }, [lbl("Service CIDR", "cluster.service_cidr"), svcCidrInput]),
+  ]));
+  root.appendChild(el("div", { class: "field" }, [lbl("Node Subnet", "cluster.node_subnet"), nodeSubnetInput]));
+
   // Node selection
   const available = state.project.nodes.filter(n => !getNodeCluster(n.id));
   const taken = state.project.nodes.filter(n => !!getNodeCluster(n.id));
@@ -4275,6 +4886,9 @@ function openAddCluster() {
         ha_control_plane: haInput.checked,
         cni: cniSel.value,
         ingress: ingressSel.value,
+        pod_cidr: podCidrInput.value.trim() || "10.244.0.0/16",
+        service_cidr: svcCidrInput.value.trim() || "10.96.0.0/12",
+        node_subnet: nodeSubnetInput.value.trim() || "192.168.10.0/24",
         node_ids,
       });
       closeModal();
@@ -4440,6 +5054,69 @@ function openAddNetworkPolicy(clusterId) {
         namespace: targetSel.value,
         preset: presetSel.value,
         from_namespace: fromNsSel.value,
+      });
+      closeModal();
+    } }, ["Add"]),
+  ]));
+  openModal(root);
+}
+
+//============ Add Ingress Rule modal ============
+function openAddIngressRule(clusterId) {
+  const c = state.project.clusters.find(x => x.id === clusterId);
+  if (!c) return;
+  const root = el("div");
+  root.appendChild(el("h2", {}, ["Add Ingress Rule"]));
+
+  const wls = c.workloads || [];
+  if (!wls.length) {
+    root.appendChild(el("div", { class: "empty-hint" }, ["워크로드 먼저 추가하세요."]));
+    root.appendChild(el("div", { class: "modal-actions" }, [
+      el("button", { class: "btn-ghost", onclick: closeModal }, ["Close"]),
+    ]));
+    openModal(root);
+    return;
+  }
+
+  const hostInput = el("input", { value: "app.example.com", placeholder: "api.example.com" });
+  const tlsInput = el("input", { type: "checkbox", checked: "" });
+  const pathInput = el("input", { value: "/" });
+  const wlSel = el("select", {}, wls.map(w => el("option", { value: w.id }, [`${w.name} (${w.category})`])));
+  const portInput = el("input", { type: "number", value: 80, min: "1", max: "65535" });
+
+  // Auto-suggest port from selected workload's service
+  const updatePortSuggest = () => {
+    const wlId = wlSel.value;
+    const wl = wls.find(x => x.id === wlId);
+    const firstPort = wl?.network?.service?.ports?.[0]?.port;
+    if (firstPort && portInput.value === "80") portInput.value = firstPort;
+  };
+  wlSel.addEventListener("change", updatePortSuggest);
+  updatePortSuggest();
+
+  root.appendChild(el("div", { class: "field" }, [lbl("Host", "ingress.host"), hostInput]));
+  root.appendChild(el("label", {
+    style: { display: "flex", alignItems: "center", gap: "8px", margin: "8px 0", fontSize: "12px", color: "var(--text)" },
+  }, [tlsInput, el("span", {}, ["TLS (HTTPS)"]), helpIcon("ingress.tls")]));
+  root.appendChild(el("div", { class: "section-title" }, ["Path → Workload"]));
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [el("label", {}, ["Path"]), pathInput]),
+    el("div", { class: "field" }, [el("label", {}, ["Port"]), portInput]),
+  ]));
+  root.appendChild(el("div", { class: "field" }, [lbl("Workload", "ingress.workload"), wlSel]));
+
+  root.appendChild(el("div", { class: "modal-actions" }, [
+    el("button", { class: "btn-ghost", onclick: closeModal }, ["Cancel"]),
+    el("button", { class: "btn", onclick: () => {
+      const host = hostInput.value.trim();
+      if (!host) { alert("host 필수"); return; }
+      addIngressRule(clusterId, {
+        host, tls: tlsInput.checked,
+        paths: [{
+          path: pathInput.value || "/", path_type: "Prefix",
+          workload_id: wlSel.value,
+          port: parseInt(portInput.value) || 80,
+        }],
       });
       closeModal();
     } }, ["Add"]),

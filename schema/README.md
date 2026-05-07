@@ -1,4 +1,4 @@
-# vk8s Schema (v0.3)
+# vk8s Schema (v0.4)
 
 vk8s 프로젝트의 데이터 모델 정의. JSON Schema 2020-12 기준.
 
@@ -72,6 +72,14 @@ Cluster 내 `namespaces[]`/`network_policies[]` 인라인. NetworkPolicy 별도 
 
 ### 8. Helm은 워크로드 단위
 Workload 1개 = chart 1개. Export 시 umbrella chart로 묶을지는 export 옵션.
+
+## v0.3 → v0.4 변경
+
+- **Cluster.network** 신규 (CIDR + DNS): `pod_cidr`, `service_cidr`, `node_subnet`, `dns_domain`, `lb_pool`
+- **Cluster.ingress_rules[]** 신규: 호스트/경로 → workload service 매핑 (nginx-ingress 등이 사용)
+- **Node.network** 신규: `ip` (cluster.network.node_subnet에서 자동 할당) + 옵션으로 다중 NIC `interfaces[]`
+- **Workload.network.service** 신규: type (None/ClusterIP/NodePort/LoadBalancer), `cluster_ip`, `lb_ip`, `ports[]` (port/target_port/protocol/node_port)
+- 기존 `workload.helm.expose`와 별도로 유지 (helm은 export 메타, network는 모델)
 
 ## v0.2 → v0.3 변경
 

@@ -61,6 +61,30 @@
     },
     "spec": {
       "$ref": "node-spec.json"
+    },
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "노드 네트워크 설정. ip는 cluster.network.node_subnet에서 자동 할당될 수 있음.",
+      "properties": {
+        "ip": {
+          "type": "string",
+          "description": "관리 IP (예: 192.168.10.11). 비어있으면 클러스터 할당 시 자동 부여."
+        },
+        "interfaces": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" },
+              "ip": { "type": "string" },
+              "vlan": { "type": "integer" },
+              "purpose": { "enum": ["mgmt", "pod", "storage", "external"] }
+            }
+          }
+        }
+      }
     }
   }
 }

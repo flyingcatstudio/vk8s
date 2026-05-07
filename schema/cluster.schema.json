@@ -31,6 +31,48 @@
       "items": { "type": "string" },
       "description": "이 클러스터에 속한 Node.id 목록. 한 노드는 한 클러스터에만."
     },
+    "network": {
+      "type": "object",
+      "description": "클러스터 네트워킹 — CIDR 할당 + DNS",
+      "additionalProperties": false,
+      "properties": {
+        "pod_cidr": { "type": "string", "description": "Pod IP 범위 (예: 10.244.0.0/16)" },
+        "service_cidr": { "type": "string", "description": "Service ClusterIP 범위 (예: 10.96.0.0/12)" },
+        "node_subnet": { "type": "string", "description": "노드 IP 서브넷 (예: 192.168.10.0/24). onprem 노드 IP 자동 할당의 기준." },
+        "dns_domain": { "type": "string", "description": "클러스터 DNS 도메인 (예: cluster.local)" },
+        "lb_pool": { "type": "string", "description": "LoadBalancer Service의 외부 IP 풀 (예: 192.168.20.0/24, MetalLB 등)" }
+      }
+    },
+    "ingress_rules": {
+      "type": "array",
+      "description": "Ingress 라우팅 룰. host + path → 내부 workload service 매핑.",
+      "items": {
+        "type": "object",
+        "required": ["id", "host", "paths"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "name": { "type": "string" },
+          "host": { "type": "string" },
+          "tls": { "type": "boolean", "default": false },
+          "tls_secret": { "type": "string" },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["path", "workload_id", "port"],
+              "additionalProperties": false,
+              "properties": {
+                "path": { "type": "string" },
+                "path_type": { "enum": ["Prefix", "Exact", "ImplementationSpecific"], "default": "Prefix" },
+                "workload_id": { "type": "string" },
+                "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+              }
+            }
+          }
+        }
+      }
+    },
     "addons": {
       "type": "object",
       "additionalProperties": false,

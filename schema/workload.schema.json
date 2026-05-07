@@ -255,6 +255,51 @@
         }
       }
     },
+    "network": {
+      "type": "object",
+      "description": "워크로드 노출 설정. k8s Service + 외부 IP.",
+      "additionalProperties": false,
+      "properties": {
+        "service": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "enum": ["None", "ClusterIP", "NodePort", "LoadBalancer"],
+              "default": "ClusterIP"
+            },
+            "cluster_ip": {
+              "type": "string",
+              "description": "Service의 가상 IP (cluster.network.service_cidr 범위). 자동 할당 권장."
+            },
+            "lb_ip": {
+              "type": "string",
+              "description": "LoadBalancer 타입에서만 사용. 외부에서 접근하는 IP."
+            },
+            "ports": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["port"],
+                "additionalProperties": false,
+                "properties": {
+                  "name": { "type": "string" },
+                  "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+                  "target_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+                  "protocol": { "enum": ["TCP", "UDP"], "default": "TCP" },
+                  "node_port": {
+                    "type": "integer",
+                    "minimum": 30000,
+                    "maximum": 32767,
+                    "description": "NodePort/LoadBalancer 타입에서 사용. 30000-32767 범위."
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "helm": {
       "type": "object",
       "description": "Helm export 메타. Workload 1개 = chart 1개 (또는 umbrella의 sub-chart).",
