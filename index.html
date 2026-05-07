@@ -6,7 +6,7 @@
 <title>vk8s — k8s capacity studio</title>
 <meta name="description" content="vk8s: 가상 Kubernetes 환경을 설계·시뮬레이션하고 인프라 호환성을 검증하는 브라우저 도구.">
 <meta name="author" content="FCStudio">
-<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><circle cx='32' cy='32' r='26' fill='%234d9cff'/></svg>">
 <link rel="canonical" href="https://aiotool.net/vk8s/">
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&family=Pretendard:wght@300;400;500;600;700&display=swap');
@@ -236,6 +236,19 @@
   .view-tab.disabled {
     color: var(--text3);
     cursor: not-allowed;
+    opacity: 0.5;
+  }
+  .view-tab.disabled::after {
+    content: 'soon';
+    margin-left: 6px;
+    font-size: 9px;
+    color: var(--text3);
+    background: var(--surface2);
+    padding: 1px 5px;
+    border-radius: 3px;
+    text-transform: uppercase;
+    font-family: 'JetBrains Mono';
+    letter-spacing: 0.05em;
   }
   .view-tab .tab-num {
     color: var(--text3);
@@ -385,6 +398,119 @@
     border-radius: 6px;
     text-align: center;
   }
+  .cluster-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    padding: 2px 7px;
+    border-radius: 10px;
+    background: rgba(167,139,250,.12);
+    color: var(--purple);
+    font-family: 'JetBrains Mono';
+    margin-top: 6px;
+  }
+  .cluster-badge .role {
+    color: var(--text3);
+    font-size: 9px;
+    text-transform: uppercase;
+  }
+  .next-hint {
+    background: linear-gradient(135deg, var(--accent-glow), transparent);
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .next-hint .icon { font-size: 22px; color: var(--accent); }
+  .next-hint .body { flex: 1; }
+  .next-hint .body .head {
+    font-size: 12px;
+    color: var(--text2);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 2px;
+  }
+  .next-hint .body .lead { font-size: 13px; }
+  .role-tag {
+    display: inline-block;
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-family: 'JetBrains Mono';
+    text-transform: uppercase;
+  }
+  .role-tag[data-role="control-plane"] { background: rgba(77,156,255,.15); color: var(--accent); }
+  .role-tag[data-role="worker"] { background: rgba(52,211,153,.12); color: var(--green); }
+  .role-tag[data-role="etcd"] { background: rgba(167,139,250,.15); color: var(--purple); }
+  .role-tag[data-role="unassigned"] { background: var(--surface3); color: var(--text3); }
+  .row-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .row-list .row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    background: var(--surface2);
+    border-radius: 5px;
+    font-size: 12px;
+  }
+  .row-list .row .name { flex: 1; }
+  .row-list .row select.role {
+    padding: 2px 6px;
+    background: var(--surface3);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 3px;
+    font-size: 11px;
+  }
+  .row-list .row .x {
+    background: transparent;
+    border: none;
+    color: var(--text3);
+    cursor: pointer;
+    padding: 2px 6px;
+  }
+  .row-list .row .x:hover { color: var(--red); }
+  .checkbox-list {
+    max-height: 240px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 4px;
+    background: var(--surface2);
+  }
+  .checkbox-list label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 8px;
+    cursor: pointer;
+    border-radius: 3px;
+    font-size: 12px;
+    text-transform: none;
+    letter-spacing: 0;
+    color: var(--text);
+    margin: 0;
+  }
+  .checkbox-list label:hover { background: var(--surface3); }
+  .checkbox-list label .meta {
+    margin-left: auto;
+    color: var(--text3);
+    font-size: 10px;
+    font-family: 'JetBrains Mono';
+  }
+  .checkbox-list label.taken {
+    color: var(--text3);
+    cursor: not-allowed;
+  }
+  .checkbox-list label.taken .meta { color: var(--orange); }
 
   /* === Inspector === */
   .inspector {
@@ -940,7 +1066,7 @@ function addNode(seed) {
     const id = slug(tmpl.key) + "-" + uid();
     const node = {
       id,
-      name: seed.name ? (qty === 1 ? seed.name : `${seed.name}-${i+1}`) : `${tmpl.display_name} #${state.project.nodes.length + i + 1}`,
+      name: seed.name ? (qty === 1 ? seed.name : `${seed.name}-${i+1}`) : `${tmpl.display_name} #${state.project.nodes.length + 1}`,
       source: tmpl.source,
       brand: tmpl.brand,
       model: tmpl.key,
@@ -971,8 +1097,93 @@ function deleteEntity(kind, id) {
   } else if (kind === "node") {
     state.project.nodes = state.project.nodes.filter(n => n.id !== id);
     state.project.sites.forEach(s => s.node_ids = s.node_ids.filter(nid => nid !== id));
+    (state.project.clusters || []).forEach(c => c.node_ids = (c.node_ids || []).filter(nid => nid !== id));
+  } else if (kind === "cluster") {
+    const c = (state.project.clusters || []).find(x => x.id === id);
+    if (!c) return;
+    // unassign nodes from this cluster (set role back to unassigned)
+    for (const nid of c.node_ids || []) {
+      const n = state.project.nodes.find(x => x.id === nid);
+      if (n) n.cluster_role = "unassigned";
+    }
+    state.project.clusters = state.project.clusters.filter(x => x.id !== id);
   }
   if (state.ui.selectedId === id) state.ui.selectedId = null;
+  emit(); saveSoon();
+}
+
+//============ Cluster actions ============
+function addCluster(seed) {
+  if (!state.project) return;
+  if (!state.project.clusters) state.project.clusters = [];
+  const id = slug(seed.name) + "-" + uid();
+  const cluster = {
+    id,
+    name: seed.name || "cluster",
+    environment_tag: seed.environment_tag || "",
+    k8s_version: seed.k8s_version || "1.30",
+    ha_control_plane: !!seed.ha_control_plane,
+    node_ids: [],
+    addons: {
+      cni: seed.cni || "Calico",
+      ingress: seed.ingress || "NGINX",
+      metrics_server: true,
+      gpu_operator: !!seed.gpu_operator,
+      service_mesh: "None",
+    },
+    namespaces: [],
+    network_policies: [],
+    workloads: [],
+  };
+  state.project.clusters.push(cluster);
+  // assign initial nodes
+  for (const nid of (seed.node_ids || [])) {
+    assignNodeToCluster(nid, id, /*defaultRole*/null, /*silent*/true);
+  }
+  selectEntity("cluster", id);
+  emit(); saveSoon();
+  return cluster;
+}
+
+function getNodeCluster(nodeId) {
+  return (state.project?.clusters || []).find(c => (c.node_ids || []).includes(nodeId));
+}
+
+function assignNodeToCluster(nodeId, clusterId, defaultRole, silent = false) {
+  const n = state.project.nodes.find(x => x.id === nodeId);
+  const c = (state.project.clusters || []).find(x => x.id === clusterId);
+  if (!n || !c) return;
+  // remove from any other cluster (one cluster per node)
+  for (const other of state.project.clusters) {
+    if (other.id !== clusterId) other.node_ids = (other.node_ids || []).filter(nid => nid !== nodeId);
+  }
+  if (!c.node_ids.includes(nodeId)) c.node_ids.push(nodeId);
+  if (n.cluster_role === "unassigned" || defaultRole) {
+    n.cluster_role = defaultRole || "worker";
+  }
+  if (!silent) { emit(); saveSoon(); }
+}
+
+function removeNodeFromCluster(nodeId, clusterId) {
+  const c = (state.project.clusters || []).find(x => x.id === clusterId);
+  const n = state.project.nodes.find(x => x.id === nodeId);
+  if (!c) return;
+  c.node_ids = (c.node_ids || []).filter(nid => nid !== nodeId);
+  if (n) n.cluster_role = "unassigned";
+  emit(); saveSoon();
+}
+
+function updateClusterField(id, path, value) {
+  const c = state.project.clusters.find(x => x.id === id);
+  if (!c) return;
+  const parts = path.split(".");
+  let obj = c;
+  while (parts.length > 1) {
+    const p = parts.shift();
+    if (obj[p] == null) obj[p] = {};
+    obj = obj[p];
+  }
+  obj[parts[0]] = value;
   emit(); saveSoon();
 }
 
@@ -1138,17 +1349,41 @@ function renderTree() {
     // child nodes
     const nodes = (s.node_ids || []).map(id => p.nodes.find(n => n.id === id)).filter(Boolean);
     for (const n of nodes) {
+      const cluster = getNodeCluster(n.id);
+      const meta = cluster ? cluster.name : (n.spec?.form_factor || "");
       sitesSec.appendChild(el("div", {
         class: "tree-item child" + (state.ui.selectedKind === "node" && state.ui.selectedId === n.id ? " selected" : ""),
         onclick: () => selectEntity("node", n.id),
       }, [
         el("span", { class: "icon" }, ["▣"]),
         el("span", { class: "label" }, [n.name]),
-        el("span", { class: "meta" }, [n.spec?.form_factor || ""]),
+        el("span", { class: "meta", style: cluster ? { color: "var(--purple)" } : {} }, [meta]),
       ]));
     }
   }
   root.appendChild(sitesSec);
+
+  // Clusters section
+  const clusters = p.clusters || [];
+  const clustersSec = el("div", { class: "tree-section" });
+  clustersSec.appendChild(el("div", { class: "tree-section-header" }, [
+    "Clusters ", el("span", { class: "count" }, [`(${clusters.length})`]),
+  ]));
+  if (!clusters.length) {
+    clustersSec.appendChild(el("div", { class: "empty-hint" }, ["클러스터를 추가하세요."]));
+  }
+  for (const c of clusters) {
+    const meta = `${(c.node_ids || []).length} nodes`;
+    clustersSec.appendChild(el("div", {
+      class: "tree-item" + (state.ui.selectedKind === "cluster" && state.ui.selectedId === c.id ? " selected" : ""),
+      onclick: () => selectEntity("cluster", c.id),
+    }, [
+      el("span", { class: "icon" }, ["⎈"]),
+      el("span", { class: "label" }, [c.name]),
+      el("span", { class: "meta" }, [meta]),
+    ]));
+  }
+  root.appendChild(clustersSec);
 
   // Actions
   const actions = el("div", { class: "tree-actions" });
@@ -1156,6 +1391,7 @@ function renderTree() {
     actions.appendChild(el("button", { class: "add-btn", onclick: openAddSite }, ["＋ Add Site"]));
   }
   actions.appendChild(el("button", { class: "add-btn", onclick: openAddNode }, ["＋ Add Node"]));
+  actions.appendChild(el("button", { class: "add-btn", onclick: openAddCluster }, ["＋ Add Cluster"]));
   root.appendChild(actions);
 }
 
@@ -1170,6 +1406,7 @@ function renderInspector() {
   const k = state.ui.selectedKind, id = state.ui.selectedId;
   if (k === "site") renderSiteInspector(root, id);
   else if (k === "node") renderNodeInspector(root, id);
+  else if (k === "cluster") renderClusterInspector(root, id);
 }
 
 function renderSiteInspector(root, id) {
@@ -1310,10 +1547,32 @@ function renderNodeInspector(root, id) {
     }, siteOpts),
   ]));
 
-  // Cluster role
+  // Cluster
+  const myCluster = getNodeCluster(id);
+  const clusters = state.project.clusters || [];
+  root.appendChild(el("div", { class: "field" }, [
+    el("label", {}, ["Cluster"]),
+    el("select", {
+      onchange: e => {
+        const v = e.target.value;
+        if (v === "__none__") {
+          if (myCluster) removeNodeFromCluster(id, myCluster.id);
+        } else {
+          assignNodeToCluster(id, v);
+        }
+      },
+    }, [
+      el("option", { value: "__none__", selected: !myCluster ? "" : null }, ["(unassigned)"]),
+      ...clusters.map(c =>
+        el("option", { value: c.id, selected: myCluster && myCluster.id === c.id ? "" : null }, [c.name])),
+    ]),
+  ]));
+
+  // Cluster role (only meaningful when assigned)
   root.appendChild(el("div", { class: "field" }, [
     el("label", {}, ["Cluster Role"]),
     el("select", {
+      disabled: myCluster ? null : "",
       onchange: e => updateNodeField(id, "cluster_role", e.target.value),
     }, ["unassigned", "control-plane", "worker", "etcd"].map(r =>
       el("option", { value: r, selected: r === n.cluster_role ? "" : null }, [r]))),
@@ -1389,6 +1648,154 @@ function renderNodeInspector(root, id) {
   }
 }
 
+function renderClusterInspector(root, id) {
+  const c = state.project.clusters.find(x => x.id === id);
+  if (!c) return;
+
+  root.appendChild(el("div", { class: "insp-header" }, [
+    el("span", { class: "kind" }, ["Cluster"]),
+    el("span", { class: "name" }, [c.name]),
+    el("button", {
+      class: "delete", title: "Delete cluster",
+      onclick: () => { if (confirm(`클러스터 '${c.name}' 삭제? (노드는 unassigned로 돌아갑니다)`)) deleteEntity("cluster", id); },
+    }, ["🗑"]),
+  ]));
+
+  root.appendChild(el("div", { class: "field" }, [
+    el("label", {}, ["Name"]),
+    el("input", { value: c.name, oninput: e => updateClusterField(id, "name", e.target.value) }),
+  ]));
+
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [
+      el("label", {}, ["k8s version"]),
+      el("input", { value: c.k8s_version || "", placeholder: "1.30", oninput: e => updateClusterField(id, "k8s_version", e.target.value) }),
+    ]),
+    el("div", { class: "field" }, [
+      el("label", {}, ["Environment tag"]),
+      el("input", { value: c.environment_tag || "", placeholder: "prod", oninput: e => updateClusterField(id, "environment_tag", e.target.value) }),
+    ]),
+  ]));
+
+  // HA control plane
+  const haInput = el("input", {
+    type: "checkbox",
+    checked: c.ha_control_plane ? "" : null,
+    onchange: e => updateClusterField(id, "ha_control_plane", e.target.checked),
+  });
+  root.appendChild(el("label", { style: { display: "flex", alignItems: "center", gap: "8px", margin: "8px 0", fontSize: "12px", textTransform: "none", letterSpacing: 0 } }, [
+    haInput,
+    el("span", {}, ["HA control plane (≥3 control-plane 노드 권장)"]),
+  ]));
+
+  // Addons
+  root.appendChild(el("div", { class: "section-title" }, ["Add-ons"]));
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [
+      el("label", {}, ["CNI"]),
+      el("select", {
+        onchange: e => updateClusterField(id, "addons.cni", e.target.value),
+      }, ["Calico", "Cilium", "Flannel", "AWS-VPC-CNI", "Azure-CNI", "None"].map(v =>
+        el("option", { value: v, selected: (c.addons?.cni || "Calico") === v ? "" : null }, [v]))),
+    ]),
+    el("div", { class: "field" }, [
+      el("label", {}, ["Ingress"]),
+      el("select", {
+        onchange: e => updateClusterField(id, "addons.ingress", e.target.value),
+      }, ["NGINX", "Traefik", "AWS-ALB", "Istio-Gateway", "None"].map(v =>
+        el("option", { value: v, selected: (c.addons?.ingress || "NGINX") === v ? "" : null }, [v]))),
+    ]),
+  ]));
+  const gpuOpInput = el("input", {
+    type: "checkbox",
+    checked: c.addons?.gpu_operator ? "" : null,
+    onchange: e => updateClusterField(id, "addons.gpu_operator", e.target.checked),
+  });
+  root.appendChild(el("label", { style: { display: "flex", alignItems: "center", gap: "8px", margin: "8px 0", fontSize: "12px", textTransform: "none", letterSpacing: 0 } }, [
+    gpuOpInput,
+    el("span", {}, ["NVIDIA GPU Operator (GPU 노드 있을 때 권장)"]),
+  ]));
+
+  // Nodes assigned
+  const assignedNodes = (c.node_ids || []).map(nid => state.project.nodes.find(n => n.id === nid)).filter(Boolean);
+  root.appendChild(el("div", { class: "section-title" }, [`Nodes in cluster (${assignedNodes.length})`]));
+  if (!assignedNodes.length) {
+    root.appendChild(el("div", { class: "empty-hint" }, ["할당된 노드가 없습니다. 아래에서 추가하세요."]));
+  } else {
+    const list = el("div", { class: "row-list" });
+    for (const n of assignedNodes) {
+      list.appendChild(el("div", { class: "row" }, [
+        el("span", { class: "icon" }, ["▣"]),
+        el("span", { class: "name", style: { cursor: "pointer" }, onclick: () => selectEntity("node", n.id) }, [n.name]),
+        el("select", {
+          class: "role",
+          onchange: e => updateNodeField(n.id, "cluster_role", e.target.value),
+        }, ["control-plane", "worker", "etcd"].map(r =>
+          el("option", { value: r, selected: r === n.cluster_role ? "" : null }, [r]))),
+        el("button", { class: "x", title: "remove", onclick: () => removeNodeFromCluster(n.id, id) }, ["✕"]),
+      ]));
+    }
+    root.appendChild(list);
+  }
+
+  // Available nodes (not in any cluster)
+  const available = state.project.nodes.filter(n => !getNodeCluster(n.id));
+  if (available.length) {
+    root.appendChild(el("div", { class: "section-title" }, ["Add nodes"]));
+    const list = el("div", { class: "checkbox-list" });
+    for (const n of available) {
+      const site = state.project.sites.find(s => s.id === n.site_id);
+      list.appendChild(el("label", {}, [
+        el("input", {
+          type: "checkbox",
+          onchange: e => {
+            if (e.target.checked) assignNodeToCluster(n.id, id);
+          },
+        }),
+        el("span", {}, [n.name]),
+        el("span", { class: "meta" }, [`${n.brand} · ${site?.name || ""}`]),
+      ]));
+    }
+    root.appendChild(list);
+  }
+
+  // Quick stats
+  const totals = assignedNodes.reduce((acc, n) => {
+    acc.cpu += n.spec?.vcpu || 0;
+    acc.mem += n.spec?.memory_gb || 0;
+    acc.gpu += (n.spec?.gpu || []).reduce((a, g) => a + (g.count || 0), 0);
+    return acc;
+  }, { cpu: 0, mem: 0, gpu: 0 });
+  if (assignedNodes.length) {
+    root.appendChild(el("div", { class: "section-title" }, ["Cluster totals"]));
+    root.appendChild(el("div", { class: "compat-result" }, [
+      el("div", {}, [`Total: ${totals.cpu} vCPU · ${totals.mem} GB RAM · ${totals.gpu} GPUs`]),
+    ]));
+  }
+
+  // Findings preview (basic checks)
+  const cpCount = assignedNodes.filter(n => n.cluster_role === "control-plane").length;
+  const issues = [];
+  if (assignedNodes.length && cpCount === 0) issues.push({ sev: "err", msg: "control plane 노드 없음" });
+  if (c.ha_control_plane && cpCount > 0 && cpCount < 3) issues.push({ sev: "err", msg: `HA control plane은 ≥3 필요 (현재 ${cpCount})` });
+  if (c.ha_control_plane && cpCount >= 3 && cpCount % 2 === 0) issues.push({ sev: "warn", msg: `control plane ${cpCount}개 (짝수). etcd 쿼럼은 홀수 권장` });
+  const hasGpu = assignedNodes.some(n => (n.spec?.gpu || []).length > 0 || (n.spec?.gpu_chassis?.max_count || 0) > 0);
+  if (hasGpu && !c.addons?.gpu_operator) issues.push({ sev: "warn", msg: "GPU 노드 있음 — GPU Operator 활성화 권장" });
+  // mixed environments
+  const sites = new Set(assignedNodes.map(n => state.project.sites.find(s => s.id === n.site_id)?.kind).filter(Boolean));
+  if (sites.size > 1) issues.push({ sev: "warn", msg: "한 클러스터가 cloud+onprem 양쪽에 걸침" });
+
+  if (issues.length) {
+    root.appendChild(el("div", { class: "section-title" }, ["Findings (this cluster)"]));
+    const list = el("div", { class: "compat-result" });
+    for (const i of issues) {
+      const cls = i.sev === "err" ? "err" : "warn";
+      list.appendChild(el("div", { class: cls }, [`${i.sev === "err" ? "⊗" : "▲"} ${i.msg}`]));
+    }
+    root.appendChild(list);
+  }
+}
+
 function moveNodeToSite(nodeId, newSiteId) {
   const n = state.project.nodes.find(x => x.id === nodeId);
   if (!n || n.site_id === newSiteId) return;
@@ -1420,6 +1827,40 @@ function renderTopology() {
       el("p", {}, ["트리에서 ＋ Add Site로 첫 사이트를 만드세요."]),
     ]));
     return;
+  }
+
+  // Next step hint based on workflow progression
+  const totalNodes = p.nodes.length;
+  const hasCluster = (p.clusters || []).length > 0;
+  if (totalNodes === 0) {
+    root.appendChild(el("div", { class: "next-hint" }, [
+      el("span", { class: "icon" }, ["①"]),
+      el("div", { class: "body" }, [
+        el("div", { class: "head" }, ["Next step"]),
+        el("div", { class: "lead" }, ["좌측 ＋ Add Node로 노드를 추가하세요."]),
+      ]),
+      el("button", { class: "btn", onclick: openAddNode }, ["＋ Add Node"]),
+    ]));
+  } else if (!hasCluster) {
+    root.appendChild(el("div", { class: "next-hint" }, [
+      el("span", { class: "icon" }, ["②"]),
+      el("div", { class: "body" }, [
+        el("div", { class: "head" }, ["Next step"]),
+        el("div", { class: "lead" }, [`노드 ${totalNodes}개 추가됨. 이제 클러스터를 만들어 노드를 묶으세요.`]),
+      ]),
+      el("button", { class: "btn", onclick: openAddCluster }, ["＋ Add Cluster"]),
+    ]));
+  } else {
+    const unassigned = p.nodes.filter(n => !getNodeCluster(n.id)).length;
+    if (unassigned > 0) {
+      root.appendChild(el("div", { class: "next-hint" }, [
+        el("span", { class: "icon" }, ["▲"]),
+        el("div", { class: "body" }, [
+          el("div", { class: "head" }, ["Note"]),
+          el("div", { class: "lead" }, [`${unassigned}개 노드가 클러스터에 할당되지 않음. 클러스터를 선택해 추가하세요.`]),
+        ]),
+      ]));
+    }
   }
 
   for (const s of p.sites) {
@@ -1470,6 +1911,13 @@ function renderTopology() {
           totalGpu ? el("div", { class: "gpu-line" }, [
             `🟩 ${(n.spec.gpu || []).map(g => `${g.count}× ${g.model}`).join(", ")}`
           ]) : null,
+          (() => {
+            const cl = getNodeCluster(n.id);
+            return cl ? el("div", { class: "cluster-badge" }, [
+              `⎈ ${cl.name}`,
+              el("span", { class: "role" }, [n.cluster_role]),
+            ]) : null;
+          })(),
         ]));
       }
       card.appendChild(grid);
@@ -1694,6 +2142,86 @@ function openAddNode() {
       });
       closeModal();
     } }, ["Add"]),
+  ]);
+  root.appendChild(actions);
+
+  openModal(root);
+}
+
+//============ Add Cluster modal ============
+function openAddCluster() {
+  if (!state.project) return;
+
+  const root = el("div");
+  root.appendChild(el("h2", {}, ["Add Cluster"]));
+
+  const nameInput = el("input", { value: `cluster-${(state.project.clusters?.length || 0) + 1}` });
+  const versionInput = el("input", { value: "1.30" });
+  const tagInput = el("input", { value: "", placeholder: "prod" });
+
+  root.appendChild(el("div", { class: "field" }, [el("label", {}, ["Name"]), nameInput]));
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [el("label", {}, ["k8s version"]), versionInput]),
+    el("div", { class: "field" }, [el("label", {}, ["Environment tag"]), tagInput]),
+  ]));
+
+  const haInput = el("input", { type: "checkbox" });
+  root.appendChild(el("label", { style: { display: "flex", alignItems: "center", gap: "8px", margin: "8px 0", fontSize: "12px", color: "var(--text)" } }, [
+    haInput,
+    el("span", {}, ["HA control plane (≥3 control-plane 노드 필요)"]),
+  ]));
+
+  const cniSel = el("select", {}, ["Calico", "Cilium", "Flannel", "AWS-VPC-CNI", "None"].map(v => el("option", { value: v }, [v])));
+  const ingressSel = el("select", {}, ["NGINX", "Traefik", "AWS-ALB", "None"].map(v => el("option", { value: v }, [v])));
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [el("label", {}, ["CNI"]), cniSel]),
+    el("div", { class: "field" }, [el("label", {}, ["Ingress"]), ingressSel]),
+  ]));
+
+  // Node selection
+  const available = state.project.nodes.filter(n => !getNodeCluster(n.id));
+  const taken = state.project.nodes.filter(n => !!getNodeCluster(n.id));
+  root.appendChild(el("div", { class: "field" }, [
+    el("label", {}, [`Assign nodes (${available.length} available, ${taken.length} already in clusters)`]),
+  ]));
+
+  const checks = {};
+  const list = el("div", { class: "checkbox-list" });
+  if (state.project.nodes.length === 0) {
+    list.appendChild(el("div", { class: "empty-hint" }, ["노드가 없습니다. 먼저 노드를 추가하세요."]));
+  }
+  for (const n of state.project.nodes) {
+    const taken = getNodeCluster(n.id);
+    const site = state.project.sites.find(s => s.id === n.site_id);
+    const cb = el("input", {
+      type: "checkbox",
+      disabled: taken ? "" : null,
+      checked: !taken && available.length <= 8 ? "" : null,  // pre-check small batches
+    });
+    checks[n.id] = cb;
+    list.appendChild(el("label", { class: taken ? "taken" : "" }, [
+      cb,
+      el("span", {}, [n.name]),
+      el("span", { class: "meta" }, [taken ? `in ${taken.name}` : `${n.brand} · ${site?.name || ""}`]),
+    ]));
+  }
+  root.appendChild(list);
+
+  const actions = el("div", { class: "modal-actions" }, [
+    el("button", { class: "btn-ghost", onclick: closeModal }, ["Cancel"]),
+    el("button", { class: "btn", onclick: () => {
+      const node_ids = Object.entries(checks).filter(([_, cb]) => cb.checked).map(([id]) => id);
+      addCluster({
+        name: nameInput.value.trim() || "cluster",
+        k8s_version: versionInput.value.trim() || "1.30",
+        environment_tag: tagInput.value.trim(),
+        ha_control_plane: haInput.checked,
+        cni: cniSel.value,
+        ingress: ingressSel.value,
+        node_ids,
+      });
+      closeModal();
+    } }, ["Create Cluster"]),
   ]);
   root.appendChild(actions);
 
