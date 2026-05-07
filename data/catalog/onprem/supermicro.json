@@ -2,7 +2,7 @@
   "$schema_version": "0.2",
   "brand": "Supermicro",
   "source": "onprem",
-  "notes": "Supermicro GPU SuperServer 라인. v0.1에서는 GPU 시스템만 등재 (범용 1U/2U는 다른 브랜드 사용 가정).",
+  "notes": "Supermicro GPU SuperServer 라인 (Hopper) + AS-A21GE-NBRT (Blackwell). 범용 1U/2U는 다른 브랜드 사용 가정.",
   "entries": [
     {
       "key": "AS-4125GS-TNRT",
@@ -12,8 +12,8 @@
       "display_name": "Supermicro AS-4125GS-TNRT",
       "generation": "X13",
       "release_year": 2023,
-      "tags": ["4u", "gpu", "amd-epyc", "pcie", "h100-nvl", "h200-nvl"],
-      "notes": "4U AMD EPYC. 8× 더블폭 PCIe GPU (H100 NVL/H200 NVL/L40S). NVLink Bridge 페어링.",
+      "tags": ["4u", "gpu", "amd-epyc", "pcie", "h200-nvl", "h100-nvl"],
+      "notes": "4U AMD EPYC. 8× 더블폭 PCIe GPU. H200 NVL / H100 / L40S / L40 지원. NVLink Bridge 페어링.",
       "spec": {
         "vcpu": 96,
         "memory_gb": 1536,
@@ -28,8 +28,41 @@
         "gpu_chassis": {
           "max_count": 8,
           "supported_form_factors": ["PCIe-FH"],
-          "supported_models": ["H100-PCIe", "A100-PCIe-80G", "L40S"],
+          "supported_models": ["H200-NVL", "H100-PCIe", "A100-PCIe-80G", "L40S", "L40"],
           "nvlink_topology": "bridge-pair"
+        },
+        "gpu": []
+      }
+    },
+    {
+      "key": "SYS-A21GE-NBRT",
+      "brand": "Supermicro",
+      "source": "onprem",
+      "category": "GPU",
+      "display_name": "Supermicro AS-A21GE-NBRT (HGX B200)",
+      "generation": "X14-Blackwell",
+      "release_year": 2024,
+      "tags": ["4u", "gpu", "amd-epyc", "sxm", "hgx", "blackwell", "b200", "training"],
+      "notes": "4U HGX B200 8장 (Blackwell SXM5, NVSwitch 5세대). AMD EPYC 9005. 가장 컴팩트한 8x B200 플랫폼.",
+      "spec": {
+        "vcpu": 192,
+        "memory_gb": 3072,
+        "disks": [{ "size_gb": 3840, "type": "NVMe", "count": 16 }],
+        "nics": [
+          { "speed_gbps": 800, "count": 8, "interconnect": "InfiniBand" },
+          { "speed_gbps": 100, "count": 2 }
+        ],
+        "form_factor": "4U",
+        "power": {
+          "psu_max_w": 12000,
+          "typical_w_base": 2800,
+          "psu_redundancy": "N+N"
+        },
+        "gpu_chassis": {
+          "max_count": 8,
+          "supported_form_factors": ["SXM"],
+          "supported_models": ["B200-SXM", "B100-SXM"],
+          "nvlink_topology": "nvswitch-mesh"
         },
         "gpu": []
       }

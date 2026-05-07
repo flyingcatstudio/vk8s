@@ -147,6 +147,30 @@
       }
     },
     {
+      "key": "g6e.12xlarge",
+      "brand": "AWS",
+      "source": "cloud",
+      "category": "GPU",
+      "display_name": "AWS g6e.12xlarge (4× L40S)",
+      "generation": "Ada Lovelace",
+      "release_year": 2024,
+      "tags": ["gpu", "l40s", "inference", "graphics", "video"],
+      "notes": "L40S 4장 (PCIe). 추론·그래픽·비디오 인코딩. g6 대비 더 큰 VRAM(48GB)와 처리량.",
+      "spec": {
+        "vcpu": 48,
+        "memory_gb": 384,
+        "disks": [{ "size_gb": 3760, "type": "NVMe", "count": 1 }],
+        "nics": [{ "speed_gbps": 40, "count": 1 }],
+        "gpu_chassis": {
+          "max_count": 4,
+          "supported_form_factors": ["PCIe-FH"],
+          "supported_models": ["L40S"],
+          "nvlink_topology": "none"
+        },
+        "gpu": [{ "model": "L40S", "form_factor": "PCIe-FH", "count": 4 }]
+      }
+    },
+    {
       "key": "p4d.24xlarge",
       "brand": "AWS",
       "source": "cloud",
@@ -216,6 +240,30 @@
           "nvlink_topology": "nvswitch-mesh"
         },
         "gpu": [{ "model": "H200-SXM", "form_factor": "SXM", "count": 8, "nvlink_enabled": true }]
+      }
+    },
+    {
+      "key": "p6-b200.48xlarge",
+      "brand": "AWS",
+      "source": "cloud",
+      "category": "GPU",
+      "display_name": "AWS p6-b200.48xlarge (8× B200 192GB)",
+      "generation": "Blackwell",
+      "release_year": 2025,
+      "tags": ["gpu", "b200", "training", "sxm", "blackwell", "efa"],
+      "notes": "HGX B200 8장 (192GB HBM3e SXM5, NVSwitch 5세대). EFAv3. p5 대비 약 2.5× 학습 성능.",
+      "spec": {
+        "vcpu": 192,
+        "memory_gb": 2048,
+        "disks": [{ "size_gb": 3840, "type": "NVMe", "count": 8 }],
+        "nics": [{ "speed_gbps": 3200, "count": 1, "interconnect": "Ethernet" }],
+        "gpu_chassis": {
+          "max_count": 8,
+          "supported_form_factors": ["SXM"],
+          "supported_models": ["B200-SXM"],
+          "nvlink_topology": "nvswitch-mesh"
+        },
+        "gpu": [{ "model": "B200-SXM", "form_factor": "SXM", "count": 8, "nvlink_enabled": true }]
       }
     }
   ]

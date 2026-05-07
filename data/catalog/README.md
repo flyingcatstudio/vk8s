@@ -7,13 +7,13 @@
 ```
 catalog/
 ├── cloud/
-│   ├── aws.json       ← EC2 (m6i, c7i, r7i, i4i, g6, p4d, p5, p5e)
+│   ├── aws.json       ← EC2 (m6i, c7i, r7i, i4i, g6, g6e, p4d, p5, p5e, p6-b200)
 │   └── ncp.json       ← NCP Standard / CPU / Memory / GPU
 └── onprem/
-    ├── dell.json      ← PowerEdge R660, R760, R760xa, XE8640, XE9680
-    ├── hpe.json       ← ProLiant DL360/DL380/DL380a Gen11, Cray XD670
-    ├── lenovo.json    ← ThinkSystem SR630/SR650/SR675/SR685a V3
-    └── supermicro.json← AS-4125GS-TNRT, SYS-821GE-TNHR, SYS-821GV-TNR (HGX H200)
+    ├── dell.json      ← PowerEdge R660, R760, R760xa, XE8640, XE9680, XE9685L (Blackwell)
+    ├── hpe.json       ← ProLiant DL360/DL380/DL380a Gen11, Cray XD670, Cray XD685 (Blackwell)
+    ├── lenovo.json    ← ThinkSystem SR630/SR650/SR675/SR685a V3, SC777 V4 (Blackwell, Neptune)
+    └── supermicro.json← AS-4125GS-TNRT, SYS-821GE-TNHR, SYS-821GV-TNR, AS-A21GE-NBRT (Blackwell)
 ```
 
 ## 파일 포맷
@@ -37,7 +37,7 @@ catalog/
 
 - 대표 모델 위주, 모든 SKU 망라 X
 - 가격 정보 제외
-- onprem: 16세대(2023~2024), GPU는 H100/H200/A100/L40S/L4 위주
+- onprem: 16~17세대(2023~2025), GPU는 B200/B100/H100/H200/A100/L40S/L40/L4 위주
 - cloud: 대표 인스턴스 타입만 (전체 패밀리 X)
 
 ## 데이터 갱신 정책

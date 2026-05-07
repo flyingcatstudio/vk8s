@@ -2,7 +2,7 @@
   "$schema_version": "0.2",
   "brand": "Lenovo",
   "source": "onprem",
-  "notes": "Lenovo ThinkSystem V3 (2023~). IBM x86 사업은 2014년 Lenovo로 이전됨 — 'IBM 서버'는 현재 Lenovo로 표기.",
+  "notes": "Lenovo ThinkSystem V3 (Hopper) + Neptune SC777 V4 (Blackwell, 액냉). IBM x86 사업은 2014년 Lenovo로 이전됨 — 'IBM 서버'는 현재 Lenovo로 표기.",
   "entries": [
     {
       "key": "ThinkSystem-SR630-V3",
@@ -73,7 +73,7 @@
       "generation": "V3",
       "release_year": 2023,
       "tags": ["3u", "gpu", "amd-epyc", "sxm", "pcie", "training"],
-      "notes": "3U AMD EPYC. SXM5 (HGX H100 4장) 또는 PCIe-FH 8장 옵션.",
+      "notes": "3U AMD EPYC. SXM5 (HGX H100 4장) 또는 PCIe-FH 8장 옵션. H200-NVL/L40 PCIe 변형도 지원.",
       "spec": {
         "vcpu": 96,
         "memory_gb": 1536,
@@ -91,7 +91,40 @@
         "gpu_chassis": {
           "max_count": 8,
           "supported_form_factors": ["SXM", "PCIe-FH"],
-          "supported_models": ["H100-SXM", "H100-PCIe", "A100-PCIe-80G", "L40S"],
+          "supported_models": ["H100-SXM", "H100-PCIe", "H200-NVL", "A100-PCIe-80G", "L40S", "L40"],
+          "nvlink_topology": "nvswitch-mesh"
+        },
+        "gpu": []
+      }
+    },
+    {
+      "key": "ThinkSystem-SC777-V4",
+      "brand": "Lenovo",
+      "source": "onprem",
+      "category": "GPU",
+      "display_name": "Lenovo ThinkSystem SC777 V4 (Neptune, HGX B200)",
+      "generation": "V4-Neptune",
+      "release_year": 2024,
+      "tags": ["8u", "gpu", "amd-epyc", "sxm", "blackwell", "b200", "liquid-cooled", "neptune", "training"],
+      "notes": "Lenovo Neptune 액냉 8U. HGX B200 8장 (Blackwell SXM5, NVSwitch 5세대). 차세대 LLM 학습. 액냉 필수.",
+      "spec": {
+        "vcpu": 192,
+        "memory_gb": 3072,
+        "disks": [{ "size_gb": 3840, "type": "NVMe", "count": 8 }],
+        "nics": [
+          { "speed_gbps": 800, "count": 8, "interconnect": "InfiniBand" },
+          { "speed_gbps": 100, "count": 2 }
+        ],
+        "form_factor": "8U",
+        "power": {
+          "psu_max_w": 14000,
+          "typical_w_base": 3500,
+          "psu_redundancy": "N+N"
+        },
+        "gpu_chassis": {
+          "max_count": 8,
+          "supported_form_factors": ["SXM"],
+          "supported_models": ["B200-SXM", "B100-SXM"],
           "nvlink_topology": "nvswitch-mesh"
         },
         "gpu": []

@@ -2,7 +2,7 @@
   "$schema_version": "0.2",
   "brand": "HPE",
   "source": "onprem",
-  "notes": "HPE ProLiant Gen11 (Sapphire Rapids/EPYC) + Cray XD GPU 시스템.",
+  "notes": "HPE ProLiant Gen11 + Cray XD (Hopper) + Cray XD685 (Blackwell) GPU 시스템.",
   "entries": [
     {
       "key": "ProLiant-DL360-Gen11",
@@ -73,7 +73,7 @@
       "generation": "Gen11",
       "release_year": 2023,
       "tags": ["4u", "gpu", "pcie", "nvlink-bridge", "inference"],
-      "notes": "4U GPU 가속 서버. 4× 더블폭 PCIe-FH GPU. NVLink Bridge 페어링.",
+      "notes": "4U GPU 가속 서버. 4× 더블폭 PCIe-FH GPU. NVLink Bridge 페어링. H200-NVL 지원.",
       "spec": {
         "vcpu": 112,
         "memory_gb": 2048,
@@ -88,8 +88,41 @@
         "gpu_chassis": {
           "max_count": 4,
           "supported_form_factors": ["PCIe-FH"],
-          "supported_models": ["H100-PCIe", "A100-PCIe-80G", "L40S"],
+          "supported_models": ["H200-NVL", "H100-PCIe", "A100-PCIe-80G", "L40S", "L40"],
           "nvlink_topology": "bridge-pair"
+        },
+        "gpu": []
+      }
+    },
+    {
+      "key": "Cray-XD685",
+      "brand": "HPE",
+      "source": "onprem",
+      "category": "GPU",
+      "display_name": "HPE Cray XD685 (HGX B200)",
+      "generation": "XD-Blackwell",
+      "release_year": 2024,
+      "tags": ["5u", "gpu", "sxm", "hgx", "blackwell", "b200", "training", "cray"],
+      "notes": "5U HGX B200 8장 (Blackwell SXM5, NVSwitch 5세대). AMD EPYC 9005. 차세대 LLM 학습.",
+      "spec": {
+        "vcpu": 192,
+        "memory_gb": 3072,
+        "disks": [{ "size_gb": 3840, "type": "NVMe", "count": 8 }],
+        "nics": [
+          { "speed_gbps": 800, "count": 8, "interconnect": "InfiniBand" },
+          { "speed_gbps": 100, "count": 2 }
+        ],
+        "form_factor": "5U",
+        "power": {
+          "psu_max_w": 12000,
+          "typical_w_base": 2900,
+          "psu_redundancy": "N+N"
+        },
+        "gpu_chassis": {
+          "max_count": 8,
+          "supported_form_factors": ["SXM"],
+          "supported_models": ["B200-SXM", "B100-SXM"],
+          "nvlink_topology": "nvswitch-mesh"
         },
         "gpu": []
       }
