@@ -1232,6 +1232,12 @@ const HELP = {
     body: "서비스 간 mTLS, 트래픽 정책, 관측성을 사이드카로 제공. 운영 복잡도가 크게 늘어남.",
     reco: "서비스 5개 이상 + 보안/관측성 요구 있을 때 도입. 작은 클러스터는 불필요.",
   },
+  "cluster.preset": {
+    cat: "클러스터",
+    title: "Production Preset",
+    body: "k8s production에서 보통 필요한 것들을 한 번에 자동 추가: HA control-plane(≥3노드), 표준 namespace(ingress-nginx/cert-manager/monitoring/logging), 플랫폼 워크로드(nginx-ingress/cert-manager/Prometheus/Grafana/Loki/metrics-server), default-deny NP, ResourceQuota, addons(CNI=Calico/ingress=NGINX/metrics-server).",
+    reco: "이미 있는 namespace/workload는 건드리지 않음 (idempotent). dev cluster는 monitoring/logging 끄고 적용해도 OK. backup/secret/gitops/mesh는 옵션.",
+  },
 
   // ───── 카탈로그 / 일반 ─────
   "catalog.brand": {
@@ -2394,6 +2400,215 @@ function deleteNetworkPolicy(clusterId, npId) {
   const c = state.project.clusters.find(x => x.id === clusterId);
   if (!c || !c.network_policies) return;
   c.network_policies = c.network_policies.filter(np => np.id !== npId);
+  emit(); saveSoon();
+}
+
+//============ Cluster Production Preset ============
+function applyClusterPreset(clusterId, opts = {}) {
+  const c = state.project.clusters.find(x => x.id === clusterId);
+  if (!c) return;
+  const o = {
+    haControlPlane: true, ingress: true, tls: true, monitoring: true,
+    logging: true, metricsServer: true, backup: false,
+    secretStore: false, gitops: false, mesh: false,
+    networkPolicies: true, resourceQuotas: true,
+    ...opts,
+  };
+
+  // 1. HA control plane: if ≥3 nodes, mark first 3 as cp+worker (preserving worker)
+  if (o.haControlPlane) {
+    const nodes = (c.node_ids || []).map(id => state.project.nodes.find(n => n.id === id)).filter(Boolean);
+    if (nodes.length >= 3) {
+      for (let i = 0; i < 3; i++) {
+        const n = nodes[i];
+        if (!Array.isArray(n.cluster_roles)) n.cluster_roles = [];
+        if (!n.cluster_roles.includes("control-plane")) n.cluster_roles.push("control-plane");
+        if (!n.cluster_roles.includes("worker")) n.cluster_roles.push("worker");
+      }
+      c.ha_control_plane = true;
+    } else if (nodes.length >= 1) {
+      // Single/dual: dual-role on the first
+      const n = nodes[0];
+      if (!Array.isArray(n.cluster_roles)) n.cluster_roles = [];
+      if (!n.cluster_roles.includes("control-plane")) n.cluster_roles.push("control-plane");
+      if (!n.cluster_roles.includes("worker")) n.cluster_roles.push("worker");
+    }
+  }
+
+  // 2. Namespaces
+  if (!c.namespaces) c.namespaces = [];
+  const ensureNs = (name, default_deny = false, labels = {}) => {
+    if (!c.namespaces.some(n => n.name === name)) {
+      const ns = { name, default_deny, labels };
+      c.namespaces.push(ns);
+      return ns;
+    }
+    return c.namespaces.find(n => n.name === name);
+  };
+  if (o.ingress) ensureNs("ingress-nginx", false, { "kubernetes.io/metadata.name": "ingress-nginx" });
+  if (o.tls) ensureNs("cert-manager", false);
+  if (o.monitoring) ensureNs("monitoring", true, { tier: "platform" });
+  if (o.logging) ensureNs("logging", true, { tier: "platform" });
+  if (o.backup) ensureNs("velero", false);
+  if (o.secretStore) ensureNs("external-secrets", false);
+  if (o.gitops) ensureNs("argocd", false);
+  if (o.mesh) ensureNs("istio-system", false);
+
+  // 3. Platform workloads
+  if (!c.workloads) c.workloads = [];
+  const addWl = (seed) => {
+    if (c.workloads.some(w => w.name === seed.name)) return;
+    const id = slug(seed.name) + "-" + uid();
+    const wl = {
+      id,
+      name: seed.name,
+      category: seed.category || "Other",
+      namespace: seed.namespace,
+      labels: seed.labels || { app: slug(seed.name) },
+      replicas: seed.replicas || 1,
+      kind: seed.kind || "Deployment",
+      resources: seed.resources || { requests: { cpu: 0.1, memory_gb: 0.25 } },
+    };
+    if (seed.runtime) wl.runtime = seed.runtime;
+    if (seed.network) wl.network = seed.network;
+    if (seed.persistent_volumes) wl.persistent_volumes = seed.persistent_volumes;
+    c.workloads.push(wl);
+  };
+
+  if (o.ingress) {
+    addWl({
+      name: "ingress-nginx-controller", category: "API", namespace: "ingress-nginx",
+      replicas: 2,
+      resources: { requests: { cpu: 0.1, memory_gb: 0.25 } },
+      network: { service: { type: "LoadBalancer", ports: [
+        { name: "http",  port: 80,  target_port: 80,  protocol: "TCP" },
+        { name: "https", port: 443, target_port: 443, protocol: "TCP" },
+      ] } },
+    });
+  }
+  if (o.tls) {
+    addWl({
+      name: "cert-manager", category: "Other", namespace: "cert-manager",
+      replicas: 1,
+      resources: { requests: { cpu: 0.05, memory_gb: 0.128 } },
+    });
+  }
+  if (o.monitoring) {
+    addWl({
+      name: "prometheus", category: "Other", namespace: "monitoring", kind: "StatefulSet",
+      replicas: 1,
+      resources: { requests: { cpu: 0.5, memory_gb: 4 } },
+      persistent_volumes: [{ size_gb: 100, access_mode: "RWO", storage_class: "" }],
+      network: { service: { type: "ClusterIP", ports: [{ name: "web", port: 9090, target_port: 9090, protocol: "TCP" }] } },
+    });
+    addWl({
+      name: "grafana", category: "Frontend", namespace: "monitoring",
+      replicas: 1,
+      resources: { requests: { cpu: 0.1, memory_gb: 0.5 } },
+      network: { service: { type: "ClusterIP", ports: [{ name: "http", port: 3000, target_port: 3000, protocol: "TCP" }] } },
+    });
+  }
+  if (o.logging) {
+    addWl({
+      name: "loki", category: "Other", namespace: "logging", kind: "StatefulSet",
+      replicas: 1,
+      resources: { requests: { cpu: 0.5, memory_gb: 2 } },
+      persistent_volumes: [{ size_gb: 200, access_mode: "RWO", storage_class: "" }],
+    });
+  }
+  if (o.metricsServer) {
+    addWl({
+      name: "metrics-server", category: "Other", namespace: "kube-system",
+      replicas: 1,
+      resources: { requests: { cpu: 0.05, memory_gb: 0.128 } },
+    });
+  }
+  if (o.backup) {
+    addWl({
+      name: "velero", category: "Other", namespace: "velero",
+      replicas: 1,
+      resources: { requests: { cpu: 0.1, memory_gb: 0.25 } },
+    });
+  }
+  if (o.secretStore) {
+    addWl({
+      name: "external-secrets-operator", category: "Other", namespace: "external-secrets",
+      replicas: 1,
+      resources: { requests: { cpu: 0.05, memory_gb: 0.128 } },
+    });
+  }
+  if (o.gitops) {
+    addWl({
+      name: "argocd-server", category: "API", namespace: "argocd",
+      replicas: 2,
+      resources: { requests: { cpu: 0.2, memory_gb: 0.5 } },
+      network: { service: { type: "ClusterIP", ports: [{ name: "https", port: 443, target_port: 8080, protocol: "TCP" }] } },
+    });
+  }
+  if (o.mesh) {
+    addWl({
+      name: "istiod", category: "Other", namespace: "istio-system",
+      replicas: 1,
+      resources: { requests: { cpu: 0.5, memory_gb: 2 } },
+    });
+  }
+
+  // 4. NetworkPolicies (default-deny + same-ns allow on prod ns)
+  if (o.networkPolicies) {
+    if (!c.network_policies) c.network_policies = [];
+    const addNp = (seed) => {
+      if (c.network_policies.some(x => x.name === seed.name)) return;
+      c.network_policies.push({
+        id: slug(seed.name) + "-" + uid(),
+        name: seed.name,
+        namespace: seed.namespace,
+        preset: seed.preset,
+        policy_types: seed.policy_types || ["Ingress"],
+        ingress: seed.ingress,
+        egress: seed.egress,
+      });
+    };
+    if (o.monitoring) {
+      addNp({ name: "monitoring-default-deny", namespace: "monitoring", preset: "default-deny",
+              policy_types: ["Ingress", "Egress"], ingress: [], egress: [] });
+      addNp({ name: "monitoring-allow-same-ns", namespace: "monitoring", preset: "allow-from-same-ns",
+              ingress: [{ from_namespaces: ["monitoring"] }] });
+      addNp({ name: "monitoring-allow-from-ingress", namespace: "monitoring", preset: "allow-from-namespace",
+              ingress: [{ from_namespaces: ["ingress-nginx"] }] });
+    }
+    if (o.logging) {
+      addNp({ name: "logging-default-deny", namespace: "logging", preset: "default-deny",
+              policy_types: ["Ingress", "Egress"], ingress: [], egress: [] });
+      addNp({ name: "logging-allow-same-ns", namespace: "logging", preset: "allow-from-same-ns",
+              ingress: [{ from_namespaces: ["logging"] }] });
+    }
+  }
+
+  // 5. Addons
+  if (!c.addons) c.addons = {};
+  if (o.ingress) c.addons.ingress = "NGINX";
+  if (!c.addons.cni || c.addons.cni === "None") c.addons.cni = "Calico";
+  if (o.metricsServer) c.addons.metrics_server = true;
+  if (o.mesh) c.addons.service_mesh = "Istio";
+  // GPU operator if any GPU node in cluster
+  const hasGpu = (c.node_ids || []).some(nid => {
+    const n = state.project.nodes.find(x => x.id === nid);
+    return (n?.spec?.gpu || []).length > 0;
+  });
+  if (hasGpu) c.addons.gpu_operator = true;
+
+  // 6. ResourceQuotas
+  if (o.resourceQuotas) {
+    const setQuota = (nsName, quota) => {
+      const ns = c.namespaces.find(n => n.name === nsName);
+      if (ns && !ns.resource_quota) ns.resource_quota = quota;
+    };
+    if (o.monitoring) setQuota("monitoring", { cpu: 8, memory_gb: 32, max_pods: 50 });
+    if (o.logging) setQuota("logging", { cpu: 8, memory_gb: 32, max_pods: 30 });
+    if (o.tls) setQuota("cert-manager", { cpu: 2, memory_gb: 4, max_pods: 10 });
+    if (o.ingress) setQuota("ingress-nginx", { cpu: 4, memory_gb: 8, max_pods: 20 });
+  }
+
   emit(); saveSoon();
 }
 
@@ -3989,6 +4204,21 @@ function renderClusterInspector(root, id) {
     el("span", {}, ["NVIDIA GPU Operator (GPU 노드 있을 때 권장)"]),
     helpIcon("cluster.gpu_operator"),
   ]));
+
+  // Production preset CTA
+  const presetTitle = el("div", { class: "section-title" }, ["Production Preset"]);
+  presetTitle.appendChild(helpIcon("cluster.preset"));
+  root.appendChild(presetTitle);
+  root.appendChild(el("div", {
+    style: { fontSize: "11px", color: "var(--text2)", marginBottom: "8px" },
+  }, [
+    "ingress-nginx · cert-manager · prometheus + grafana · loki · metrics-server · default-deny NP · ResourceQuota · HA control plane을 한 번에 설정.",
+  ]));
+  root.appendChild(el("button", {
+    class: "add-btn",
+    style: { width: "100%", marginBottom: "12px" },
+    onclick: () => openClusterPreset(id),
+  }, ["⚙ Apply Production Preset…"]));
 
   // Network section
   const net = c.network || {};
@@ -6923,6 +7153,14 @@ function openAddCluster() {
     helpIcon("cluster.ha_control_plane"),
   ]));
 
+  // Production preset (default ON)
+  const presetInput = el("input", { type: "checkbox", checked: "" });
+  root.appendChild(el("label", { style: { display: "flex", alignItems: "center", gap: "8px", margin: "8px 0", fontSize: "12px", color: "var(--text)" } }, [
+    presetInput,
+    el("span", {}, ["Apply Production Preset on create"]),
+    helpIcon("cluster.preset"),
+  ]));
+
   const cniSel = el("select", {}, ["Calico", "Cilium", "Flannel", "AWS-VPC-CNI", "None"].map(v => el("option", { value: v }, [v])));
   const ingressSel = el("select", {}, ["NGINX", "Traefik", "AWS-ALB", "None"].map(v => el("option", { value: v }, [v])));
   root.appendChild(el("div", { class: "field-row" }, [
@@ -6973,7 +7211,7 @@ function openAddCluster() {
     el("button", { class: "btn-ghost", onclick: closeModal }, ["Cancel"]),
     el("button", { class: "btn", onclick: () => {
       const node_ids = Object.entries(checks).filter(([_, cb]) => cb.checked).map(([id]) => id);
-      addCluster({
+      const cluster = addCluster({
         name: nameInput.value.trim() || "cluster",
         k8s_version: versionInput.value.trim() || "1.30",
         environment_tag: tagInput.value.trim(),
@@ -6985,6 +7223,10 @@ function openAddCluster() {
         node_subnet: nodeSubnetInput.value.trim() || "192.168.10.0/24",
         node_ids,
       });
+      // Optional preset bootstrap
+      if (cluster && presetInput.checked) {
+        applyClusterPreset(cluster.id);
+      }
       closeModal();
     } }, ["Create Cluster"]),
   ]);
@@ -7542,6 +7784,83 @@ function openAddSiteLink() {
     } }, ["Add"]),
   ]));
   openModal(root);
+}
+
+//============ Cluster Production Preset modal ============
+function openClusterPreset(clusterId) {
+  const c = state.project.clusters.find(x => x.id === clusterId);
+  if (!c) return;
+
+  const root = el("div");
+  root.appendChild(el("h2", {}, ["Apply Production Preset"]));
+  root.appendChild(el("div", {
+    style: { fontSize: "12px", color: "var(--text2)", marginBottom: "12px" },
+  }, [
+    `Cluster: `, el("strong", {}, [c.name]),
+    `. 선택한 항목만 추가 — 이미 있는 namespace/workload는 건드리지 않습니다 (idempotent).`,
+  ]));
+
+  const options = [
+    { key: "haControlPlane", label: "HA Control Plane",
+      desc: "노드 ≥3이면 첫 3개에 control-plane 역할 추가 (worker와 겸용)", default: true },
+    { key: "ingress", label: "Ingress Controller (nginx)",
+      desc: "ingress-nginx ns + ingress-nginx-controller (LB 80/443)", default: true },
+    { key: "tls", label: "TLS Cert Manager",
+      desc: "cert-manager ns + cert-manager 워크로드 (자동 인증서 발급)", default: true },
+    { key: "monitoring", label: "Monitoring (Prometheus + Grafana)",
+      desc: "monitoring ns (default-deny) + prometheus(StatefulSet) + grafana", default: true },
+    { key: "logging", label: "Logging (Loki)",
+      desc: "logging ns (default-deny) + loki(StatefulSet)", default: true },
+    { key: "metricsServer", label: "Metrics Server",
+      desc: "kube-system에 metrics-server (HPA 동작에 필요)", default: true },
+    { key: "networkPolicies", label: "Default-Deny Network Policies",
+      desc: "monitoring/logging에 default-deny + same-ns allow", default: true },
+    { key: "resourceQuotas", label: "Resource Quotas",
+      desc: "platform ns들에 적정 quota 자동 설정", default: true },
+    { key: "backup", label: "Backup (Velero)",
+      desc: "velero ns + velero 워크로드 (S3 등 백업 타겟 별도 설정 필요)", default: false },
+    { key: "secretStore", label: "External Secrets Operator",
+      desc: "external-secrets ns + ESO (Vault/AWS Secrets 통합)", default: false },
+    { key: "gitops", label: "GitOps (ArgoCD)",
+      desc: "argocd ns + argocd-server (Git 기반 배포)", default: false },
+    { key: "mesh", label: "Service Mesh (Istio)",
+      desc: "istio-system ns + istiod. 운영 복잡도 큼", default: false },
+  ];
+
+  const inputs = {};
+  for (const opt of options) {
+    const cb = el("input", { type: "checkbox", checked: opt.default ? "" : null });
+    inputs[opt.key] = cb;
+    root.appendChild(el("label", {
+      style: {
+        display: "flex", alignItems: "flex-start", gap: "8px",
+        padding: "8px 10px", margin: "3px 0",
+        background: "var(--surface2)", border: "1px solid var(--border)",
+        borderRadius: "5px", cursor: "pointer",
+        textTransform: "none", letterSpacing: 0,
+      },
+    }, [
+      cb,
+      el("div", { style: { flex: 1 } }, [
+        el("div", { style: { fontSize: "12px", fontWeight: 600, color: "var(--text)" } }, [opt.label]),
+        el("div", { style: { fontSize: "11px", color: "var(--text2)", marginTop: "2px" } }, [opt.desc]),
+      ]),
+    ]));
+  }
+
+  root.appendChild(el("div", { class: "modal-actions" }, [
+    el("button", { class: "btn-ghost", onclick: closeModal }, ["Cancel"]),
+    el("button", { class: "btn", onclick: () => {
+      const opts = {};
+      for (const k of Object.keys(inputs)) opts[k] = inputs[k].checked;
+      applyClusterPreset(clusterId, opts);
+      closeModal();
+    } }, ["Apply"]),
+  ]));
+
+  openModal(root);
+  // Wider modal for all options
+  $("#modalContent").style.maxWidth = "640px";
 }
 
 //============ Splash ============
