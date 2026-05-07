@@ -695,6 +695,9 @@
     justify-content: center;
     padding: 32px;
   }
+  /* splash leaves topbar accessible so Help/Import work pre-project */
+  #splash { top: var(--topbar-h); }
+  .topbar { position: relative; z-index: 110; background: var(--surface); }
   .overlay.hidden { display: none; }
   .splash-card {
     width: 100%;
@@ -810,6 +813,116 @@
   .compat-result .warn { color: var(--yellow); }
   .compat-result .err { color: var(--red); }
 
+  /* === Help icon + tooltip === */
+  .help {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--surface3);
+    color: var(--text3);
+    font-size: 9px;
+    font-weight: 700;
+    cursor: help;
+    margin-left: 6px;
+    vertical-align: middle;
+    user-select: none;
+    border: 1px solid var(--border);
+    transition: all .15s;
+    flex-shrink: 0;
+  }
+  .help:hover, .help.pinned {
+    background: var(--accent-glow);
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+  .help.pinned { box-shadow: 0 0 0 2px rgba(77,156,255,.2); }
+
+  .tooltip {
+    position: fixed;
+    z-index: 200;
+    max-width: 320px;
+    background: var(--surface);
+    border: 1px solid var(--border2);
+    border-radius: 8px;
+    padding: 12px 14px;
+    font-size: 12px;
+    color: var(--text);
+    line-height: 1.55;
+    box-shadow: 0 8px 28px rgba(0,0,0,0.5);
+    opacity: 0;
+    transform: translateY(4px);
+    transition: opacity .15s, transform .15s;
+    pointer-events: none;
+  }
+  .tooltip.visible { opacity: 1; transform: translateY(0); pointer-events: auto; }
+  .tooltip .tip-title {
+    color: var(--accent);
+    font-weight: 600;
+    margin-bottom: 4px;
+    font-size: 12px;
+  }
+  .tooltip .tip-body { color: var(--text); }
+  .tooltip .tip-reco {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--text2);
+  }
+  .tooltip .tip-reco::before {
+    content: '💡 추천: ';
+    color: var(--green);
+    font-weight: 600;
+  }
+  .tooltip .tip-pin-hint {
+    margin-top: 6px;
+    font-size: 10px;
+    color: var(--text3);
+    font-style: italic;
+  }
+
+  /* === Glossary modal === */
+  .glossary-list {
+    max-height: 60vh;
+    overflow-y: auto;
+    padding-right: 4px;
+  }
+  .glossary-group {
+    margin-bottom: 16px;
+  }
+  .glossary-group h3 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text2);
+    font-weight: 600;
+    margin: 12px 0 6px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--border);
+  }
+  .glossary-item {
+    padding: 8px 10px;
+    border-radius: 5px;
+    margin-bottom: 4px;
+    background: var(--surface2);
+  }
+  .glossary-item .gt {
+    font-weight: 600;
+    color: var(--accent);
+    font-size: 12px;
+    margin-bottom: 2px;
+  }
+  .glossary-item .gb { font-size: 12px; color: var(--text); line-height: 1.5; }
+  .glossary-item .gr {
+    font-size: 11px;
+    color: var(--text2);
+    margin-top: 4px;
+  }
+  .glossary-item .gr::before { content: '💡 '; color: var(--green); }
+
   /* === Misc === */
   .loading {
     display: flex;
@@ -833,6 +946,7 @@
     <span class="mode-badge" id="topMode" data-mode=""></span>
     <span class="save-status" id="saveStatus"></span>
     <span class="spacer"></span>
+    <button class="icon-btn" id="btnGlossary" title="용어/설정 도움말">? Help</button>
     <button class="icon-btn" id="btnImport" title="Import JSON">⤒ Import</button>
     <button class="icon-btn" id="btnExport" title="Export JSON">⤓ Export</button>
     <button class="icon-btn" id="btnNewProject" title="New project">＋ New</button>
@@ -939,6 +1053,338 @@ const listeners = new Set();
 function emit() { listeners.forEach(fn => { try { fn(); } catch (e) { console.error(e); } }); }
 function subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); }
 
+//============ Help content ============
+const HELP = {
+  // ───── 모드 ─────
+  "mode.onprem": {
+    cat: "모드",
+    title: "On-Prem",
+    body: "IDC/자체 데이터센터에 직접 보유한 서버에 k8s를 설치·운영하는 시나리오. 상면(U)·전력(kW)·냉방까지 산정합니다.",
+    reco: "직접 구매한 Dell/HPE/Lenovo/Supermicro 서버를 IDC에 두는 경우.",
+  },
+  "mode.cloud": {
+    cat: "모드",
+    title: "Cloud",
+    body: "AWS, NCP 등 클라우드 인스턴스를 사용. 상면·전력은 제공자가 책임지므로 산정에서 제외됩니다.",
+    reco: "EKS/GKE 같은 매니지드 k8s, 또는 EC2 위에 직접 설치하는 경우.",
+  },
+  "mode.hybrid": {
+    cat: "모드",
+    title: "Hybrid",
+    body: "온프레미스와 클라우드를 함께 운용. 클러스터는 환경별로 분리하는 게 일반적입니다.",
+    reco: "데이터/규제 워크로드는 온프렘, 가변 트래픽은 클라우드로 분리하는 경우.",
+  },
+
+  // ───── 사이트 / Capacity ─────
+  "site.kind": {
+    cat: "사이트",
+    title: "Site Kind",
+    body: "사이트의 물리적 위치 종류. onprem은 상면/전력 산정 대상, cloud는 region/provider 라벨만 의미.",
+  },
+  "site.rack_units": {
+    cat: "사이트",
+    title: "Rack Units (U)",
+    body: "이 사이트에서 사용 가능한 총 랙 공간. 1U = 4.45cm 두께. 표준 랙 1대 = 42U.",
+    reco: "랙 1대 단독 = 42, 2랙 풀 = 84. 노드 form_factor 합이 이 값을 넘으면 차단됩니다.",
+  },
+  "site.power_kw": {
+    cat: "사이트",
+    title: "Power Budget (kW)",
+    body: "PDU 1회로의 전력 예산. 노드들의 power 합이 이 값을 넘으면 차단됩니다.",
+    reco: "일반 IDC 랙 1대당 5–8 kW. 고밀도 GPU 랙은 16–30 kW. (HGX 8장 노드 1대만 ~10kW)",
+  },
+  "site.cooling_kw": {
+    cat: "사이트",
+    title: "Cooling Capacity (kW)",
+    body: "냉방 능력. 비워두면 power_kw로 추정합니다. GPU 부하는 거의 100% 열로 변환됩니다.",
+    reco: "보통 power_kw + 10–20% 마진. GPU 노드 다수면 별도 입력 권장.",
+  },
+
+  // ───── 노드 ─────
+  "node.form_factor": {
+    cat: "노드",
+    title: "Form Factor",
+    body: "서버가 차지하는 랙 공간. 1U는 얇고 GPU 적게, 4U/6U/8U는 GPU 다수 장착 가능.",
+    reco: "Web/API/일반 DB: 1U–2U. GPU 추론: 2U–4U. GPU 학습: 6U–8U.",
+  },
+  "node.cluster_role": {
+    cat: "노드",
+    title: "Cluster Role",
+    body: "k8s에서 이 노드가 맡는 역할. control-plane=두뇌, worker=실제 워크로드 실행, etcd=상태 저장.",
+    reco: "운영은 control-plane을 분리하는 게 안전. 개발/PoC는 control+worker 겸용도 무방.",
+  },
+  "role.control-plane": {
+    cat: "노드",
+    title: "Control Plane",
+    body: "kube-apiserver, scheduler, controller-manager가 동작. 클러스터의 두뇌.",
+    reco: "HA 시 3대 이상, 홀수 권장 (etcd 쿼럼: 2N+1).",
+  },
+  "role.worker": {
+    cat: "노드",
+    title: "Worker",
+    body: "실제 Pod이 실행되는 노드. 대부분의 노드가 여기에 해당.",
+    reco: "리소스 요구가 큰 만큼 다수 배치. HPA 사용 시 여유분 둘 것.",
+  },
+  "role.etcd": {
+    cat: "노드",
+    title: "etcd",
+    body: "클러스터 상태를 저장하는 분산 KV 스토어. control-plane과 함께 띄우거나 외부 분리.",
+    reco: "대규모(>500 노드) 또는 안정성 강조 시 외부 분리. 일반은 control-plane 통합.",
+  },
+  "role.unassigned": {
+    cat: "노드",
+    title: "Unassigned",
+    body: "아직 클러스터에 속하지 않은 상태. 클러스터에 추가하면 자동으로 worker가 됩니다.",
+  },
+
+  // ───── GPU ─────
+  "gpu.chassis": {
+    cat: "GPU",
+    title: "GPU Chassis",
+    body: "이 새시가 받아들일 수 있는 GPU의 한계: 수량, form factor, 모델, NVLink 토폴로지.",
+    reco: "카탈로그가 자동 채움. 1U 새시에 H200 SXM 같은 비현실 조합은 자동 차단됩니다.",
+  },
+  "gpu.form_factor.SXM": {
+    cat: "GPU",
+    title: "SXM (Server PCIe Module)",
+    body: "NVIDIA HGX 보드에 직접 솔더링된 GPU. NVSwitch로 8장 모두 풀메시 연결. PCIe 대비 약 2배 대역폭, 700W까지 공급.",
+    reco: "대규모 LLM 학습 표준. H100-SXM, H200-SXM, A100-SXM이 해당.",
+  },
+  "gpu.form_factor.PCIe-FH": {
+    cat: "GPU",
+    title: "PCIe Full-Height",
+    body: "표준 PCIe 슬롯 GPU. NVLink Bridge로 인접 2장만 페어링. SXM 대비 가격↓ 자유도↑.",
+    reco: "추론, 라이트 학습. L40S, H100-PCIe, A100-PCIe.",
+  },
+  "gpu.form_factor.PCIe-LP": {
+    cat: "GPU",
+    title: "PCIe Low-Profile",
+    body: "얇은 1U/2U 서버에 들어가는 PCIe GPU. 단일 슬롯, 저전력(<150W) 위주.",
+    reco: "경량 추론, 비디오 인코딩, AI 임베딩. L4가 대표.",
+  },
+  "gpu.nvlink": {
+    cat: "GPU",
+    title: "NVLink",
+    body: "GPU 간 직접 고속 링크. PCIe 대비 5–10배 대역폭. 큰 모델을 여러 GPU에 분할(텐서 병렬)할 때 필수.",
+    reco: "단일 GPU 추론은 무관. 여러 GPU에 모델 분산할 때 활성화.",
+  },
+  "gpu.topology.nvswitch-mesh": {
+    cat: "GPU",
+    title: "NVSwitch Mesh",
+    body: "8장 모두 풀메시. HGX 보드의 표준. 어느 GPU 쌍이든 직접 통신 가능.",
+    reco: "대규모 분산 학습 (LLM 70B+).",
+  },
+  "gpu.topology.bridge-pair": {
+    cat: "GPU",
+    title: "NVLink Bridge Pair",
+    body: "인접한 2장씩만 페어링. PCIe GPU에 적용. 4장이면 (1-2)+(3-4) 두 페어.",
+    reco: "데이터 병렬은 OK. 큰 모델 텐서 병렬은 한계.",
+  },
+  "gpu.topology.none": {
+    cat: "GPU",
+    title: "NVLink 미지원",
+    body: "GPU 간 통신은 PCIe 또는 호스트 메모리 경유. 단일 GPU 사용 또는 작은 모델에 적합.",
+    reco: "단일 추론, 임베딩 서비스, 비디오 처리.",
+  },
+
+  // ───── 클러스터 ─────
+  "cluster.k8s_version": {
+    cat: "클러스터",
+    title: "k8s Version",
+    body: "Kubernetes 버전. 매년 3번 마이너 출시 (1.x). 매니지드는 제공 가능 버전 확인 필요.",
+    reco: "신규 = 안정 -1 (예: 최신이 1.30이면 1.30 또는 1.29). 너무 신버전은 add-on 호환성 이슈.",
+  },
+  "cluster.environment_tag": {
+    cat: "클러스터",
+    title: "Environment Tag",
+    body: "클러스터 분류용 라벨. prod / staging / dev / dr 같은 자유 문자열. 표시용이며 동작에 영향 없음.",
+  },
+  "cluster.ha_control_plane": {
+    cat: "클러스터",
+    title: "HA Control Plane",
+    body: "control-plane을 다중화해 단일 장애에도 클러스터가 계속 동작. etcd 쿼럼 위해 최소 3대 + 홀수 필요.",
+    reco: "운영 클러스터는 활성화 (3 또는 5). 개발/PoC는 단일도 OK.",
+  },
+  "cluster.cni": {
+    cat: "클러스터",
+    title: "CNI",
+    body: "Pod 네트워킹을 책임지는 플러그인. NetworkPolicy 지원, 성능, 관측성에서 차이가 있음.",
+    reco: "Calico = 보편적, NP 잘됨. Cilium = eBPF 기반 신기술, 관측성↑. Flannel = 가벼움. AWS-VPC-CNI = EKS 기본. 잘 모르면 Calico.",
+  },
+  "cluster.ingress": {
+    cat: "클러스터",
+    title: "Ingress",
+    body: "외부 HTTP(S) 트래픽을 클러스터 내 서비스로 라우팅. NGINX가 사실상 표준.",
+    reco: "NGINX = 표준 선택. Traefik = 자동 설정 강점. AWS-ALB = AWS에서 ALB 직접 활용.",
+  },
+  "cluster.gpu_operator": {
+    cat: "클러스터",
+    title: "NVIDIA GPU Operator",
+    body: "GPU 드라이버, NVIDIA Container Toolkit, MIG 등을 자동 설치/관리. 노드별 수동 설치 불필요.",
+    reco: "GPU 노드가 있는 클러스터는 거의 필수.",
+  },
+  "cluster.service_mesh": {
+    cat: "클러스터",
+    title: "Service Mesh",
+    body: "서비스 간 mTLS, 트래픽 정책, 관측성을 사이드카로 제공. 운영 복잡도가 크게 늘어남.",
+    reco: "서비스 5개 이상 + 보안/관측성 요구 있을 때 도입. 작은 클러스터는 불필요.",
+  },
+
+  // ───── 카탈로그 / 일반 ─────
+  "catalog.brand": {
+    cat: "기타",
+    title: "Brand",
+    body: "서버/인스턴스의 제조사 또는 클라우드 공급자. 지원 모델 카탈로그가 자동으로 필터링됩니다.",
+  },
+  "catalog.custom": {
+    cat: "기타",
+    title: "Custom Spec",
+    body: "카탈로그 프리셋이 아닌 사용자 직접 입력. 검증 룰은 동일하게 적용되지만 시드 데이터가 없습니다.",
+  },
+  "node.gpu_install": {
+    cat: "GPU",
+    title: "Onprem GPU 장착",
+    body: "Onprem 서버는 새시가 GPU 무장착 출하될 수 있고, 사용자가 별도로 장착합니다. 카탈로그가 호환 가능 GPU만 보여줍니다.",
+    reco: "1U 새시는 보통 0–2장, 2U는 3–4장, 4U/6U는 8장까지. 호환 안 되는 조합은 자동 차단.",
+  },
+};
+
+//============ Tooltip ============
+let _tipEl = null;
+let _pinned = null;
+function _ensureTip() {
+  if (!_tipEl) {
+    _tipEl = document.createElement("div");
+    _tipEl.className = "tooltip";
+    document.body.appendChild(_tipEl);
+  }
+  return _tipEl;
+}
+function _renderTipContent(help, pinned) {
+  const tip = _ensureTip();
+  tip.innerHTML = "";
+  if (help.title) {
+    const h = document.createElement("div");
+    h.className = "tip-title";
+    h.textContent = help.title;
+    tip.appendChild(h);
+  }
+  const body = document.createElement("div");
+  body.className = "tip-body";
+  body.textContent = help.body;
+  tip.appendChild(body);
+  if (help.reco) {
+    const r = document.createElement("div");
+    r.className = "tip-reco";
+    r.textContent = help.reco;
+    tip.appendChild(r);
+  }
+  if (!pinned) {
+    const ph = document.createElement("div");
+    ph.className = "tip-pin-hint";
+    ph.textContent = "클릭하면 고정";
+    tip.appendChild(ph);
+  }
+}
+function showTooltip(target, helpId, pinned = false) {
+  const help = HELP[helpId];
+  if (!help) return;
+  const tip = _ensureTip();
+  _renderTipContent(help, pinned);
+  // Position (auto-flip)
+  tip.classList.add("visible");
+  tip.style.visibility = "hidden";
+  const r = target.getBoundingClientRect();
+  const tw = tip.offsetWidth, th = tip.offsetHeight;
+  let left = r.left + r.width / 2 - tw / 2;
+  let top = r.bottom + 8;
+  if (left + tw > window.innerWidth - 8) left = window.innerWidth - tw - 8;
+  if (left < 8) left = 8;
+  if (top + th > window.innerHeight - 8) top = r.top - th - 8;
+  tip.style.left = left + "px";
+  tip.style.top = top + "px";
+  tip.style.visibility = "";
+}
+function hideTooltip() {
+  if (_tipEl) _tipEl.classList.remove("visible");
+  if (_pinned) {
+    _pinned.classList.remove("pinned");
+    _pinned = null;
+  }
+}
+function helpIcon(helpId) {
+  const span = document.createElement("span");
+  span.className = "help";
+  span.textContent = "?";
+  span.tabIndex = 0;
+  span.setAttribute("aria-label", "Help: " + (HELP[helpId]?.title || helpId));
+  span.addEventListener("mouseenter", () => { if (!_pinned) showTooltip(span, helpId, false); });
+  span.addEventListener("mouseleave", () => { if (!_pinned) hideTooltip(); });
+  span.addEventListener("click", e => {
+    e.stopPropagation();
+    if (_pinned === span) {
+      hideTooltip();
+    } else {
+      if (_pinned) _pinned.classList.remove("pinned");
+      _pinned = span;
+      span.classList.add("pinned");
+      showTooltip(span, helpId, true);
+    }
+  });
+  span.addEventListener("focus", () => showTooltip(span, helpId, false));
+  span.addEventListener("blur", () => { if (!_pinned) hideTooltip(); });
+  return span;
+}
+// Click outside closes pinned tooltip
+document.addEventListener("click", e => {
+  if (_pinned && !_pinned.contains(e.target) && _tipEl && !_tipEl.contains(e.target)) {
+    hideTooltip();
+  }
+});
+
+//============ Glossary modal ============
+function openGlossary() {
+  const root = el("div");
+  root.appendChild(el("h2", {}, ["Glossary — 용어/설정 도움말"]));
+  root.appendChild(el("div", { style: { color: "var(--text2)", fontSize: "12px", marginBottom: "12px" } }, [
+    "각 메뉴/필드의 ? 아이콘을 눌러도 같은 내용을 볼 수 있습니다.",
+  ]));
+
+  // Group by cat
+  const groups = {};
+  for (const [id, h] of Object.entries(HELP)) {
+    const cat = h.cat || "기타";
+    if (!groups[cat]) groups[cat] = [];
+    groups[cat].push({ id, ...h });
+  }
+  const order = ["모드", "사이트", "노드", "GPU", "클러스터", "기타"];
+  const keys = Object.keys(groups).sort((a, b) => {
+    const ia = order.indexOf(a), ib = order.indexOf(b);
+    return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+  });
+
+  const list = el("div", { class: "glossary-list" });
+  for (const k of keys) {
+    const g = el("div", { class: "glossary-group" });
+    g.appendChild(el("h3", {}, [k]));
+    for (const item of groups[k]) {
+      g.appendChild(el("div", { class: "glossary-item" }, [
+        el("div", { class: "gt" }, [item.title || item.id]),
+        el("div", { class: "gb" }, [item.body || ""]),
+        item.reco ? el("div", { class: "gr" }, [item.reco]) : null,
+      ]));
+    }
+    list.appendChild(g);
+  }
+  root.appendChild(list);
+  root.appendChild(el("div", { class: "modal-actions" }, [
+    el("button", { class: "btn-ghost", onclick: closeModal }, ["Close"]),
+  ]));
+  // Make modal-card wider for glossary
+  openModal(root);
+  $("#modalContent").style.maxWidth = "640px";
+}
+
 //============ Helpers ============
 const $ = sel => document.querySelector(sel);
 const el = (tag, attrs = {}, children = []) => {
@@ -963,6 +1409,13 @@ function clsLevel(pct) {
   if (pct >= 80) return "high";
   if (pct >= 50) return "medium";
   return "low";
+}
+
+// Label with optional ? help icon
+function lbl(text, helpId) {
+  const lab = el("label", {}, [text]);
+  if (helpId && HELP[helpId]) lab.appendChild(helpIcon(helpId));
+  return lab;
 }
 
 //============ Catalog loader ============
@@ -1425,7 +1878,7 @@ function renderSiteInspector(root, id) {
   root.appendChild(el("div", { class: "field" }, [el("label", {}, ["Name"]), nameField]));
 
   root.appendChild(el("div", { class: "field" }, [
-    el("label", {}, ["Kind"]),
+    lbl("Kind", "site.kind"),
     el("div", { class: "field-readonly" }, [s.kind]),
   ]));
 
@@ -1446,18 +1899,18 @@ function renderSiteInspector(root, id) {
     root.appendChild(el("div", { class: "section-title" }, ["Capacity"]));
     root.appendChild(el("div", { class: "field-row" }, [
       el("div", { class: "field" }, [
-        el("label", {}, ["Rack Units (U)"]),
+        lbl("Rack Units (U)", "site.rack_units"),
         el("input", { type: "number", min: "0", value: s.capacity?.rack_units || 0,
                       oninput: e => updateSiteField(id, "capacity.rack_units", parseInt(e.target.value) || 0) }),
       ]),
       el("div", { class: "field" }, [
-        el("label", {}, ["Power (kW)"]),
+        lbl("Power (kW)", "site.power_kw"),
         el("input", { type: "number", min: "0", step: "0.5", value: s.capacity?.power_kw || 0,
                       oninput: e => updateSiteField(id, "capacity.power_kw", parseFloat(e.target.value) || 0) }),
       ]),
     ]));
     root.appendChild(el("div", { class: "field" }, [
-      el("label", {}, ["Cooling (kW, optional)"]),
+      lbl("Cooling (kW, optional)", "site.cooling_kw"),
       el("input", { type: "number", min: "0", step: "0.5", value: s.capacity?.cooling_kw || "",
                     oninput: e => updateSiteField(id, "capacity.cooling_kw", parseFloat(e.target.value) || undefined) }),
     ]));
@@ -1570,7 +2023,7 @@ function renderNodeInspector(root, id) {
 
   // Cluster role (only meaningful when assigned)
   root.appendChild(el("div", { class: "field" }, [
-    el("label", {}, ["Cluster Role"]),
+    lbl("Cluster Role", "node.cluster_role"),
     el("select", {
       disabled: myCluster ? null : "",
       onchange: e => updateNodeField(id, "cluster_role", e.target.value),
@@ -1593,7 +2046,7 @@ function renderNodeInspector(root, id) {
   if (spec.form_factor || spec.power) {
     root.appendChild(el("div", { class: "field-row" }, [
       el("div", { class: "field" }, [
-        el("label", {}, ["Form factor"]),
+        lbl("Form factor", "node.form_factor"),
         el("div", { class: "field-readonly" }, [spec.form_factor || "—"]),
       ]),
       el("div", { class: "field" }, [
@@ -1607,12 +2060,19 @@ function renderNodeInspector(root, id) {
 
   // GPU
   if ((chassis.max_count || 0) > 0 || gpus.length) {
-    root.appendChild(el("div", { class: "section-title" }, ["GPU"]));
+    const gpuTitle = el("div", { class: "section-title" }, ["GPU"]);
+    gpuTitle.appendChild(helpIcon("gpu.chassis"));
+    if (n.source === "onprem") gpuTitle.appendChild(helpIcon("node.gpu_install"));
+    root.appendChild(gpuTitle);
     const chassisDesc = `Chassis: max ${chassis.max_count || 0} · ${(chassis.supported_form_factors || []).join("/") || "—"} · ${chassis.nvlink_topology || "none"}`;
     const supports = `Supports: ${(chassis.supported_models || []).join(", ") || "—"}`;
-    root.appendChild(el("div", { class: "chassis-info" }, [
+    const chassisInfo = el("div", { class: "chassis-info" }, [
       el("strong", {}, [chassisDesc]), el("br"), supports,
-    ]));
+    ]);
+    // Add a small help icon for the topology
+    const topo = chassis.nvlink_topology || "none";
+    if (topo !== "none") chassisInfo.appendChild(helpIcon("gpu.topology." + topo));
+    root.appendChild(chassisInfo);
     if (n.source === "cloud") {
       root.appendChild(el("div", { class: "empty-hint" }, ["Cloud 인스턴스는 GPU 구성 고정"]));
     }
@@ -1668,11 +2128,11 @@ function renderClusterInspector(root, id) {
 
   root.appendChild(el("div", { class: "field-row" }, [
     el("div", { class: "field" }, [
-      el("label", {}, ["k8s version"]),
+      lbl("k8s version", "cluster.k8s_version"),
       el("input", { value: c.k8s_version || "", placeholder: "1.30", oninput: e => updateClusterField(id, "k8s_version", e.target.value) }),
     ]),
     el("div", { class: "field" }, [
-      el("label", {}, ["Environment tag"]),
+      lbl("Environment tag", "cluster.environment_tag"),
       el("input", { value: c.environment_tag || "", placeholder: "prod", oninput: e => updateClusterField(id, "environment_tag", e.target.value) }),
     ]),
   ]));
@@ -1686,20 +2146,21 @@ function renderClusterInspector(root, id) {
   root.appendChild(el("label", { style: { display: "flex", alignItems: "center", gap: "8px", margin: "8px 0", fontSize: "12px", textTransform: "none", letterSpacing: 0 } }, [
     haInput,
     el("span", {}, ["HA control plane (≥3 control-plane 노드 권장)"]),
+    helpIcon("cluster.ha_control_plane"),
   ]));
 
   // Addons
   root.appendChild(el("div", { class: "section-title" }, ["Add-ons"]));
   root.appendChild(el("div", { class: "field-row" }, [
     el("div", { class: "field" }, [
-      el("label", {}, ["CNI"]),
+      lbl("CNI", "cluster.cni"),
       el("select", {
         onchange: e => updateClusterField(id, "addons.cni", e.target.value),
       }, ["Calico", "Cilium", "Flannel", "AWS-VPC-CNI", "Azure-CNI", "None"].map(v =>
         el("option", { value: v, selected: (c.addons?.cni || "Calico") === v ? "" : null }, [v]))),
     ]),
     el("div", { class: "field" }, [
-      el("label", {}, ["Ingress"]),
+      lbl("Ingress", "cluster.ingress"),
       el("select", {
         onchange: e => updateClusterField(id, "addons.ingress", e.target.value),
       }, ["NGINX", "Traefik", "AWS-ALB", "Istio-Gateway", "None"].map(v =>
@@ -1714,6 +2175,7 @@ function renderClusterInspector(root, id) {
   root.appendChild(el("label", { style: { display: "flex", alignItems: "center", gap: "8px", margin: "8px 0", fontSize: "12px", textTransform: "none", letterSpacing: 0 } }, [
     gpuOpInput,
     el("span", {}, ["NVIDIA GPU Operator (GPU 노드 있을 때 권장)"]),
+    helpIcon("cluster.gpu_operator"),
   ]));
 
   // Nodes assigned
@@ -1950,8 +2412,10 @@ function renderAll() {
 
 //============ Modal helpers ============
 function openModal(content) {
-  $("#modalContent").innerHTML = "";
-  $("#modalContent").appendChild(content);
+  const mc = $("#modalContent");
+  mc.innerHTML = "";
+  mc.style.maxWidth = ""; // reset any per-modal override
+  mc.appendChild(content);
   $("#modal").classList.remove("hidden");
 }
 function closeModal() { $("#modal").classList.add("hidden"); }
@@ -1966,7 +2430,7 @@ function openAddSite() {
   root.appendChild(el("h2", {}, ["Add Site"]));
 
   const kindRow = el("div", { class: "field" }, [
-    el("label", {}, ["Kind"]),
+    lbl("Kind", "site.kind"),
     el("select", {
       disabled: mode === "hybrid" ? null : "",
       onchange: e => { kind = e.target.value; rerender(); },
@@ -1983,10 +2447,10 @@ function openAddSite() {
   const pkw = el("input", { type: "number", min: "0", step: "0.5", value: "16" });
   const cool = el("input", { type: "number", min: "0", step: "0.5", placeholder: "선택" });
   onpremSection.appendChild(el("div", { class: "field-row" }, [
-    el("div", { class: "field" }, [el("label", {}, ["Rack Units (U)"]), ru]),
-    el("div", { class: "field" }, [el("label", {}, ["Power (kW)"]), pkw]),
+    el("div", { class: "field" }, [lbl("Rack Units (U)", "site.rack_units"), ru]),
+    el("div", { class: "field" }, [lbl("Power (kW)", "site.power_kw"), pkw]),
   ]));
-  onpremSection.appendChild(el("div", { class: "field" }, [el("label", {}, ["Cooling (kW)"]), cool]));
+  onpremSection.appendChild(el("div", { class: "field" }, [lbl("Cooling (kW)", "site.cooling_kw"), cool]));
 
   const provSel = el("select", {}, ["AWS", "NCP", "Azure", "GCP"].map(p =>
     el("option", { value: p, selected: p === "AWS" ? "" : null }, [p])));
@@ -2119,7 +2583,7 @@ function openAddNode() {
     }
   }
 
-  root.appendChild(el("div", { class: "field" }, [el("label", {}, ["Brand"]), brandSel]));
+  root.appendChild(el("div", { class: "field" }, [lbl("Brand", "catalog.brand"), brandSel]));
   root.appendChild(modelWrap);
   root.appendChild(previewWrap);
   root.appendChild(el("div", { class: "field-row" }, [
@@ -2161,21 +2625,22 @@ function openAddCluster() {
 
   root.appendChild(el("div", { class: "field" }, [el("label", {}, ["Name"]), nameInput]));
   root.appendChild(el("div", { class: "field-row" }, [
-    el("div", { class: "field" }, [el("label", {}, ["k8s version"]), versionInput]),
-    el("div", { class: "field" }, [el("label", {}, ["Environment tag"]), tagInput]),
+    el("div", { class: "field" }, [lbl("k8s version", "cluster.k8s_version"), versionInput]),
+    el("div", { class: "field" }, [lbl("Environment tag", "cluster.environment_tag"), tagInput]),
   ]));
 
   const haInput = el("input", { type: "checkbox" });
   root.appendChild(el("label", { style: { display: "flex", alignItems: "center", gap: "8px", margin: "8px 0", fontSize: "12px", color: "var(--text)" } }, [
     haInput,
     el("span", {}, ["HA control plane (≥3 control-plane 노드 필요)"]),
+    helpIcon("cluster.ha_control_plane"),
   ]));
 
   const cniSel = el("select", {}, ["Calico", "Cilium", "Flannel", "AWS-VPC-CNI", "None"].map(v => el("option", { value: v }, [v])));
   const ingressSel = el("select", {}, ["NGINX", "Traefik", "AWS-ALB", "None"].map(v => el("option", { value: v }, [v])));
   root.appendChild(el("div", { class: "field-row" }, [
-    el("div", { class: "field" }, [el("label", {}, ["CNI"]), cniSel]),
-    el("div", { class: "field" }, [el("label", {}, ["Ingress"]), ingressSel]),
+    el("div", { class: "field" }, [lbl("CNI", "cluster.cni"), cniSel]),
+    el("div", { class: "field" }, [lbl("Ingress", "cluster.ingress"), ingressSel]),
   ]));
 
   // Node selection
@@ -2238,6 +2703,13 @@ function renderSplash() {
 function bindSplash() {
   let chosen = null;
   for (const btn of document.querySelectorAll(".mode-option")) {
+    // Add ? help icon to title
+    const titleEl = btn.querySelector(".title");
+    if (titleEl) {
+      const help = helpIcon("mode." + btn.dataset.mode);
+      help.addEventListener("click", e => e.stopPropagation()); // don't toggle selection
+      titleEl.appendChild(help);
+    }
     btn.addEventListener("click", () => {
       document.querySelectorAll(".mode-option").forEach(b => b.classList.remove("selected"));
       btn.classList.add("selected");
@@ -2306,6 +2778,7 @@ async function init() {
   });
   $("#btnExport").addEventListener("click", exportProject);
   $("#btnImport").addEventListener("click", () => $("#fileImport").click());
+  $("#btnGlossary").addEventListener("click", openGlossary);
   $("#fileImport").addEventListener("change", e => {
     const file = e.target.files[0];
     if (file) importProjectFromFile(file);
