@@ -946,6 +946,7 @@
     <span class="mode-badge" id="topMode" data-mode=""></span>
     <span class="save-status" id="saveStatus"></span>
     <span class="spacer"></span>
+    <button class="icon-btn" id="btnTemplates" title="Architecture templates">📋 Templates</button>
     <button class="icon-btn" id="btnGlossary" title="용어/설정 도움말">? Help</button>
     <button class="icon-btn" id="btnImport" title="Import JSON">⤒ Import</button>
     <button class="icon-btn" id="btnExport" title="Export JSON">⤓ Export</button>
@@ -1003,6 +1004,11 @@
       </div>
       <button class="btn-ghost" id="btnSplashImport">Import</button>
       <button class="btn" id="btnSplashCreate" disabled>Create →</button>
+    </div>
+
+    <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border);text-align:center;">
+      <span style="color:var(--text2);font-size:12px;">또는 표준 패턴에서 시작 — </span>
+      <button class="btn-ghost" id="btnSplashTemplates" style="padding:6px 14px;font-size:12px;">📋 Browse Templates</button>
     </div>
   </div>
 </div>
@@ -7923,6 +7929,649 @@ function openClusterPreset(clusterId) {
   $("#modalContent").style.maxWidth = "640px";
 }
 
+//============ Architecture Templates ============
+// Each template returns a complete project. Pre-includes platform
+// workloads (nginx-ingress / cert-manager / metrics-server) so user
+// gets a working setup without running applyClusterPreset.
+
+function _mkPlatformWorkloads() {
+  // Standard production preset workloads, returned as a flat array
+  // for embedding in cluster.workloads
+  const std = (name, ns, cat, replicas, cpu, mem, kind = "Deployment") => ({
+    id: slug(name) + "-" + uid(),
+    name, category: cat, namespace: ns,
+    labels: { app: slug(name) },
+    replicas, kind,
+    resources: { requests: { cpu, memory_gb: mem } },
+  });
+  return [
+    {
+      ...std("ingress-nginx-controller", "ingress-nginx", "API", 2, 0.1, 0.25),
+      network: { service: { type: "LoadBalancer", ports: [
+        { name: "http", port: 80, target_port: 80, protocol: "TCP" },
+        { name: "https", port: 443, target_port: 443, protocol: "TCP" },
+      ] } },
+    },
+    std("cert-manager", "cert-manager", "Other", 1, 0.05, 0.128),
+    {
+      ...std("prometheus", "monitoring", "Other", 1, 0.5, 4, "StatefulSet"),
+      persistent_volumes: [{ size_gb: 100, access_mode: "RWO", storage_class: "" }],
+      network: { service: { type: "ClusterIP", ports: [{ name: "web", port: 9090, target_port: 9090, protocol: "TCP" }] } },
+    },
+    {
+      ...std("grafana", "monitoring", "Frontend", 1, 0.1, 0.5),
+      network: { service: { type: "ClusterIP", ports: [{ name: "http", port: 3000, target_port: 3000, protocol: "TCP" }] } },
+    },
+    {
+      ...std("loki", "logging", "Other", 1, 0.5, 2, "StatefulSet"),
+      persistent_volumes: [{ size_gb: 200, access_mode: "RWO", storage_class: "" }],
+    },
+    std("metrics-server", "kube-system", "Other", 1, 0.05, 0.128),
+  ];
+}
+
+function _platformNamespaces() {
+  return [
+    { name: "ingress-nginx", labels: { "kubernetes.io/metadata.name": "ingress-nginx" } },
+    { name: "cert-manager" },
+    { name: "monitoring", default_deny: true, labels: { tier: "platform" }, resource_quota: { cpu: 8, memory_gb: 32, max_pods: 50 } },
+    { name: "logging", default_deny: true, labels: { tier: "platform" }, resource_quota: { cpu: 8, memory_gb: 32, max_pods: 30 } },
+  ];
+}
+
+function _platformNps() {
+  return [
+    { id: "monitoring-deny-" + uid(), name: "monitoring-default-deny", namespace: "monitoring", preset: "default-deny", policy_types: ["Ingress", "Egress"], ingress: [], egress: [] },
+    { id: "monitoring-allow-same-" + uid(), name: "monitoring-allow-same-ns", namespace: "monitoring", preset: "allow-from-same-ns", policy_types: ["Ingress"], ingress: [{ from_namespaces: ["monitoring"] }] },
+    { id: "logging-deny-" + uid(), name: "logging-default-deny", namespace: "logging", preset: "default-deny", policy_types: ["Ingress", "Egress"], ingress: [], egress: [] },
+  ];
+}
+
+// === 3-Tier Web (HA) ===
+function buildTpl3TierHA(projectName) {
+  const siteId = "idc-seoul-" + uid();
+  const fwId = "fw-1-" + uid();
+  const swId = "sw-1-" + uid();
+  const lbId = "lb-1-" + uid();
+  const stId = "nas-1-" + uid();
+  const dbExtId = "ext-pg-" + uid();
+  const cacheExtId = "ext-redis-" + uid();
+  const nodeIds = [1, 2, 3].map(i => `node-${i}-` + uid());
+  const clusterId = "prod-" + uid();
+  const fwlId = "frontend-" + uid();
+  const apiwlId = "api-" + uid();
+  const ing1Id = "ing-web-" + uid();
+  const ing2Id = "ing-api-" + uid();
+
+  const platformWls = _mkPlatformWorkloads();
+
+  return {
+    version: SCHEMA_VERSION,
+    name: projectName,
+    description: "3-Tier HA Web — Frontend + API + 외부 RDS/Redis",
+    mode: "onprem",
+    sites: [{
+      id: siteId, name: "IDC-Seoul", kind: "onprem",
+      capacity: { rack_units: 84, power_kw: 32, cooling_kw: 36 },
+      node_ids: nodeIds,
+      l4_balancers: [{
+        id: lbId, name: "F5-VIP", kind: "hardware", vendor: "F5", model: "BIG-IP i4800",
+        ip: "192.168.10.5", vip: "203.0.113.10", throughput_gbps: 40, ha: true,
+        target_cluster_ids: [clusterId],
+      }],
+      storages: [{
+        id: stId, name: "NetApp-1", kind: "NAS", vendor: "NetApp", model: "AFF C400",
+        protocol: "NFS", endpoint: "nas.idc.local:2049",
+        capacity_tb: 100, csi_driver: "nfs.csi.k8s.io",
+        target_cluster_ids: [clusterId],
+      }],
+      network_devices: [
+        { id: fwId, name: "FW-1", kind: "firewall", vendor: "FortiGate", model: "FG-100F", throughput_gbps: 10, ha: true },
+        { id: swId, name: "TOR-1", kind: "switch", vendor: "Cisco", model: "Nexus 9300", throughput_gbps: 100, ha: true },
+      ],
+      external_services: [
+        {
+          id: dbExtId, name: "prod-postgres", kind: "database",
+          engine: "postgres", vendor: "self-hosted (HA)", version: "16",
+          endpoint: "pg-primary.example.local:5432", capacity_gb: 500,
+          target_cluster_ids: [clusterId],
+        },
+        {
+          id: cacheExtId, name: "prod-redis", kind: "cache",
+          engine: "redis", vendor: "self-hosted",
+          endpoint: "redis.example.local:6379",
+          target_cluster_ids: [clusterId],
+        },
+      ],
+    }],
+    nodes: [1, 2, 3].map((i, idx) => ({
+      id: nodeIds[idx],
+      name: `prod-node-${i}`,
+      source: "onprem", brand: "Dell", model: "PowerEdge-R660",
+      site_id: siteId, custom: false,
+      cluster_roles: ["control-plane", "worker"], purpose: "compute",
+      network: { ip: `192.168.10.${10 + i}` },
+      spec: {
+        vcpu: 64, memory_gb: 512,
+        disks: [{ size_gb: 960, type: "NVMe", count: 8 }],
+        nics: [{ speed_gbps: 25, count: 2 }],
+        form_factor: "1U",
+        power: { psu_max_w: 1400, typical_w_base: 300, psu_redundancy: "1+1" },
+        gpu_chassis: { max_count: 0, supported_form_factors: [], supported_models: [], nvlink_topology: "none" },
+        gpu: [],
+      },
+    })),
+    clusters: [{
+      id: clusterId, name: "prod", environment_tag: "prod",
+      k8s_version: "1.30", ha_control_plane: true,
+      node_ids: nodeIds,
+      network: { pod_cidr: "10.244.0.0/16", service_cidr: "10.96.0.0/12", node_subnet: "192.168.10.0/24", dns_domain: "cluster.local", lb_pool: "192.168.20.0/24" },
+      ingress_rules: [
+        { id: ing1Id, name: "web", host: "web.example.com", tls: true,
+          paths: [{ path: "/", path_type: "Prefix", workload_id: fwlId, port: 80 }] },
+        { id: ing2Id, name: "api", host: "api.example.com", tls: true,
+          paths: [{ path: "/", path_type: "Prefix", workload_id: apiwlId, port: 8080 }] },
+      ],
+      addons: { cni: "Calico", ingress: "NGINX", metrics_server: true, gpu_operator: false, service_mesh: "None" },
+      namespaces: [
+        { name: "frontend", labels: { tier: "web" } },
+        { name: "backend", labels: { tier: "core" } },
+        ..._platformNamespaces(),
+      ],
+      network_policies: _platformNps(),
+      workloads: [
+        {
+          id: fwlId, name: "web-frontend", category: "Frontend",
+          namespace: "frontend", labels: { app: "frontend" }, replicas: 3,
+          resources: { requests: { cpu: 0.5, memory_gb: 1 } },
+          runtime: { language: "Node.js", framework: "Fastify", version: "20",
+                     concurrency: { model: "event-loop", max_threads: 1 } },
+          network: { service: { type: "ClusterIP", ports: [{ name: "http", port: 80, target_port: 8080, protocol: "TCP" }] } },
+          depends_on: [{ target_workload_id: apiwlId, protocol: "HTTP", port: 8080, avg_call_ms: 30, fanout_pct: 100, calls_per_request: 1 }],
+        },
+        {
+          id: apiwlId, name: "api", category: "API",
+          namespace: "backend", labels: { app: "api" }, replicas: 3,
+          resources: { requests: { cpu: 1, memory_gb: 4 } },
+          runtime: { language: "Java", framework: "Spring-Boot", version: "17",
+                     concurrency: { model: "thread-pool", max_threads: 200, heap_gb: 3 },
+                     connection_pool_per_replica: 10 },
+          traffic_profile: { target_rps: 500, avg_request_ms: 80, p99_request_ms: 300, client_timeout_ms: 3000 },
+          network: { service: { type: "ClusterIP", ports: [{ name: "http", port: 8080, target_port: 8080, protocol: "TCP" }] } },
+        },
+        ...platformWls,
+      ],
+    }],
+    site_links: [],
+    metadata: { created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+  };
+}
+
+// === Microservices (Online Boutique style) ===
+function buildTplMicroservices(projectName) {
+  const siteId = "idc-" + uid();
+  const lbId = "lb-" + uid();
+  const fwId = "fw-" + uid();
+  const stId = "st-" + uid();
+  const nodeIds = [1, 2, 3, 4].map(i => `node-${i}-` + uid());
+  const clusterId = "prod-" + uid();
+  const ids = {};
+  for (const k of ["frontend", "gateway", "user", "product", "cart", "checkout", "payment", "recommendation", "redis", "postgres"]) {
+    ids[k] = k + "-" + uid();
+  }
+  const ing1 = "ing-shop-" + uid();
+  const platformWls = _mkPlatformWorkloads();
+
+  // Helper
+  const wl = (id, name, cat, ns, replicas, cpu, mem, port, deps) => ({
+    id, name, category: cat, namespace: ns, labels: { app: name }, replicas,
+    resources: { requests: { cpu, memory_gb: mem } },
+    network: { service: { type: "ClusterIP", ports: [{ name: "http", port, target_port: port, protocol: "TCP" }] } },
+    depends_on: (deps || []).map(d => ({ target_workload_id: d.target, protocol: "gRPC", port: d.port || port, avg_call_ms: d.ms || 20, fanout_pct: d.fan || 100, calls_per_request: d.cpr || 1 })),
+  });
+
+  return {
+    version: SCHEMA_VERSION, name: projectName,
+    description: "Microservices Demo — Online Boutique 풍의 8개 서비스 + 의존 그래프",
+    mode: "onprem",
+    sites: [{
+      id: siteId, name: "IDC-1", kind: "onprem",
+      capacity: { rack_units: 84, power_kw: 32 },
+      node_ids: nodeIds,
+      l4_balancers: [{ id: lbId, name: "L4-VIP", kind: "hardware", vendor: "F5", vip: "203.0.113.20", throughput_gbps: 20, ha: true, target_cluster_ids: [clusterId] }],
+      storages: [{ id: stId, name: "Ceph-1", kind: "Ceph", vendor: "Rook", protocol: "RBD", endpoint: "ceph-mon.idc.local:6789", capacity_tb: 50, csi_driver: "rbd.csi.ceph.com", target_cluster_ids: [clusterId] }],
+      network_devices: [{ id: fwId, name: "FW-1", kind: "firewall", vendor: "FortiGate", throughput_gbps: 10, ha: true }],
+      external_services: [],
+    }],
+    nodes: [1, 2, 3, 4].map((i, idx) => ({
+      id: nodeIds[idx], name: `node-${i}`,
+      source: "onprem", brand: "Dell", model: "PowerEdge-R760",
+      site_id: siteId, custom: false,
+      cluster_roles: i <= 3 ? ["control-plane", "worker"] : ["worker"], purpose: "compute",
+      network: { ip: `192.168.10.${10 + i}` },
+      spec: {
+        vcpu: 64, memory_gb: 1024,
+        disks: [{ size_gb: 1920, type: "NVMe", count: 8 }],
+        nics: [{ speed_gbps: 25, count: 2 }],
+        form_factor: "2U",
+        power: { psu_max_w: 1800, typical_w_base: 400, psu_redundancy: "1+1" },
+        gpu_chassis: { max_count: 0, supported_form_factors: [], supported_models: [], nvlink_topology: "none" },
+        gpu: [],
+      },
+    })),
+    clusters: [{
+      id: clusterId, name: "prod", environment_tag: "prod",
+      k8s_version: "1.30", ha_control_plane: true,
+      node_ids: nodeIds,
+      network: { pod_cidr: "10.244.0.0/16", service_cidr: "10.96.0.0/12", node_subnet: "192.168.10.0/24", dns_domain: "cluster.local", lb_pool: "192.168.20.0/24" },
+      ingress_rules: [{ id: ing1, name: "shop", host: "shop.example.com", tls: true,
+                        paths: [{ path: "/", path_type: "Prefix", workload_id: ids.frontend, port: 80 }] }],
+      addons: { cni: "Cilium", ingress: "NGINX", metrics_server: true, gpu_operator: false, service_mesh: "None" },
+      namespaces: [
+        { name: "shop", labels: { tier: "app" } },
+        ..._platformNamespaces(),
+      ],
+      network_policies: _platformNps(),
+      workloads: [
+        wl(ids.frontend, "frontend", "Frontend", "shop", 3, 0.3, 0.5, 80,
+           [{ target: ids.gateway, port: 8080, ms: 20 }]),
+        wl(ids.gateway, "api-gateway", "API", "shop", 3, 0.5, 1, 8080,
+           [
+             { target: ids.user, port: 8080, ms: 15, fan: 80 },
+             { target: ids.product, port: 8080, ms: 25, fan: 100 },
+             { target: ids.cart, port: 8080, ms: 30, fan: 60 },
+             { target: ids.recommendation, port: 8080, ms: 40, fan: 50 },
+           ]),
+        wl(ids.user, "user-service", "API", "shop", 2, 0.3, 0.5, 8080,
+           [{ target: ids.postgres, port: 5432, ms: 8 }]),
+        wl(ids.product, "product-service", "API", "shop", 2, 0.3, 0.5, 8080,
+           [{ target: ids.postgres, port: 5432, ms: 10 }, { target: ids.redis, port: 6379, ms: 2, fan: 80 }]),
+        wl(ids.cart, "cart-service", "API", "shop", 2, 0.3, 0.5, 8080,
+           [{ target: ids.redis, port: 6379, ms: 3 }, { target: ids.product, port: 8080, ms: 25 }]),
+        wl(ids.checkout, "checkout-service", "API", "shop", 2, 0.3, 0.5, 8080,
+           [{ target: ids.cart, port: 8080, ms: 30 }, { target: ids.payment, port: 8080, ms: 80 }, { target: ids.user, port: 8080, ms: 15 }]),
+        wl(ids.payment, "payment-service", "API", "shop", 2, 0.3, 0.5, 8080, []),
+        wl(ids.recommendation, "recommendation-service", "API", "shop", 2, 0.3, 0.5, 8080,
+           [{ target: ids.product, port: 8080, ms: 25 }, { target: ids.user, port: 8080, ms: 15 }]),
+        // Stateful
+        {
+          id: ids.redis, name: "redis", category: "Cache", namespace: "shop", labels: { app: "redis" },
+          kind: "StatefulSet", replicas: 1,
+          resources: { requests: { cpu: 0.5, memory_gb: 4 } },
+          runtime: { language: "Other", framework: "Redis", version: "7", max_connections: 10000 },
+          network: { service: { type: "ClusterIP", ports: [{ name: "redis", port: 6379, target_port: 6379, protocol: "TCP" }] } },
+          persistent_volumes: [{ size_gb: 20, access_mode: "RWO", storage_class: "" }],
+        },
+        {
+          id: ids.postgres, name: "postgres", category: "DB", namespace: "shop", labels: { app: "postgres" },
+          kind: "StatefulSet", replicas: 1,
+          resources: { requests: { cpu: 2, memory_gb: 8 } },
+          runtime: { language: "Other", framework: "PostgreSQL", version: "16", max_connections: 100 },
+          network: { service: { type: "ClusterIP", ports: [{ name: "pg", port: 5432, target_port: 5432, protocol: "TCP" }] } },
+          persistent_volumes: [{ size_gb: 200, access_mode: "RWO", storage_class: "" }],
+        },
+        ...platformWls,
+      ],
+    }],
+    site_links: [],
+    metadata: { created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+  };
+}
+
+// === LLM Inference Platform ===
+function buildTplMLInference(projectName) {
+  const siteId = "idc-gpu-" + uid();
+  const fwId = "fw-" + uid();
+  const lbId = "lb-" + uid();
+  const stId = "st-" + uid();
+  const objStId = "obj-" + uid();
+  const cacheExtId = "ext-redis-" + uid();
+  const node1 = "node-cp-" + uid();
+  const nodeGpu = "node-gpu-" + uid();
+  const clusterId = "ai-" + uid();
+  const ids = {
+    vllm: "vllm-" + uid(), embedding: "embed-" + uid(),
+    qdrant: "qdrant-" + uid(), redis: "redis-" + uid(),
+    api: "api-" + uid(),
+  };
+  const ing1 = "ing-llm-" + uid();
+  const platformWls = _mkPlatformWorkloads();
+
+  return {
+    version: SCHEMA_VERSION, name: projectName,
+    description: "LLM Inference — XE9680 (H200×8) + vLLM + Qdrant + Redis",
+    mode: "onprem",
+    sites: [{
+      id: siteId, name: "IDC-AI", kind: "onprem",
+      capacity: { rack_units: 84, power_kw: 32, cooling_kw: 40 },
+      node_ids: [node1, nodeGpu],
+      l4_balancers: [{ id: lbId, name: "L4", kind: "software", vendor: "MetalLB", vip: "192.168.20.10", throughput_gbps: 10, ha: false, target_cluster_ids: [clusterId] }],
+      storages: [{ id: stId, name: "model-store", kind: "NAS", vendor: "NetApp", protocol: "NFS", endpoint: "nas.idc.local:2049", capacity_tb: 50, csi_driver: "nfs.csi.k8s.io", target_cluster_ids: [clusterId] }],
+      network_devices: [{ id: fwId, name: "FW", kind: "firewall", vendor: "FortiGate", throughput_gbps: 10, ha: true }],
+      external_services: [
+        { id: objStId, name: "model-bucket", kind: "object_store", engine: "s3", vendor: "MinIO", endpoint: "s3.idc.local:9000", capacity_gb: 5000, target_cluster_ids: [clusterId] },
+        { id: cacheExtId, name: "shared-cache", kind: "cache", engine: "redis", vendor: "self-hosted", endpoint: "redis.idc.local:6379", target_cluster_ids: [clusterId] },
+      ],
+    }],
+    nodes: [
+      {
+        id: node1, name: "cp-node",
+        source: "onprem", brand: "Dell", model: "PowerEdge-R660",
+        site_id: siteId, custom: false,
+        cluster_roles: ["control-plane", "worker"], purpose: "compute",
+        network: { ip: "192.168.10.11" },
+        spec: {
+          vcpu: 64, memory_gb: 512, form_factor: "1U",
+          disks: [{ size_gb: 960, type: "NVMe", count: 8 }],
+          nics: [{ speed_gbps: 25, count: 2 }],
+          power: { psu_max_w: 1400, typical_w_base: 300, psu_redundancy: "1+1" },
+          gpu_chassis: { max_count: 0, supported_form_factors: [], supported_models: [], nvlink_topology: "none" },
+          gpu: [],
+        },
+      },
+      {
+        id: nodeGpu, name: "gpu-node-1",
+        source: "onprem", brand: "Dell", model: "PowerEdge-XE9680",
+        site_id: siteId, custom: false,
+        cluster_roles: ["worker"], purpose: "compute",
+        network: { ip: "192.168.10.12" },
+        spec: {
+          vcpu: 112, memory_gb: 2048, form_factor: "6U",
+          disks: [{ size_gb: 3840, type: "NVMe", count: 8 }],
+          nics: [{ speed_gbps: 400, count: 8, interconnect: "InfiniBand" }, { speed_gbps: 100, count: 2 }],
+          power: { psu_max_w: 10800, typical_w_base: 2500, psu_redundancy: "N+N" },
+          gpu_chassis: { max_count: 8, supported_form_factors: ["SXM"], supported_models: ["H100-SXM", "H200-SXM"], nvlink_topology: "nvswitch-mesh" },
+          gpu: [{ model: "H200-SXM", form_factor: "SXM", count: 8, nvlink_enabled: true }],
+        },
+      },
+    ],
+    clusters: [{
+      id: clusterId, name: "ai-prod", environment_tag: "ai",
+      k8s_version: "1.30", ha_control_plane: false,
+      node_ids: [node1, nodeGpu],
+      network: { pod_cidr: "10.244.0.0/16", service_cidr: "10.96.0.0/12", node_subnet: "192.168.10.0/24", dns_domain: "cluster.local", lb_pool: "192.168.20.0/24" },
+      ingress_rules: [{ id: ing1, name: "llm", host: "llm.example.com", tls: true,
+                        paths: [{ path: "/v1/chat", path_type: "Prefix", workload_id: ids.api, port: 8080 }] }],
+      addons: { cni: "Calico", ingress: "NGINX", metrics_server: true, gpu_operator: true, service_mesh: "None" },
+      namespaces: [
+        { name: "ai" },
+        ..._platformNamespaces(),
+      ],
+      network_policies: _platformNps(),
+      workloads: [
+        {
+          id: ids.api, name: "llm-api-gateway", category: "API", namespace: "ai",
+          labels: { app: "api" }, replicas: 2,
+          resources: { requests: { cpu: 1, memory_gb: 2 } },
+          runtime: { language: "Python", framework: "FastAPI", version: "3.12",
+                     concurrency: { model: "async-await", workers: 4 } },
+          network: { service: { type: "ClusterIP", ports: [{ name: "http", port: 8080, target_port: 8080 }] } },
+          depends_on: [
+            { target_workload_id: ids.vllm, protocol: "HTTP", port: 8000, avg_call_ms: 1500, fanout_pct: 100 },
+            { target_workload_id: ids.embedding, protocol: "HTTP", port: 8001, avg_call_ms: 50, fanout_pct: 30 },
+            { target_workload_id: ids.qdrant, protocol: "HTTP", port: 6333, avg_call_ms: 20, fanout_pct: 30 },
+            { target_workload_id: ids.redis, protocol: "Redis", port: 6379, avg_call_ms: 2, fanout_pct: 100, calls_per_request: 2 },
+          ],
+        },
+        {
+          id: ids.vllm, name: "vllm-llama70b", category: "ML-Inference", namespace: "ai",
+          labels: { app: "vllm" }, replicas: 1,
+          resources: { requests: { cpu: 16, memory_gb: 256, gpu: { count: 4, model: "H200-SXM" } } },
+          runtime: { language: "Python", framework: "vLLM", version: "0.5", concurrency: { model: "async-await" } },
+          network: { service: { type: "ClusterIP", ports: [{ name: "http", port: 8000, target_port: 8000 }] } },
+        },
+        {
+          id: ids.embedding, name: "embedding-svc", category: "ML-Inference", namespace: "ai",
+          labels: { app: "embedding" }, replicas: 1,
+          resources: { requests: { cpu: 4, memory_gb: 16, gpu: { count: 1, model: "H200-SXM" } } },
+          runtime: { language: "Python", framework: "FastAPI", version: "3.12" },
+          network: { service: { type: "ClusterIP", ports: [{ name: "http", port: 8001, target_port: 8001 }] } },
+        },
+        {
+          id: ids.qdrant, name: "qdrant", category: "DB", namespace: "ai",
+          labels: { app: "qdrant" }, kind: "StatefulSet", replicas: 1,
+          resources: { requests: { cpu: 2, memory_gb: 16 } },
+          network: { service: { type: "ClusterIP", ports: [{ name: "http", port: 6333, target_port: 6333 }] } },
+          persistent_volumes: [{ size_gb: 500, access_mode: "RWO", storage_class: "" }],
+        },
+        {
+          id: ids.redis, name: "redis-llm-cache", category: "Cache", namespace: "ai",
+          labels: { app: "redis" }, kind: "StatefulSet", replicas: 1,
+          resources: { requests: { cpu: 0.5, memory_gb: 4 } },
+          runtime: { language: "Other", framework: "Redis", version: "7", max_connections: 10000 },
+          network: { service: { type: "ClusterIP", ports: [{ name: "redis", port: 6379, target_port: 6379 }] } },
+          persistent_volumes: [{ size_gb: 20, access_mode: "RWO", storage_class: "" }],
+        },
+        ...platformWls,
+      ],
+    }],
+    site_links: [],
+    metadata: { created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+  };
+}
+
+// === Hybrid Cloud (Onprem + AWS) ===
+function buildTplHybridCloud(projectName) {
+  const idcId = "idc-" + uid();
+  const awsId = "aws-" + uid();
+  const fwId = "fw-" + uid();
+  const lbId = "lb-onprem-" + uid();
+  const stId = "st-onprem-" + uid();
+  const dbExtId = "ext-pg-onprem-" + uid();
+  const awsAlbId = "aws-alb-" + uid();
+  const awsCdn = "aws-cdn-" + uid();
+  const onpremNodeIds = [1, 2].map(i => `idc-node-${i}-` + uid());
+  const awsNodeIds = [1, 2].map(i => `aws-node-${i}-` + uid());
+  const onpremClusterId = "onprem-data-" + uid();
+  const awsClusterId = "aws-web-" + uid();
+  const sitelinkId = "vpn-" + uid();
+  const ids = {
+    web: "web-" + uid(), api: "api-" + uid(), worker: "worker-" + uid(),
+    pg: "pg-" + uid(),
+  };
+  const ing1 = "ing-aws-" + uid();
+  const platformWls1 = _mkPlatformWorkloads();
+  const platformWls2 = _mkPlatformWorkloads();
+
+  return {
+    version: SCHEMA_VERSION, name: projectName,
+    description: "Hybrid Cloud — IDC(데이터) + AWS(웹/API), VPN으로 연결",
+    mode: "hybrid",
+    sites: [
+      {
+        id: idcId, name: "IDC-Seoul", kind: "onprem",
+        capacity: { rack_units: 42, power_kw: 16 },
+        node_ids: onpremNodeIds,
+        l4_balancers: [{ id: lbId, name: "F5", kind: "hardware", vendor: "F5", vip: "10.0.0.10", throughput_gbps: 10, ha: true, target_cluster_ids: [onpremClusterId] }],
+        storages: [{ id: stId, name: "NetApp", kind: "NAS", vendor: "NetApp", protocol: "NFS", endpoint: "nas.idc.local:2049", capacity_tb: 100, csi_driver: "nfs.csi.k8s.io", target_cluster_ids: [onpremClusterId] }],
+        network_devices: [{ id: fwId, name: "FW-perimeter", kind: "firewall", vendor: "FortiGate", throughput_gbps: 10, ha: true }],
+        external_services: [{ id: dbExtId, name: "core-db", kind: "database", engine: "postgres", vendor: "self-hosted", version: "16", endpoint: "pg.idc.local:5432", capacity_gb: 500, target_cluster_ids: [onpremClusterId] }],
+      },
+      {
+        id: awsId, name: "AWS Seoul", kind: "cloud", cloud_provider: "AWS", region: "ap-northeast-2",
+        node_ids: awsNodeIds,
+        l4_balancers: [{ id: awsAlbId, name: "AWS-ALB", kind: "cloud", vendor: "AWS NLB", vip: "203.0.113.30", throughput_gbps: 25, ha: true, target_cluster_ids: [awsClusterId] }],
+        storages: [],
+        network_devices: [{ id: awsCdn, name: "CloudFront", kind: "cdn", vendor: "AWS CloudFront", throughput_gbps: 100, ha: true }],
+        external_services: [],
+      },
+    ],
+    nodes: [
+      ...onpremNodeIds.map((id, idx) => ({
+        id, name: `idc-node-${idx + 1}`,
+        source: "onprem", brand: "Dell", model: "PowerEdge-R660",
+        site_id: idcId, custom: false,
+        cluster_roles: ["control-plane", "worker"], purpose: "compute",
+        network: { ip: `10.0.0.${11 + idx}` },
+        spec: {
+          vcpu: 64, memory_gb: 512, form_factor: "1U",
+          disks: [{ size_gb: 960, type: "NVMe", count: 8 }],
+          nics: [{ speed_gbps: 25, count: 2 }],
+          power: { psu_max_w: 1400, typical_w_base: 300, psu_redundancy: "1+1" },
+          gpu_chassis: { max_count: 0, supported_form_factors: [], supported_models: [], nvlink_topology: "none" },
+          gpu: [],
+        },
+      })),
+      ...awsNodeIds.map((id, idx) => ({
+        id, name: `aws-node-${idx + 1}`,
+        source: "cloud", brand: "AWS", model: "m6i.4xlarge",
+        site_id: awsId, custom: false,
+        cluster_roles: ["control-plane", "worker"], purpose: "compute",
+        network: { ip: `10.1.0.${11 + idx}` },
+        spec: {
+          vcpu: 16, memory_gb: 64,
+          nics: [{ speed_gbps: 12.5, count: 1 }],
+          gpu_chassis: { max_count: 0, supported_form_factors: [], supported_models: [], nvlink_topology: "none" },
+          gpu: [],
+        },
+      })),
+    ],
+    clusters: [
+      {
+        id: onpremClusterId, name: "data-cluster", environment_tag: "data",
+        k8s_version: "1.30", ha_control_plane: false,
+        node_ids: onpremNodeIds,
+        network: { pod_cidr: "10.244.0.0/16", service_cidr: "10.96.0.0/12", node_subnet: "10.0.0.0/24", dns_domain: "cluster.local", lb_pool: "10.0.10.0/24" },
+        ingress_rules: [],
+        addons: { cni: "Calico", ingress: "NGINX", metrics_server: true, gpu_operator: false, service_mesh: "None" },
+        namespaces: [{ name: "data", labels: { tier: "data" } }, ..._platformNamespaces()],
+        network_policies: _platformNps(),
+        workloads: [
+          {
+            id: ids.worker, name: "data-worker", category: "Batch", namespace: "data",
+            labels: { app: "worker" }, replicas: 2,
+            resources: { requests: { cpu: 2, memory_gb: 8 } },
+            runtime: { language: "Python", framework: "FastAPI", version: "3.12" },
+            network: { service: { type: "None", ports: [] } },
+          },
+          ...platformWls1,
+        ],
+      },
+      {
+        id: awsClusterId, name: "web-cluster", environment_tag: "prod",
+        k8s_version: "1.30", ha_control_plane: false,
+        node_ids: awsNodeIds,
+        network: { pod_cidr: "10.245.0.0/16", service_cidr: "10.97.0.0/12", node_subnet: "10.1.0.0/24", dns_domain: "cluster.local" },
+        ingress_rules: [{ id: ing1, name: "web", host: "www.example.com", tls: true,
+                          paths: [{ path: "/", path_type: "Prefix", workload_id: ids.web, port: 80 }] }],
+        addons: { cni: "AWS-VPC-CNI", ingress: "AWS-ALB", metrics_server: true, gpu_operator: false, service_mesh: "None" },
+        namespaces: [{ name: "web", labels: { tier: "web" } }, { name: "backend" }, ..._platformNamespaces()],
+        network_policies: _platformNps(),
+        workloads: [
+          {
+            id: ids.web, name: "web-frontend", category: "Frontend", namespace: "web",
+            labels: { app: "web" }, replicas: 3,
+            resources: { requests: { cpu: 0.3, memory_gb: 0.5 } },
+            runtime: { language: "Node.js", framework: "Fastify", version: "20" },
+            network: { service: { type: "ClusterIP", ports: [{ name: "http", port: 80, target_port: 8080 }] } },
+            depends_on: [{ target_workload_id: ids.api, protocol: "HTTP", port: 8080, avg_call_ms: 30 }],
+          },
+          {
+            id: ids.api, name: "api", category: "API", namespace: "backend",
+            labels: { app: "api" }, replicas: 3,
+            resources: { requests: { cpu: 0.5, memory_gb: 1 } },
+            runtime: { language: "Java", framework: "Spring-Boot", version: "17",
+                       concurrency: { model: "thread-pool", max_threads: 200, heap_gb: 0.7 },
+                       connection_pool_per_replica: 10 },
+            network: { service: { type: "ClusterIP", ports: [{ name: "http", port: 8080, target_port: 8080 }] } },
+          },
+          ...platformWls2,
+        ],
+      },
+    ],
+    site_links: [{
+      id: sitelinkId, name: "idc-aws-vpn",
+      from_site_id: idcId, to_site_id: awsId,
+      kind: "vpn", bandwidth_gbps: 1, latency_ms: 30, encrypted: true,
+    }],
+    metadata: { created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+  };
+}
+
+const TEMPLATES = [
+  {
+    id: "3tier-ha", icon: "🌐",
+    name: "3-Tier Web (HA)",
+    description: "Frontend × 3 + API(Spring 17) × 3 + 외부 RDS/Redis. F5 L4 + FortiGate + nginx-ingress. 가장 흔한 production pattern.",
+    apply: buildTpl3TierHA,
+  },
+  {
+    id: "microservices", icon: "🧩",
+    name: "Microservices Demo",
+    description: "Online Boutique 풍 8개 서비스 + 의존 그래프 (frontend → gateway → user/product/cart → checkout/payment + recommendation). Cilium, Ceph 사용.",
+    apply: buildTplMicroservices,
+  },
+  {
+    id: "ml-inference", icon: "🤖",
+    name: "LLM Inference Platform",
+    description: "Dell XE9680 (H200×8) + vLLM (Llama 70B) + Embedding 서비스 + Qdrant 벡터 DB + Redis 캐시. NFS로 모델 저장.",
+    apply: buildTplMLInference,
+  },
+  {
+    id: "hybrid-cloud", icon: "☁",
+    name: "Hybrid Cloud",
+    description: "IDC(데이터 클러스터) + AWS(웹 클러스터)를 site_link(VPN 1Gbps)로 연결. 양쪽 모두 production preset 적용.",
+    apply: buildTplHybridCloud,
+  },
+];
+
+function applyTemplate(templateId, projectName) {
+  const t = TEMPLATES.find(x => x.id === templateId);
+  if (!t) return;
+  state.project = t.apply(projectName || t.name);
+  state.ui.selectedKind = state.ui.selectedId = null;
+  state.ui.view = "topology";
+  emit(); saveSoon();
+}
+
+function openTemplates() {
+  const root = el("div");
+  root.appendChild(el("h2", {}, ["Architecture Templates"]));
+  root.appendChild(el("div", {
+    style: { fontSize: "12px", color: "var(--text2)", marginBottom: "12px" },
+  }, [
+    "표준 인프라 패턴을 한 번에 생성. 기존 프로젝트는 덮어씌워집니다 — 필요시 먼저 Export 하세요.",
+  ]));
+
+  const nameInput = el("input", { value: "my-vk8s-project", placeholder: "프로젝트 이름" });
+  root.appendChild(el("div", { class: "field" }, [el("label", {}, ["Project name"]), nameInput]));
+
+  const grid = el("div", {
+    style: { display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "10px", marginTop: "10px" },
+  });
+  for (const t of TEMPLATES) {
+    grid.appendChild(el("button", {
+      style: {
+        background: "var(--surface2)", border: "1px solid var(--border)",
+        borderRadius: "8px", padding: "14px", cursor: "pointer",
+        textAlign: "left", color: "var(--text)", fontFamily: "inherit",
+        display: "flex", flexDirection: "column", gap: "6px",
+      },
+      onclick: () => {
+        if (state.project) {
+          if (!confirm("현재 프로젝트가 덮어씌워집니다. 진행?")) return;
+        }
+        applyTemplate(t.id, nameInput.value.trim() || t.name);
+        closeModal();
+      },
+    }, [
+      el("div", { style: { display: "flex", alignItems: "center", gap: "10px" } }, [
+        el("span", { style: { fontSize: "22px" } }, [t.icon]),
+        el("strong", { style: { fontSize: "14px" } }, [t.name]),
+      ]),
+      el("div", { style: { fontSize: "11px", color: "var(--text2)", lineHeight: "1.5" } }, [t.description]),
+    ]));
+  }
+  root.appendChild(grid);
+
+  root.appendChild(el("div", { class: "modal-actions" }, [
+    el("button", { class: "btn-ghost", onclick: closeModal }, ["Cancel"]),
+  ]));
+
+  openModal(root);
+  $("#modalContent").style.maxWidth = "720px";
+}
+
 //============ Splash ============
 function renderSplash() {
   const splash = $("#splash");
@@ -7952,6 +8601,8 @@ function bindSplash() {
     createProject(chosen, $("#splashName").value);
   });
   $("#btnSplashImport").addEventListener("click", () => $("#fileImport").click());
+  const btnTpl = $("#btnSplashTemplates");
+  if (btnTpl) btnTpl.addEventListener("click", openTemplates);
 }
 
 //============ Import / Export ============
@@ -8010,6 +8661,7 @@ async function init() {
   $("#btnExport").addEventListener("click", exportProject);
   $("#btnImport").addEventListener("click", () => $("#fileImport").click());
   $("#btnGlossary").addEventListener("click", openGlossary);
+  $("#btnTemplates").addEventListener("click", openTemplates);
   $("#fileImport").addEventListener("change", e => {
     const file = e.target.files[0];
     if (file) importProjectFromFile(file);
