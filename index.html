@@ -5757,6 +5757,36 @@ function renderTopologyGrid(root, p) {
       ]));
     }
 
+    // Network devices (top — perimeter security)
+    const ndIconMap = { switch: "⇄", router: "⊞", firewall: "🛡", waf: "🛡", cdn: "🌍", vpn: "🔐", dns: "🌐", ddos: "⚠" };
+    const netdevs = s.network_devices || [];
+    if (netdevs.length) {
+      const ndRow = el("div", {
+        style: { display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "12px" },
+      });
+      for (const d of netdevs) {
+        ndRow.appendChild(el("div", {
+          style: {
+            background: "var(--surface2)",
+            border: "1px solid " + (d.ha ? "var(--green)" : "var(--border)"),
+            borderRadius: "6px",
+            padding: "6px 10px",
+            cursor: "pointer",
+            fontSize: "11px",
+            display: "flex", alignItems: "center", gap: "6px",
+          },
+          onclick: () => selectEntity("netdev", d.id),
+        }, [
+          el("span", {}, [ndIconMap[d.kind] || "▢"]),
+          el("strong", {}, [d.name]),
+          el("span", { style: { color: "var(--text3)", fontFamily: "JetBrains Mono", fontSize: "10px" } }, [
+            `${d.kind}${d.vendor ? ` · ${d.vendor}` : ""}${d.ha ? " · HA" : ""}`,
+          ]),
+        ]));
+      }
+      card.appendChild(ndRow);
+    }
+
     // L4 LBs (top of site)
     const l4s = s.l4_balancers || [];
     if (l4s.length) {
@@ -5857,6 +5887,36 @@ function renderTopologyGrid(root, p) {
         ]));
       }
       card.appendChild(stRow);
+    }
+
+    // External services (bottom — managed services)
+    const exIconMap = { database: "🗄", cache: "⚡", queue: "📨", registry: "📦", backup: "💼", monitoring: "📊", logging: "📝", secret_store: "🔑", identity: "👤", object_store: "🪣", custom: "❓" };
+    const extsvcs = s.external_services || [];
+    if (extsvcs.length) {
+      const exRow = el("div", {
+        style: { display: "flex", flexWrap: "wrap", gap: "8px", marginTop: "12px" },
+      });
+      for (const e of extsvcs) {
+        exRow.appendChild(el("div", {
+          style: {
+            background: "var(--surface2)",
+            border: "1px dashed var(--purple)",
+            borderRadius: "6px",
+            padding: "6px 10px",
+            cursor: "pointer",
+            fontSize: "11px",
+            display: "flex", alignItems: "center", gap: "6px",
+          },
+          onclick: () => selectEntity("extsvc", e.id),
+        }, [
+          el("span", {}, [exIconMap[e.kind] || "❓"]),
+          el("strong", {}, [e.name]),
+          el("span", { style: { color: "var(--text3)", fontFamily: "JetBrains Mono", fontSize: "10px" } }, [
+            `${e.kind}${e.engine ? `/${e.engine}` : ""}${e.endpoint ? ` · ${e.endpoint}` : ""}`,
+          ]),
+        ]));
+      }
+      card.appendChild(exRow);
     }
 
     root.appendChild(card);
