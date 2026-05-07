@@ -1,4 +1,4 @@
-# vk8s Schema (v0.4)
+# vk8s Schema (v0.5)
 
 vk8s 프로젝트의 데이터 모델 정의. JSON Schema 2020-12 기준.
 
@@ -72,6 +72,12 @@ Cluster 내 `namespaces[]`/`network_policies[]` 인라인. NetworkPolicy 별도 
 
 ### 8. Helm은 워크로드 단위
 Workload 1개 = chart 1개. Export 시 umbrella chart로 묶을지는 export 옵션.
+
+## v0.4 → v0.5 변경
+
+- **Site.l4_balancers[]**: L4 로드밸런서 (F5/Citrix/MetalLB 등). vip, throughput, target_cluster_ids.
+- **Site.storages[]**: 외부 스토리지 (NAS/SAN/Ceph/Object). protocol, endpoint, csi_driver, capacity_tb.
+- 모두 **Site 레벨**에 위치 (IDC 인프라 물리적 자원). 클러스터는 target_cluster_ids로 연결.
 
 ## v0.3 → v0.4 변경
 

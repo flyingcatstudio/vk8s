@@ -1020,7 +1020,7 @@
 //============================================================
 
 //============ Constants ============
-const SCHEMA_VERSION = "0.4";
+const SCHEMA_VERSION = "0.5";
 const STORAGE_KEY    = "vk8s.project.current";
 const CATALOG_FILES  = [
   "data/gpu-models.json",
@@ -1045,7 +1045,7 @@ const VIEWS = [
 const state = {
   catalog: { entries: [], gpuModels: {}, runtime: {}, loaded: false },
   project: null,
-  ui: { selectedKind: null, selectedId: null, view: "topology" },
+  ui: { selectedKind: null, selectedId: null, view: "topology", topologyMode: "grid" },
 };
 
 const listeners = new Set();
@@ -1382,6 +1382,59 @@ const HELP = {
     cat: "네트워크",
     title: "Target Workload",
     body: "Ingress가 트래픽을 보낼 내부 서비스. 해당 워크로드의 Service.type이 None이 아니어야 함.",
+  },
+
+  // ───── L4 / Storage ─────
+  "l4.kind": {
+    cat: "네트워크",
+    title: "L4 LB Kind",
+    body: "하드웨어 어플라이언스(F5/Citrix), 가상(VM), 클라우드 LB(AWS NLB/GCP TCP LB), 소프트웨어(MetalLB/Cilium L2).",
+    reco: "Onprem 일반: hardware/software. Cloud: cloud. 개발/테스트: software.",
+  },
+  "l4.vip": {
+    cat: "네트워크",
+    title: "Virtual IP (VIP)",
+    body: "L4가 외부에 노출하는 가상 IP. 클라이언트는 이 IP로 접근, L4가 백엔드 노드(NodePort)나 Pod로 분산.",
+    reco: "Cluster.network.lb_pool 범위에서 할당. DNS A 레코드가 이 IP를 가리키도록.",
+  },
+  "l4.throughput": {
+    cat: "네트워크",
+    title: "Throughput (Gbps)",
+    body: "L4의 처리 대역폭. 동시 트래픽 한계. 일반 IDC: 10-40 Gbps. 대규모: 100+ Gbps.",
+  },
+  "l4.ha": {
+    cat: "네트워크",
+    title: "HA",
+    body: "active-passive 또는 active-active 이중화. 한 대 장애 시에도 서비스 지속.",
+    reco: "production 권장. dev/staging은 단일도 무방.",
+  },
+  "storage.kind": {
+    cat: "스토리지",
+    title: "Storage Kind",
+    body: "NAS=파일(NFS/SMB), SAN=블록(iSCSI/FC), Ceph=분산 통합, GlusterFS=분산 파일, Object=S3 호환, DAS=노드 직결.",
+    reco: "공유 데이터: NAS/Ceph/GlusterFS. DB/VM: SAN. 백업/아카이브: Object.",
+  },
+  "storage.protocol": {
+    cat: "스토리지",
+    title: "Storage Protocol",
+    body: "NAS=NFS/SMB, SAN=iSCSI/FC, Ceph=RBD(블록)/CephFS(파일), Object=S3.",
+    reco: "k8s에서 NFS는 단순. iSCSI는 단일 RWO. RBD는 분산 RWO.",
+  },
+  "storage.endpoint": {
+    cat: "스토리지",
+    title: "Endpoint",
+    body: "스토리지 접속 주소. 예: NFS=호스트:포트(2049), Ceph=monitor 호스트, S3=URL.",
+  },
+  "storage.csi_driver": {
+    cat: "스토리지",
+    title: "CSI Driver",
+    body: "k8s가 이 스토리지를 PVC로 노출하는 데 쓰는 드라이버. nfs.csi.k8s.io / rbd.csi.ceph.com / 등.",
+    reco: "kind 선택 시 자동 추천. CSI driver는 cluster.addons.csi에 등록되어 있어야 함.",
+  },
+  "storage.capacity": {
+    cat: "스토리지",
+    title: "Capacity (TB)",
+    body: "총 저장 용량. PVC가 이 풀에서 빌려감.",
   },
 
   // ───── 워크로드 ─────
@@ -1742,6 +1795,15 @@ function migrateProject(p) {
     p.version = "0.4";
     console.log("Project migrated to v0.4");
   }
+  if (p.version === "0.4") {
+    // 0.4 → 0.5: optional Site.l4_balancers and Site.storages (just bump)
+    for (const s of p.sites || []) {
+      if (!Array.isArray(s.l4_balancers)) s.l4_balancers = [];
+      if (!Array.isArray(s.storages)) s.storages = [];
+    }
+    p.version = "0.5";
+    console.log("Project migrated to v0.5");
+  }
   return p;
 }
 
@@ -1796,6 +1858,8 @@ function addSite(seed, silent = false) {
   if (seed.kind === "onprem") {
     site.capacity = seed.capacity || { rack_units: 42, power_kw: 16 };
   }
+  site.l4_balancers = [];
+  site.storages = [];
   state.project.sites.push(site);
   if (!silent) { selectEntity("site", id); emit(); saveSoon(); }
   return site;
@@ -1857,6 +1921,12 @@ function deleteEntity(kind, id) {
     state.project.clusters = state.project.clusters.filter(x => x.id !== id);
   } else if (kind === "workload") {
     deleteWorkload(id);
+    return;
+  } else if (kind === "l4") {
+    deleteL4(id);
+    return;
+  } else if (kind === "storage") {
+    deleteStorage(id);
     return;
   }
   if (state.ui.selectedId === id) state.ui.selectedId = null;
@@ -2222,6 +2292,112 @@ function deleteIngressRule(clusterId, ruleId) {
   const c = state.project.clusters.find(x => x.id === clusterId);
   if (!c?.ingress_rules) return;
   c.ingress_rules = c.ingress_rules.filter(r => r.id !== ruleId);
+  emit(); saveSoon();
+}
+
+//============ L4 LB actions ============
+function addL4(siteId, seed) {
+  const s = state.project.sites.find(x => x.id === siteId);
+  if (!s) return;
+  if (!s.l4_balancers) s.l4_balancers = [];
+  const id = slug(seed.name) + "-" + uid();
+  s.l4_balancers.push({
+    id,
+    name: seed.name,
+    kind: seed.kind || "hardware",
+    vendor: seed.vendor || "",
+    vip: seed.vip || "",
+    throughput_gbps: seed.throughput_gbps || 10,
+    ha: !!seed.ha,
+    target_cluster_ids: seed.target_cluster_ids || [],
+  });
+  selectEntity("l4", id);
+  emit(); saveSoon();
+}
+function findL4(id) {
+  for (const s of state.project.sites || []) {
+    const x = (s.l4_balancers || []).find(l => l.id === id);
+    if (x) return { site: s, l4: x };
+  }
+  return null;
+}
+function deleteL4(id) {
+  for (const s of state.project.sites || []) {
+    if (!s.l4_balancers) continue;
+    const idx = s.l4_balancers.findIndex(l => l.id === id);
+    if (idx >= 0) {
+      s.l4_balancers.splice(idx, 1);
+      break;
+    }
+  }
+  if (state.ui.selectedId === id) state.ui.selectedId = null;
+  emit(); saveSoon();
+}
+function updateL4Field(id, path, value) {
+  const found = findL4(id);
+  if (!found) return;
+  const parts = path.split(".");
+  let obj = found.l4;
+  while (parts.length > 1) {
+    const p = parts.shift();
+    if (obj[p] == null) obj[p] = {};
+    obj = obj[p];
+  }
+  obj[parts[0]] = value;
+  emit(); saveSoon();
+}
+
+//============ Storage actions ============
+function addStorage(siteId, seed) {
+  const s = state.project.sites.find(x => x.id === siteId);
+  if (!s) return;
+  if (!s.storages) s.storages = [];
+  const id = slug(seed.name) + "-" + uid();
+  s.storages.push({
+    id,
+    name: seed.name,
+    kind: seed.kind || "NAS",
+    vendor: seed.vendor || "",
+    protocol: seed.protocol || "NFS",
+    endpoint: seed.endpoint || "",
+    capacity_tb: seed.capacity_tb || 10,
+    performance_iops: seed.performance_iops || undefined,
+    csi_driver: seed.csi_driver || "",
+    target_cluster_ids: seed.target_cluster_ids || [],
+  });
+  selectEntity("storage", id);
+  emit(); saveSoon();
+}
+function findStorage(id) {
+  for (const s of state.project.sites || []) {
+    const x = (s.storages || []).find(st => st.id === id);
+    if (x) return { site: s, storage: x };
+  }
+  return null;
+}
+function deleteStorage(id) {
+  for (const s of state.project.sites || []) {
+    if (!s.storages) continue;
+    const idx = s.storages.findIndex(st => st.id === id);
+    if (idx >= 0) {
+      s.storages.splice(idx, 1);
+      break;
+    }
+  }
+  if (state.ui.selectedId === id) state.ui.selectedId = null;
+  emit(); saveSoon();
+}
+function updateStorageField(id, path, value) {
+  const found = findStorage(id);
+  if (!found) return;
+  const parts = path.split(".");
+  let obj = found.storage;
+  while (parts.length > 1) {
+    const p = parts.shift();
+    if (obj[p] == null) obj[p] = {};
+    obj = obj[p];
+  }
+  obj[parts[0]] = value;
   emit(); saveSoon();
 }
 
@@ -2801,6 +2977,28 @@ function renderTree() {
         el("span", { class: "meta", style: cluster ? { color: "var(--purple)" } : {} }, [meta]),
       ]));
     }
+    // L4 LBs
+    for (const l4 of (s.l4_balancers || [])) {
+      sitesSec.appendChild(el("div", {
+        class: "tree-item child" + (state.ui.selectedKind === "l4" && state.ui.selectedId === l4.id ? " selected" : ""),
+        onclick: () => selectEntity("l4", l4.id),
+      }, [
+        el("span", { class: "icon" }, ["⚖"]),
+        el("span", { class: "label" }, [l4.name]),
+        el("span", { class: "meta" }, [l4.vendor || l4.kind || ""]),
+      ]));
+    }
+    // Storages
+    for (const st of (s.storages || [])) {
+      sitesSec.appendChild(el("div", {
+        class: "tree-item child" + (state.ui.selectedKind === "storage" && state.ui.selectedId === st.id ? " selected" : ""),
+        onclick: () => selectEntity("storage", st.id),
+      }, [
+        el("span", { class: "icon" }, ["💾"]),
+        el("span", { class: "label" }, [st.name]),
+        el("span", { class: "meta" }, [st.kind || ""]),
+      ]));
+    }
   }
   root.appendChild(sitesSec);
 
@@ -2860,6 +3058,8 @@ function renderInspector() {
   else if (k === "node") renderNodeInspector(root, id);
   else if (k === "cluster") renderClusterInspector(root, id);
   else if (k === "workload") renderWorkloadInspector(root, id);
+  else if (k === "l4") renderL4Inspector(root, id);
+  else if (k === "storage") renderStorageInspector(root, id);
 }
 
 function renderSiteInspector(root, id) {
@@ -2963,6 +3163,54 @@ function renderSiteInspector(root, id) {
       ]));
     }
   }
+
+  // L4 Load Balancers
+  const l4s = s.l4_balancers || [];
+  const l4Title = el("div", { class: "section-title" }, [`L4 Load Balancers (${l4s.length})`]);
+  l4Title.appendChild(helpIcon("l4.kind"));
+  root.appendChild(l4Title);
+  if (!l4s.length) {
+    root.appendChild(el("div", { class: "empty-hint" }, ["L4 LB 없음"]));
+  } else {
+    for (const l4 of l4s) {
+      root.appendChild(el("div", {
+        class: "tree-item",
+        onclick: () => selectEntity("l4", l4.id),
+      }, [
+        el("span", { class: "icon" }, ["⚖"]),
+        el("span", { class: "label" }, [l4.name]),
+        el("span", { class: "meta" }, [`${l4.vendor || l4.kind} ${l4.vip ? `· ${l4.vip}` : ""}`]),
+      ]));
+    }
+  }
+  root.appendChild(el("button", {
+    class: "add-btn", style: { width: "100%", marginTop: "6px" },
+    onclick: () => openAddL4(id),
+  }, ["＋ Add L4 LB"]));
+
+  // Storage
+  const storages = s.storages || [];
+  const stTitle = el("div", { class: "section-title" }, [`Storage (${storages.length})`]);
+  stTitle.appendChild(helpIcon("storage.kind"));
+  root.appendChild(stTitle);
+  if (!storages.length) {
+    root.appendChild(el("div", { class: "empty-hint" }, ["스토리지 없음"]));
+  } else {
+    for (const st of storages) {
+      root.appendChild(el("div", {
+        class: "tree-item",
+        onclick: () => selectEntity("storage", st.id),
+      }, [
+        el("span", { class: "icon" }, ["💾"]),
+        el("span", { class: "label" }, [st.name]),
+        el("span", { class: "meta" }, [`${st.kind}/${st.protocol}${st.capacity_tb ? ` · ${st.capacity_tb}TB` : ""}`]),
+      ]));
+    }
+  }
+  root.appendChild(el("button", {
+    class: "add-btn", style: { width: "100%", marginTop: "6px" },
+    onclick: () => openAddStorage(id),
+  }, ["＋ Add Storage"]));
 }
 
 function makeBarLine(label, valueText, pct) {
@@ -3580,6 +3828,205 @@ function renderClusterInspector(root, id) {
   }
 }
 
+function renderL4Inspector(root, id) {
+  const found = findL4(id);
+  if (!found) return;
+  const { site, l4 } = found;
+
+  root.appendChild(el("div", { class: "insp-header" }, [
+    el("span", { class: "kind" }, ["L4 LB"]),
+    el("span", { class: "name" }, [l4.name]),
+    el("button", {
+      class: "delete", title: "Delete",
+      onclick: () => { if (confirm(`'${l4.name}' 삭제?`)) deleteL4(id); },
+    }, ["🗑"]),
+  ]));
+
+  root.appendChild(el("div", { class: "field" }, [
+    el("label", {}, ["Name"]),
+    el("input", {
+      "data-focus-key": `l4.${id}.name`,
+      value: l4.name, oninput: e => updateL4Field(id, "name", e.target.value),
+    }),
+  ]));
+
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [
+      lbl("Kind", "l4.kind"),
+      el("select", { onchange: e => updateL4Field(id, "kind", e.target.value) },
+        ["hardware", "virtual", "cloud", "software"].map(k =>
+          el("option", { value: k, selected: k === (l4.kind || "hardware") ? "" : null }, [k]))),
+    ]),
+    el("div", { class: "field" }, [
+      el("label", {}, ["Vendor"]),
+      el("input", {
+        "data-focus-key": `l4.${id}.vendor`,
+        value: l4.vendor || "", placeholder: "F5 / Citrix / MetalLB",
+        oninput: e => updateL4Field(id, "vendor", e.target.value),
+      }),
+    ]),
+  ]));
+
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [
+      lbl("VIP", "l4.vip"),
+      el("input", {
+        "data-focus-key": `l4.${id}.vip`,
+        value: l4.vip || "", placeholder: "192.168.20.10",
+        oninput: e => updateL4Field(id, "vip", e.target.value),
+      }),
+    ]),
+    el("div", { class: "field" }, [
+      lbl("Throughput (Gbps)", "l4.throughput"),
+      el("input", {
+        "data-focus-key": `l4.${id}.throughput`,
+        type: "number", min: "0", step: "1",
+        value: l4.throughput_gbps || 0,
+        oninput: e => updateL4Field(id, "throughput_gbps", parseFloat(e.target.value) || 0),
+      }),
+    ]),
+  ]));
+
+  root.appendChild(el("label", {
+    style: { display: "flex", alignItems: "center", gap: "8px", margin: "8px 0", fontSize: "12px", color: "var(--text)" },
+  }, [
+    el("input", {
+      type: "checkbox", checked: l4.ha ? "" : null,
+      onchange: e => updateL4Field(id, "ha", e.target.checked),
+    }),
+    el("span", {}, ["HA (active-active 또는 active-passive)"]),
+    helpIcon("l4.ha"),
+  ]));
+
+  // Target clusters multi-select
+  const clusters = state.project.clusters || [];
+  if (clusters.length) {
+    root.appendChild(el("div", { class: "section-title" }, ["Targets (clusters)"]));
+    const list = el("div", { class: "checkbox-list" });
+    for (const c of clusters) {
+      const sel = (l4.target_cluster_ids || []).includes(c.id);
+      list.appendChild(el("label", {}, [
+        el("input", {
+          type: "checkbox", checked: sel ? "" : null,
+          onchange: e => {
+            const cur = new Set(l4.target_cluster_ids || []);
+            if (e.target.checked) cur.add(c.id); else cur.delete(c.id);
+            updateL4Field(id, "target_cluster_ids", Array.from(cur));
+          },
+        }),
+        el("span", {}, [c.name]),
+        el("span", { class: "meta" }, [`${(c.node_ids || []).length}n`]),
+      ]));
+    }
+    root.appendChild(list);
+  }
+
+  root.appendChild(el("div", { class: "section-title" }, ["Site"]));
+  root.appendChild(el("div", { class: "field-readonly" }, [site.name]));
+}
+
+function renderStorageInspector(root, id) {
+  const found = findStorage(id);
+  if (!found) return;
+  const { site, storage: st } = found;
+
+  root.appendChild(el("div", { class: "insp-header" }, [
+    el("span", { class: "kind" }, ["Storage"]),
+    el("span", { class: "name" }, [st.name]),
+    el("button", {
+      class: "delete", title: "Delete",
+      onclick: () => { if (confirm(`'${st.name}' 삭제?`)) deleteStorage(id); },
+    }, ["🗑"]),
+  ]));
+
+  root.appendChild(el("div", { class: "field" }, [
+    el("label", {}, ["Name"]),
+    el("input", {
+      "data-focus-key": `storage.${id}.name`,
+      value: st.name, oninput: e => updateStorageField(id, "name", e.target.value),
+    }),
+  ]));
+
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [
+      lbl("Kind", "storage.kind"),
+      el("select", { onchange: e => updateStorageField(id, "kind", e.target.value) },
+        ["NAS", "SAN", "Ceph", "GlusterFS", "Object", "DAS"].map(k =>
+          el("option", { value: k, selected: k === (st.kind || "NAS") ? "" : null }, [k]))),
+    ]),
+    el("div", { class: "field" }, [
+      lbl("Protocol", "storage.protocol"),
+      el("select", { onchange: e => updateStorageField(id, "protocol", e.target.value) },
+        ["NFS", "SMB", "iSCSI", "FC", "FCoE", "S3", "RBD", "CephFS"].map(p =>
+          el("option", { value: p, selected: p === (st.protocol || "NFS") ? "" : null }, [p]))),
+    ]),
+  ]));
+
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [
+      el("label", {}, ["Vendor"]),
+      el("input", {
+        "data-focus-key": `storage.${id}.vendor`,
+        value: st.vendor || "", placeholder: "NetApp / Pure / Ceph",
+        oninput: e => updateStorageField(id, "vendor", e.target.value),
+      }),
+    ]),
+    el("div", { class: "field" }, [
+      lbl("Capacity (TB)", "storage.capacity"),
+      el("input", {
+        "data-focus-key": `storage.${id}.capacity`,
+        type: "number", min: "0", step: "1",
+        value: st.capacity_tb || 0,
+        oninput: e => updateStorageField(id, "capacity_tb", parseFloat(e.target.value) || 0),
+      }),
+    ]),
+  ]));
+
+  root.appendChild(el("div", { class: "field" }, [
+    lbl("Endpoint", "storage.endpoint"),
+    el("input", {
+      "data-focus-key": `storage.${id}.endpoint`,
+      value: st.endpoint || "", placeholder: "nas.idc.local:2049",
+      oninput: e => updateStorageField(id, "endpoint", e.target.value),
+    }),
+  ]));
+
+  root.appendChild(el("div", { class: "field" }, [
+    lbl("CSI Driver", "storage.csi_driver"),
+    el("input", {
+      "data-focus-key": `storage.${id}.csi_driver`,
+      value: st.csi_driver || "", placeholder: "nfs.csi.k8s.io",
+      oninput: e => updateStorageField(id, "csi_driver", e.target.value),
+    }),
+  ]));
+
+  // Target clusters multi-select
+  const clusters = state.project.clusters || [];
+  if (clusters.length) {
+    root.appendChild(el("div", { class: "section-title" }, ["Targets (clusters)"]));
+    const list = el("div", { class: "checkbox-list" });
+    for (const c of clusters) {
+      const sel = (st.target_cluster_ids || []).includes(c.id);
+      list.appendChild(el("label", {}, [
+        el("input", {
+          type: "checkbox", checked: sel ? "" : null,
+          onchange: e => {
+            const cur = new Set(st.target_cluster_ids || []);
+            if (e.target.checked) cur.add(c.id); else cur.delete(c.id);
+            updateStorageField(id, "target_cluster_ids", Array.from(cur));
+          },
+        }),
+        el("span", {}, [c.name]),
+        el("span", { class: "meta" }, [`${(c.node_ids || []).length}n`]),
+      ]));
+    }
+    root.appendChild(list);
+  }
+
+  root.appendChild(el("div", { class: "section-title" }, ["Site"]));
+  root.appendChild(el("div", { class: "field-readonly" }, [site.name]));
+}
+
 function renderWorkloadInspector(root, id) {
   const found = findWorkload(id);
   if (!found) return;
@@ -4016,7 +4463,7 @@ function moveNodeToSite(nodeId, newSiteId) {
   emit(); saveSoon();
 }
 
-//============ Render: Topology ============
+//============ Render: Topology (toolbar + dispatch) ============
 function renderTopology() {
   const root = $("#viewBody");
   root.innerHTML = "";
@@ -4029,6 +4476,35 @@ function renderTopology() {
     ]));
     return;
   }
+
+  // Mode toolbar
+  const mode = state.ui.topologyMode || "grid";
+  const toolbar = el("div", {
+    style: { display: "flex", gap: "6px", marginBottom: "16px", alignItems: "center" },
+  }, [
+    el("span", { style: { fontSize: "11px", color: "var(--text2)", marginRight: "4px" } }, ["View:"]),
+    el("button", {
+      class: "view-tab" + (mode === "grid" ? " active" : ""),
+      style: { padding: "5px 14px", fontSize: "12px", borderRadius: "5px", border: "1px solid var(--border)" },
+      onclick: () => { state.ui.topologyMode = "grid"; emit(); },
+    }, ["▦ Grid"]),
+    el("button", {
+      class: "view-tab" + (mode === "diagram" ? " active" : ""),
+      style: { padding: "5px 14px", fontSize: "12px", borderRadius: "5px", border: "1px solid var(--border)" },
+      onclick: () => { state.ui.topologyMode = "diagram"; emit(); },
+    }, ["⛬ Diagram"]),
+    el("span", { style: { flex: 1 } }, []),
+    el("span", { style: { fontSize: "10px", color: "var(--text3)", fontStyle: "italic" } }, [
+      mode === "diagram" ? "L4 → 클러스터 노드 → Storage 흐름" : "사이트별 카드 + 노드 그리드",
+    ]),
+  ]);
+  root.appendChild(toolbar);
+
+  if (mode === "diagram") return renderTopologyDiagram(root, p);
+  return renderTopologyGrid(root, p);
+}
+
+function renderTopologyGrid(root, p) {
   if (!p.sites.length) {
     root.appendChild(el("div", { class: "view-empty" }, [
       el("div", { class: "big" }, ["⌗"]),
@@ -4103,6 +4579,35 @@ function renderTopology() {
       ]));
     }
 
+    // L4 LBs (top of site)
+    const l4s = s.l4_balancers || [];
+    if (l4s.length) {
+      const l4Row = el("div", {
+        style: { display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "12px" },
+      });
+      for (const l4 of l4s) {
+        l4Row.appendChild(el("div", {
+          style: {
+            background: "var(--surface2)",
+            border: "1px solid " + (l4.ha ? "var(--green)" : "var(--border)"),
+            borderRadius: "6px",
+            padding: "6px 10px",
+            cursor: "pointer",
+            fontSize: "11px",
+            display: "flex", alignItems: "center", gap: "6px",
+          },
+          onclick: () => selectEntity("l4", l4.id),
+        }, [
+          el("span", {}, ["⚖"]),
+          el("strong", {}, [l4.name]),
+          el("span", { style: { color: "var(--text3)", fontFamily: "JetBrains Mono", fontSize: "10px" } }, [
+            `${l4.vendor || l4.kind} ${l4.vip ? `· ${l4.vip}` : ""}${l4.ha ? " · HA" : ""}`,
+          ]),
+        ]));
+      }
+      card.appendChild(l4Row);
+    }
+
     const nodes = (s.node_ids || []).map(id => p.nodes.find(n => n.id === id)).filter(Boolean);
     if (!nodes.length) {
       card.appendChild(el("div", { class: "topo-empty-site" }, ["노드 없음. ＋ Add Node로 추가."]));
@@ -4146,8 +4651,357 @@ function renderTopology() {
       }
       card.appendChild(grid);
     }
+
+    // Storages (bottom of site)
+    const storages = s.storages || [];
+    if (storages.length) {
+      const stRow = el("div", {
+        style: { display: "flex", flexWrap: "wrap", gap: "8px", marginTop: "12px" },
+      });
+      for (const st of storages) {
+        stRow.appendChild(el("div", {
+          style: {
+            background: "var(--surface2)",
+            border: "1px solid var(--border)",
+            borderRadius: "6px",
+            padding: "6px 10px",
+            cursor: "pointer",
+            fontSize: "11px",
+            display: "flex", alignItems: "center", gap: "6px",
+          },
+          onclick: () => selectEntity("storage", st.id),
+        }, [
+          el("span", {}, ["💾"]),
+          el("strong", {}, [st.name]),
+          el("span", { style: { color: "var(--text3)", fontFamily: "JetBrains Mono", fontSize: "10px" } }, [
+            `${st.kind}/${st.protocol}${st.capacity_tb ? ` · ${st.capacity_tb}TB` : ""}`,
+          ]),
+        ]));
+      }
+      card.appendChild(stRow);
+    }
+
     root.appendChild(card);
   }
+}
+
+//============ Render: Topology Diagram (SVG) ============
+function renderTopologyDiagram(root, p) {
+  if (!p.sites.length) {
+    root.appendChild(el("div", { class: "view-empty" }, [
+      el("div", { class: "big" }, ["⛬"]),
+      el("h2", {}, ["사이트가 없습니다"]),
+      el("p", {}, ["트리에서 ＋ Add Site로 첫 사이트를 만드세요."]),
+    ]));
+    return;
+  }
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = (tag, attrs = {}, children = []) => {
+    const node = document.createElementNS(NS, tag);
+    for (const [k, v] of Object.entries(attrs)) {
+      if (k.startsWith("on") && typeof v === "function") node.addEventListener(k.slice(2).toLowerCase(), v);
+      else if (v != null) node.setAttribute(k, v);
+    }
+    for (const c of [].concat(children)) {
+      if (c == null) continue;
+      node.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+    }
+    return node;
+  };
+
+  // Layout constants
+  const L4_H = 40, L4_W = 160, NODE_W = 180, NODE_H = 70, ST_H = 40, ST_W = 160;
+  const COL_GAP = 14, ROW_GAP = 30, SITE_PAD = 24, SITE_GAP = 40;
+  const ITEM_GAP = 12;
+
+  // Compute layout (top-down, sites stack vertically; or grid if many sites)
+  // For simplicity: stack sites vertically.
+  let cursorY = 10;
+  let maxX = 0;
+  const placed = []; // { kind, item, x, y, w, h, refIds }
+
+  for (const s of p.sites) {
+    // Width: max of (l4 row, node grid row, storage row)
+    const nodes = (s.node_ids || []).map(id => p.nodes.find(n => n.id === id)).filter(Boolean);
+    const l4s = s.l4_balancers || [];
+    const storages = s.storages || [];
+    const nodesPerRow = Math.max(1, Math.min(nodes.length, 4));
+    const nodeGridW = nodesPerRow * NODE_W + (nodesPerRow - 1) * COL_GAP;
+    const l4RowW = l4s.length ? (l4s.length * L4_W + (l4s.length - 1) * ITEM_GAP) : 0;
+    const stRowW = storages.length ? (storages.length * ST_W + (storages.length - 1) * ITEM_GAP) : 0;
+    const innerW = Math.max(nodeGridW, l4RowW, stRowW, 300);
+    const siteW = innerW + SITE_PAD * 2;
+
+    const nodeRows = Math.ceil(nodes.length / nodesPerRow) || 1;
+    let innerH = 0;
+    if (l4s.length) innerH += L4_H + ROW_GAP;
+    innerH += nodeRows * NODE_H + (nodeRows - 1) * COL_GAP;
+    if (storages.length) innerH += ROW_GAP + ST_H;
+    if (!nodes.length) innerH = Math.max(innerH, 80);
+    const siteH = innerH + SITE_PAD * 2 + 20; // +20 for header
+
+    const siteX = 10;
+    const siteY = cursorY;
+    placed.push({ kind: "site", item: s, x: siteX, y: siteY, w: siteW, h: siteH });
+
+    // Position children
+    let innerY = siteY + SITE_PAD + 20; // 20 for header
+
+    if (l4s.length) {
+      const startX = siteX + SITE_PAD + (innerW - l4RowW) / 2;
+      for (let i = 0; i < l4s.length; i++) {
+        placed.push({
+          kind: "l4", item: l4s[i],
+          x: startX + i * (L4_W + ITEM_GAP),
+          y: innerY,
+          w: L4_W, h: L4_H,
+        });
+      }
+      innerY += L4_H + ROW_GAP;
+    }
+
+    // Nodes
+    const nodeStartX = siteX + SITE_PAD + (innerW - nodeGridW) / 2;
+    for (let i = 0; i < nodes.length; i++) {
+      const r = Math.floor(i / nodesPerRow), col = i % nodesPerRow;
+      placed.push({
+        kind: "node", item: nodes[i],
+        x: nodeStartX + col * (NODE_W + COL_GAP),
+        y: innerY + r * (NODE_H + COL_GAP),
+        w: NODE_W, h: NODE_H,
+      });
+    }
+    innerY += nodeRows * NODE_H + (nodeRows - 1) * COL_GAP;
+
+    if (storages.length) {
+      innerY += ROW_GAP;
+      const startX = siteX + SITE_PAD + (innerW - stRowW) / 2;
+      for (let i = 0; i < storages.length; i++) {
+        placed.push({
+          kind: "storage", item: storages[i],
+          x: startX + i * (ST_W + ITEM_GAP),
+          y: innerY,
+          w: ST_W, h: ST_H,
+        });
+      }
+    }
+
+    maxX = Math.max(maxX, siteX + siteW);
+    cursorY += siteH + SITE_GAP;
+  }
+
+  const totalW = maxX + 20;
+  const totalH = cursorY + 10;
+  const root_svg = svg("svg", {
+    width: "100%",
+    viewBox: `0 0 ${totalW} ${totalH}`,
+    style: "background:var(--bg);border:1px solid var(--border);border-radius:8px;",
+  });
+
+  // Theme tokens (read from CSS)
+  const colors = {
+    bg: "#08090c",
+    surface: "#111318",
+    surface2: "#181b23",
+    border: "#252a36",
+    border2: "#353c4d",
+    text: "#e8ecf4",
+    text2: "#8892a4",
+    text3: "#5a6377",
+    accent: "#4d9cff",
+    purple: "#a78bfa",
+    green: "#34d399",
+    yellow: "#fbbf24",
+    orange: "#fb923c",
+  };
+
+  const placedById = new Map();
+  for (const it of placed) if (it.item?.id) placedById.set(`${it.kind}:${it.item.id}`, it);
+
+  // Helper: site that owns this L4/storage entity
+  const ownerSiteOf = entityKind => entityId => {
+    const arrKey = entityKind === "l4" ? "l4_balancers" : "storages";
+    return placed.find(x => x.kind === "site" && (x.item[arrKey] || []).some(it => it.id === entityId));
+  };
+
+  // STEP 1: Draw site rects first (background)
+  for (const it of placed) {
+    if (it.kind !== "site") continue;
+    const isOnprem = it.item.kind === "onprem";
+    root_svg.appendChild(svg("rect", {
+      x: it.x, y: it.y, width: it.w, height: it.h,
+      rx: 10, ry: 10,
+      fill: colors.surface, stroke: colors.border, "stroke-width": 1.5,
+    }));
+    root_svg.appendChild(svg("text", {
+      x: it.x + 14, y: it.y + 22,
+      fill: colors.text, "font-size": "13", "font-weight": "600",
+      "font-family": "Pretendard, sans-serif",
+    }, [it.item.name]));
+    root_svg.appendChild(svg("text", {
+      x: it.x + it.w - 14, y: it.y + 22,
+      "text-anchor": "end",
+      fill: isOnprem ? colors.orange : colors.accent,
+      "font-size": "10", "font-family": "JetBrains Mono",
+    }, [it.item.kind]));
+  }
+
+  // STEP 2: Draw connection lines (above site rects, below inner boxes)
+  // L4 → worker nodes
+  for (const it of placed) {
+    if (it.kind !== "l4") continue;
+    const targets = it.item.target_cluster_ids || [];
+    let targetNodes = [];
+    if (targets.length) {
+      for (const cid of targets) {
+        const c = p.clusters.find(x => x.id === cid);
+        if (!c) continue;
+        for (const nid of c.node_ids || []) {
+          const n = p.nodes.find(x => x.id === nid);
+          if (n && (n.cluster_roles || []).includes("worker")) {
+            const placement = placedById.get("node:" + nid);
+            if (placement) targetNodes.push(placement);
+          }
+        }
+      }
+    } else {
+      // Fallback: same-site worker nodes
+      const owner = ownerSiteOf("l4")(it.item.id);
+      const ownerSiteId = owner?.item?.id;
+      for (const np of placed) {
+        if (np.kind !== "node") continue;
+        if (ownerSiteId && np.item.site_id !== ownerSiteId) continue;
+        if ((np.item.cluster_roles || []).includes("worker")) targetNodes.push(np);
+      }
+    }
+    for (const tgt of targetNodes) {
+      root_svg.appendChild(svg("line", {
+        x1: it.x + it.w / 2, y1: it.y + it.h,
+        x2: tgt.x + tgt.w / 2, y2: tgt.y,
+        stroke: colors.accent, "stroke-width": 2, "stroke-opacity": 0.7,
+      }));
+    }
+  }
+
+  // Storage → cluster nodes (same fallback)
+  for (const it of placed) {
+    if (it.kind !== "storage") continue;
+    const targets = it.item.target_cluster_ids || [];
+    let targetNodes = [];
+    if (targets.length) {
+      for (const cid of targets) {
+        const c = p.clusters.find(x => x.id === cid);
+        if (!c) continue;
+        for (const nid of c.node_ids || []) {
+          const placement = placedById.get("node:" + nid);
+          if (placement) targetNodes.push(placement);
+        }
+      }
+    } else {
+      // Fallback: all nodes in same site that belong to a cluster
+      const owner = ownerSiteOf("storage")(it.item.id);
+      const ownerSiteId = owner?.item?.id;
+      for (const np of placed) {
+        if (np.kind !== "node") continue;
+        if (ownerSiteId && np.item.site_id !== ownerSiteId) continue;
+        if (getNodeCluster(np.item.id)) targetNodes.push(np);
+      }
+    }
+    for (const tgt of targetNodes) {
+      root_svg.appendChild(svg("line", {
+        x1: it.x + it.w / 2, y1: it.y,
+        x2: tgt.x + tgt.w / 2, y2: tgt.y + tgt.h,
+        stroke: colors.green, "stroke-width": 2, "stroke-opacity": 0.7,
+        "stroke-dasharray": "5,3",
+      }));
+    }
+  }
+
+  // STEP 3: Draw inner boxes (above lines)
+  for (const it of placed) {
+    if (it.kind === "site") continue; // already drawn in STEP 1
+    if (it.kind === "l4") {
+      const haColor = it.item.ha ? colors.green : colors.border2;
+      const g = svg("g", { style: "cursor:pointer", onclick: () => selectEntity("l4", it.item.id) });
+      g.appendChild(svg("rect", {
+        x: it.x, y: it.y, width: it.w, height: it.h, rx: 6, ry: 6,
+        fill: colors.surface2, stroke: haColor, "stroke-width": 1.5,
+      }));
+      g.appendChild(svg("text", {
+        x: it.x + 8, y: it.y + 16, fill: colors.text, "font-size": "11", "font-weight": "600",
+      }, ["⚖ " + it.item.name]));
+      g.appendChild(svg("text", {
+        x: it.x + 8, y: it.y + 30, fill: colors.text2, "font-size": "10", "font-family": "JetBrains Mono",
+      }, [`${it.item.vendor || it.item.kind}${it.item.vip ? ` ${it.item.vip}` : ""}`]));
+      root_svg.appendChild(g);
+      continue;
+    }
+    if (it.kind === "storage") {
+      const g = svg("g", { style: "cursor:pointer", onclick: () => selectEntity("storage", it.item.id) });
+      g.appendChild(svg("rect", {
+        x: it.x, y: it.y, width: it.w, height: it.h, rx: 6, ry: 6,
+        fill: colors.surface2, stroke: colors.border2, "stroke-width": 1.5,
+      }));
+      g.appendChild(svg("text", {
+        x: it.x + 8, y: it.y + 16, fill: colors.text, "font-size": "11", "font-weight": "600",
+      }, ["💾 " + it.item.name]));
+      g.appendChild(svg("text", {
+        x: it.x + 8, y: it.y + 30, fill: colors.text2, "font-size": "10", "font-family": "JetBrains Mono",
+      }, [`${it.item.kind}/${it.item.protocol}${it.item.capacity_tb ? ` ${it.item.capacity_tb}TB` : ""}`]));
+      root_svg.appendChild(g);
+      continue;
+    }
+    if (it.kind === "node") {
+      const cluster = getNodeCluster(it.item.id);
+      const isSelected = state.ui.selectedKind === "node" && state.ui.selectedId === it.item.id;
+      const stroke = isSelected ? colors.accent : (cluster ? colors.purple : colors.border);
+      const g = svg("g", { style: "cursor:pointer", onclick: () => selectEntity("node", it.item.id) });
+      g.appendChild(svg("rect", {
+        x: it.x, y: it.y, width: it.w, height: it.h, rx: 6, ry: 6,
+        fill: colors.surface2, stroke, "stroke-width": isSelected ? 2 : 1.5,
+      }));
+      g.appendChild(svg("text", {
+        x: it.x + 8, y: it.y + 16, fill: colors.text, "font-size": "11", "font-weight": "600",
+      }, ["▣ " + it.item.name]));
+      g.appendChild(svg("text", {
+        x: it.x + 8, y: it.y + 30, fill: colors.text2, "font-size": "9", "font-family": "JetBrains Mono",
+      }, [`${it.item.brand} ${it.item.spec?.form_factor || ""}`]));
+      // GPU line
+      const totalGpu = (it.item.spec?.gpu || []).reduce((a, g) => a + (g.count || 0), 0);
+      g.appendChild(svg("text", {
+        x: it.x + 8, y: it.y + 44, fill: colors.text2, "font-size": "9", "font-family": "JetBrains Mono",
+      }, [`${it.item.spec?.vcpu}c · ${it.item.spec?.memory_gb}GB${totalGpu ? ` · ${totalGpu} GPU` : ""}`]));
+      // Cluster + role
+      if (cluster) {
+        const roleStr = (it.item.cluster_roles || []).map(r => r === "control-plane" ? "cp" : r).join("+");
+        g.appendChild(svg("text", {
+          x: it.x + 8, y: it.y + 60, fill: colors.purple, "font-size": "9", "font-family": "JetBrains Mono",
+        }, [`⎈ ${cluster.name} ${roleStr}`]));
+      }
+      // Node IP
+      if (it.item.network?.ip) {
+        g.appendChild(svg("text", {
+          x: it.x + it.w - 8, y: it.y + 60, "text-anchor": "end",
+          fill: colors.text3, "font-size": "9", "font-family": "JetBrains Mono",
+        }, [it.item.network.ip]));
+      }
+      root_svg.appendChild(g);
+    }
+  }
+
+  // Legend
+  const legend = el("div", {
+    style: { fontSize: "10px", color: "var(--text3)", marginTop: "8px", display: "flex", gap: "16px", fontFamily: "JetBrains Mono" },
+  }, [
+    el("span", {}, [`⚖ L4 LB`]),
+    el("span", {}, [`▣ Node (보라 = 클러스터 소속)`]),
+    el("span", {}, [`💾 Storage`]),
+    el("span", { style: { color: "var(--accent)" } }, ["—— L4 → Worker"]),
+    el("span", { style: { color: "var(--green)" } }, ["- - Storage → Node"]),
+  ]);
+
+  root.appendChild(root_svg);
+  root.appendChild(legend);
 }
 
 //============ Scheduling simulation (first-fit) ============
@@ -5117,6 +5971,119 @@ function openAddIngressRule(clusterId) {
           workload_id: wlSel.value,
           port: parseInt(portInput.value) || 80,
         }],
+      });
+      closeModal();
+    } }, ["Add"]),
+  ]));
+  openModal(root);
+}
+
+//============ Add L4 modal ============
+function openAddL4(siteId) {
+  const s = state.project.sites.find(x => x.id === siteId);
+  if (!s) return;
+  const root = el("div");
+  root.appendChild(el("h2", {}, ["Add L4 Load Balancer"]));
+
+  const nameInput = el("input", { value: `L4-${(s.l4_balancers?.length || 0) + 1}` });
+  const kindSel = el("select", {}, ["hardware", "virtual", "cloud", "software"].map(k =>
+    el("option", { value: k, selected: k === (s.kind === "cloud" ? "cloud" : "hardware") ? "" : null }, [k])));
+  const vendorInput = el("input", {
+    placeholder: s.kind === "cloud" ? "AWS NLB / GCP TCP LB" : "F5 / Citrix / MetalLB",
+    value: "",
+  });
+  const vipInput = el("input", { placeholder: "192.168.20.10", value: "" });
+  const tputInput = el("input", { type: "number", min: "0", value: "10" });
+  const haInput = el("input", { type: "checkbox", checked: "" });
+
+  root.appendChild(el("div", { class: "field" }, [el("label", {}, ["Name"]), nameInput]));
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [lbl("Kind", "l4.kind"), kindSel]),
+    el("div", { class: "field" }, [el("label", {}, ["Vendor"]), vendorInput]),
+  ]));
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [lbl("VIP", "l4.vip"), vipInput]),
+    el("div", { class: "field" }, [lbl("Throughput (Gbps)", "l4.throughput"), tputInput]),
+  ]));
+  root.appendChild(el("label", {
+    style: { display: "flex", alignItems: "center", gap: "8px", margin: "8px 0", fontSize: "12px", color: "var(--text)" },
+  }, [haInput, el("span", {}, ["HA"]), helpIcon("l4.ha")]));
+
+  root.appendChild(el("div", { class: "modal-actions" }, [
+    el("button", { class: "btn-ghost", onclick: closeModal }, ["Cancel"]),
+    el("button", { class: "btn", onclick: () => {
+      addL4(siteId, {
+        name: nameInput.value.trim() || "L4",
+        kind: kindSel.value,
+        vendor: vendorInput.value.trim(),
+        vip: vipInput.value.trim(),
+        throughput_gbps: parseFloat(tputInput.value) || 10,
+        ha: haInput.checked,
+      });
+      closeModal();
+    } }, ["Add"]),
+  ]));
+  openModal(root);
+}
+
+//============ Add Storage modal ============
+function openAddStorage(siteId) {
+  const s = state.project.sites.find(x => x.id === siteId);
+  if (!s) return;
+  const root = el("div");
+  root.appendChild(el("h2", {}, ["Add Storage"]));
+
+  const nameInput = el("input", { value: `storage-${(s.storages?.length || 0) + 1}` });
+  const kindSel = el("select", {}, ["NAS", "SAN", "Ceph", "GlusterFS", "Object", "DAS"].map(k =>
+    el("option", { value: k }, [k])));
+  const protoSel = el("select", {}, ["NFS", "SMB", "iSCSI", "FC", "FCoE", "S3", "RBD", "CephFS"].map(p =>
+    el("option", { value: p }, [p])));
+  const vendorInput = el("input", { placeholder: "NetApp / Pure / Ceph", value: "" });
+  const capInput = el("input", { type: "number", min: "0", value: "10" });
+  const epInput = el("input", { placeholder: "nas.idc.local:2049", value: "" });
+  const csiInput = el("input", { placeholder: "nfs.csi.k8s.io", value: "" });
+
+  // Auto-suggest protocol/csi based on kind
+  const protoMap = { NAS: "NFS", SAN: "iSCSI", Ceph: "RBD", GlusterFS: "NFS", Object: "S3", DAS: "iSCSI" };
+  const csiMap = {
+    NAS: "nfs.csi.k8s.io",
+    SAN: "iscsi.csi.k8s.io",
+    Ceph: "rbd.csi.ceph.com",
+    GlusterFS: "glusterfs",
+    Object: "ru.yandex.s3.csi",
+    DAS: "local-path",
+  };
+  kindSel.addEventListener("change", () => {
+    if (protoMap[kindSel.value]) protoSel.value = protoMap[kindSel.value];
+    if (csiMap[kindSel.value] && !csiInput.value) csiInput.value = csiMap[kindSel.value];
+  });
+  // Initial defaults
+  protoSel.value = protoMap[kindSel.value] || "NFS";
+  csiInput.value = csiMap[kindSel.value] || "";
+
+  root.appendChild(el("div", { class: "field" }, [el("label", {}, ["Name"]), nameInput]));
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [lbl("Kind", "storage.kind"), kindSel]),
+    el("div", { class: "field" }, [lbl("Protocol", "storage.protocol"), protoSel]),
+  ]));
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [el("label", {}, ["Vendor"]), vendorInput]),
+    el("div", { class: "field" }, [lbl("Capacity (TB)", "storage.capacity"), capInput]),
+  ]));
+  root.appendChild(el("div", { class: "field" }, [lbl("Endpoint", "storage.endpoint"), epInput]));
+  root.appendChild(el("div", { class: "field" }, [lbl("CSI Driver", "storage.csi_driver"), csiInput]));
+
+  root.appendChild(el("div", { class: "modal-actions" }, [
+    el("button", { class: "btn-ghost", onclick: closeModal }, ["Cancel"]),
+    el("button", { class: "btn", onclick: () => {
+      addStorage(siteId, {
+        name: nameInput.value.trim() || "storage",
+        kind: kindSel.value,
+        protocol: protoSel.value,
+        vendor: vendorInput.value.trim(),
+        capacity_tb: parseFloat(capInput.value) || 10,
+        endpoint: epInput.value.trim(),
+        csi_driver: csiInput.value.trim(),
       });
       closeModal();
     } }, ["Add"]),

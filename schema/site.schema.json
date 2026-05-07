@@ -50,6 +50,78 @@
       "type": "array",
       "items": { "type": "string" },
       "description": "이 Site에 위치한 노드의 id 목록. Node.site_id와 양방향 일치."
+    },
+    "l4_balancers": {
+      "type": "array",
+      "description": "L4 로드밸런서 (하드웨어/가상/클라우드). 클러스터 외부 트래픽 진입점.",
+      "items": {
+        "type": "object",
+        "required": ["id", "name"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "name": { "type": "string" },
+          "kind": {
+            "enum": ["hardware", "virtual", "cloud", "software"],
+            "default": "hardware",
+            "description": "hardware=F5/Citrix 등 어플라이언스, virtual=VM, cloud=AWS NLB 등, software=MetalLB/Cilium L2"
+          },
+          "vendor": {
+            "type": "string",
+            "description": "예: F5, Citrix ADC, A10, Radware, AWS NLB, GCP TCP LB, MetalLB"
+          },
+          "model": { "type": "string" },
+          "ip": { "type": "string" },
+          "vip": { "type": "string", "description": "Virtual IP — L4가 외부에 노출하는 IP" },
+          "throughput_gbps": { "type": "number" },
+          "ha": { "type": "boolean", "default": false, "description": "active-passive 또는 active-active 이중화 여부" },
+          "target_cluster_ids": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "이 L4가 트래픽을 보내는 클러스터들."
+          }
+        }
+      }
+    },
+    "storages": {
+      "type": "array",
+      "description": "외부 스토리지 시스템 (NAS/SAN/Ceph 등). 클러스터의 PVC가 이걸 사용.",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "kind"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "name": { "type": "string" },
+          "kind": {
+            "enum": ["NAS", "SAN", "Ceph", "GlusterFS", "Object", "DAS"],
+            "description": "NAS=NFS/SMB 파일, SAN=iSCSI/FC 블록, Ceph=분산, Object=S3 호환, DAS=노드 직접 연결"
+          },
+          "vendor": {
+            "type": "string",
+            "description": "예: NetApp, Pure Storage, Dell PowerScale, AWS EBS, Ceph, MinIO"
+          },
+          "model": { "type": "string" },
+          "protocol": {
+            "enum": ["NFS", "SMB", "iSCSI", "FC", "FCoE", "S3", "RBD", "CephFS"]
+          },
+          "endpoint": {
+            "type": "string",
+            "description": "예: nas.idc.local:2049 또는 ceph-mon.idc.local:6789"
+          },
+          "capacity_tb": { "type": "number" },
+          "performance_iops": { "type": "integer" },
+          "csi_driver": {
+            "type": "string",
+            "description": "k8s CSI 드라이버 (예: nfs.csi.k8s.io, ceph.com/cephfs)"
+          },
+          "target_cluster_ids": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "이 스토리지를 사용하는 클러스터들."
+          }
+        }
+      }
     }
   },
   "allOf": [

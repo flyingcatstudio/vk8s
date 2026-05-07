@@ -8,8 +8,8 @@
   "additionalProperties": false,
   "properties": {
     "version": {
-      "enum": ["0.4"],
-      "description": "스키마 버전. 마이그레이션 키. 0.1/0.2 프로젝트는 자동 마이그레이션 대상."
+      "enum": ["0.5"],
+      "description": "스키마 버전. 마이그레이션 키. 이전 버전(0.1~0.4)은 자동 마이그레이션."
     },
     "name": {
       "type": "string",
