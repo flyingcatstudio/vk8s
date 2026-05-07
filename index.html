@@ -1244,8 +1244,14 @@ const HELP = {
   "node.gpu_install": {
     cat: "GPU",
     title: "Onprem GPU 장착",
-    body: "Onprem 서버는 새시가 GPU 무장착 출하될 수 있고, 사용자가 별도로 장착합니다. 카탈로그가 호환 가능 GPU만 보여줍니다.",
-    reco: "1U 새시는 보통 0–2장, 2U는 3–4장, 4U/6U는 8장까지. 호환 안 되는 조합은 자동 차단.",
+    body: "Onprem 서버는 새시가 GPU 무장착으로 출하되며, 사용자가 슬롯에 직접 장착합니다. + Add GPU로 추가하고 모델/수량을 인플레이스 편집.",
+    reco: "선택할 수 있는 모델은 새시의 supported_models, 폼팩터 호환, 잔여 슬롯, 잔여 PSU 전력에 따라 결정됩니다.",
+  },
+  "node.gpu_power_budget": {
+    cat: "GPU",
+    title: "PSU Power Budget",
+    body: "노드의 PSU 정격(W). 노드 총 전력 = base + Σ(GPU TDP × count) + 디스크. PSU를 넘으면 부팅 자체가 안 되거나 셧다운.",
+    reco: "추천: 사용률 < 80%. PSU 90% 도달 시 경고, 100% 초과 시 차단. PSU 부족하면 더 큰 새시(예: XE9680=10800W)나 적은 GPU 선택.",
   },
 
   // ───── 워크로드 ─────
@@ -1722,6 +1728,56 @@ function removeNodeFromCluster(nodeId, clusterId) {
   emit(); saveSoon();
 }
 
+//============ Node GPU editing (onprem) ============
+function addNodeGpu(nodeId) {
+  const n = state.project.nodes.find(x => x.id === nodeId);
+  if (!n || n.source !== "onprem") return;
+  const chassis = n.spec.gpu_chassis || {};
+  const supported = chassis.supported_models || [];
+  if (!supported.length) return;
+  const gpuModels = state.catalog.gpuModels;
+  // Pick the first model whose form factor is in chassis.supported_form_factors
+  const okModel = supported.find(m =>
+    !gpuModels[m] || (chassis.supported_form_factors || []).includes(gpuModels[m].form_factor)
+  ) || supported[0];
+  const ginfo = gpuModels[okModel] || {};
+  // Default count: nvswitch-mesh fills available slots; bridge-pair = 2; otherwise 1
+  if (!n.spec.gpu) n.spec.gpu = [];
+  const used = n.spec.gpu.reduce((a, g) => a + (g.count || 0), 0);
+  const remaining = (chassis.max_count || 0) - used;
+  let defaultCount = 1;
+  if (chassis.nvlink_topology === "nvswitch-mesh") defaultCount = remaining;
+  else if (chassis.nvlink_topology === "bridge-pair") defaultCount = Math.min(2, remaining);
+  defaultCount = Math.max(1, Math.min(defaultCount, remaining || 1));
+  n.spec.gpu.push({
+    model: okModel,
+    form_factor: ginfo.form_factor,
+    count: defaultCount,
+    nvlink_enabled: chassis.nvlink_topology !== "none" && ginfo.nvlink_capable !== false,
+  });
+  emit(); saveSoon();
+}
+
+function updateNodeGpu(nodeId, index, partial) {
+  const n = state.project.nodes.find(x => x.id === nodeId);
+  if (!n || !n.spec.gpu || !n.spec.gpu[index]) return;
+  // If model changes, also update form_factor based on gpu-models reference
+  if (partial.model && state.catalog.gpuModels[partial.model]) {
+    partial.form_factor = state.catalog.gpuModels[partial.model].form_factor;
+  }
+  Object.assign(n.spec.gpu[index], partial);
+  emit(); saveSoon();
+}
+
+function removeNodeGpu(nodeId, index) {
+  const n = state.project.nodes.find(x => x.id === nodeId);
+  if (!n || !n.spec.gpu) return;
+  n.spec.gpu.splice(index, 1);
+  if (n.spec.gpu.length === 0) delete n.spec.gpu;
+  if (!n.spec.gpu) n.spec.gpu = [];
+  emit(); saveSoon();
+}
+
 function setNodeRoleEnabled(nodeId, role, enabled) {
   const n = state.project.nodes.find(x => x.id === nodeId);
   if (!n) return;
@@ -1874,7 +1930,7 @@ function runValidator(project) {
       F("MODE_SITE_KIND_CONFLICT", "error", `Site '${s.name}': cloud 모드인데 onprem Site`, { kind: "site", id: s.id });
   }
 
-  // 2. Node GPU compatibility (chassis vs installed)
+  // 2. Node GPU compatibility (chassis vs installed) + power
   for (const n of project.nodes || []) {
     const chassis = n.spec?.gpu_chassis || {};
     const gpus = n.spec?.gpu || [];
@@ -1898,6 +1954,28 @@ function runValidator(project) {
       if (g.nvlink_enabled && chassis.nvlink_topology === "none") {
         F("NVLINK_ON_NONE_TOPOLOGY", "error",
           `${n.name}: NVLink 미지원 새시인데 NVLink 활성`, { kind: "node", id: n.id });
+      }
+      // NVLink Bridge: 2장 페어링만 가능
+      if (g.nvlink_enabled && chassis.nvlink_topology === "bridge-pair" && (g.count > 2 || g.count % 2 !== 0)) {
+        F("NVLINK_BRIDGE_PAIR_LIMIT", "warn",
+          `${n.name}: NVLink Bridge는 2장 페어링만 (${g.model} ×${g.count})`, { kind: "node", id: n.id });
+      }
+    }
+    // SXM/NVSwitch는 보통 fully populated 권장
+    if (chassis.nvlink_topology === "nvswitch-mesh" && total > 0 && total < (chassis.max_count || 0)) {
+      F("NVLINK_SXM_NOT_FULLY_POPULATED", "warn",
+        `${n.name}: SXM/NVSwitch 새시는 보통 ${chassis.max_count}장 fully populated 권장 (현재 ${total})`, { kind: "node", id: n.id });
+    }
+    // Node-level PSU power check (onprem only)
+    if (n.source === "onprem") {
+      const psu = n.spec?.power?.psu_max_w || 0;
+      const used = computeNodePowerW(n, gpuModels);
+      if (psu > 0 && used > psu) {
+        F("NODE_POWER_EXCEEDS_PSU", "error",
+          `${n.name}: ${used}W 요구 > PSU 정격 ${psu}W`, { kind: "node", id: n.id }, "node.gpu_power_budget");
+      } else if (psu > 0 && used > psu * 0.9) {
+        F("NODE_POWER_NEAR_PSU", "warn",
+          `${n.name}: ${used}W (PSU ${(used / psu * 100).toFixed(0)}%) — 헤드룸 부족`, { kind: "node", id: n.id }, "node.gpu_power_budget");
       }
     }
   }
@@ -2478,29 +2556,64 @@ function renderNodeInspector(root, id) {
     const chassisInfo = el("div", { class: "chassis-info" }, [
       el("strong", {}, [chassisDesc]), el("br"), supports,
     ]);
-    // Add a small help icon for the topology
     const topo = chassis.nvlink_topology || "none";
     if (topo !== "none") chassisInfo.appendChild(helpIcon("gpu.topology." + topo));
     root.appendChild(chassisInfo);
+
+    // Slot + power budget bars (onprem only — cloud has fixed GPU)
+    const totalGpu = gpus.reduce((a, g) => a + (g.count || 0), 0);
+    const maxGpu = chassis.max_count || 0;
+    const psuMax = n.spec.power?.psu_max_w || 0;
+    const powerW = computeNodePowerW(n, gpuModels);
+    if (n.source === "onprem" && (maxGpu > 0 || psuMax > 0)) {
+      const bars = el("div", { class: "topo-site-bars", style: { marginTop: "8px" } }, [
+        maxGpu > 0 ? makeBarLine("GPU slots", `${totalGpu}/${maxGpu}`, maxGpu > 0 ? totalGpu / maxGpu * 100 : 0) : null,
+        psuMax > 0 ? makeBarLine("PSU", `${powerW}/${psuMax} W`, psuMax > 0 ? powerW / psuMax * 100 : 0) : null,
+      ]);
+      root.appendChild(bars);
+    }
+
     if (n.source === "cloud") {
-      root.appendChild(el("div", { class: "empty-hint" }, ["Cloud 인스턴스는 GPU 구성 고정"]));
-    }
-    for (let i = 0; i < gpus.length; i++) {
-      const g = gpus[i];
-      const ginfo = gpuModels[g.model] || {};
-      root.appendChild(el("div", { class: "gpu-config" }, [
-        el("div", { style: { fontSize: "12px", marginBottom: "6px" } }, [
-          el("strong", {}, [g.model]),
-          ` ×${g.count}  ${g.form_factor || ginfo.form_factor || ""}  ${ginfo.vram_gb ? `· ${ginfo.vram_gb}GB VRAM` : ""}`,
-          g.nvlink_enabled ? el("span", { style: { color: "var(--purple)" } }, [" · NVLink"]) : null,
-        ]),
-        el("div", { style: { fontSize: "11px", color: "var(--text2)" } }, [
-          ginfo.tdp_w ? `TDP ${ginfo.tdp_w}W × ${g.count} = ${(ginfo.tdp_w * g.count) / 1000}kW total` : "",
-        ]),
-      ]));
-    }
-    if (!gpus.length) {
-      root.appendChild(el("div", { class: "empty-hint" }, ["GPU 미장착"]));
+      // Cloud: read-only display
+      for (let i = 0; i < gpus.length; i++) {
+        const g = gpus[i];
+        const ginfo = gpuModels[g.model] || {};
+        root.appendChild(el("div", { class: "gpu-config" }, [
+          el("div", { style: { fontSize: "12px", marginBottom: "6px" } }, [
+            el("strong", {}, [g.model]),
+            ` ×${g.count}  ${g.form_factor || ginfo.form_factor || ""}  ${ginfo.vram_gb ? `· ${ginfo.vram_gb}GB VRAM` : ""}`,
+            g.nvlink_enabled ? el("span", { style: { color: "var(--purple)" } }, [" · NVLink"]) : null,
+          ]),
+          el("div", { style: { fontSize: "11px", color: "var(--text2)" } }, [
+            ginfo.tdp_w ? `TDP ${ginfo.tdp_w}W × ${g.count} = ${(ginfo.tdp_w * g.count) / 1000}kW total` : "",
+          ]),
+        ]));
+      }
+      if (gpus.length) {
+        root.appendChild(el("div", { class: "empty-hint" }, ["Cloud 인스턴스는 GPU 구성 고정 (인스턴스 타입에 묶임)"]));
+      }
+    } else {
+      // Onprem: editable rows
+      const supportedModels = (chassis.supported_models || []).filter(m =>
+        !gpuModels[m] || (chassis.supported_form_factors || []).includes(gpuModels[m].form_factor)
+      );
+      for (let i = 0; i < gpus.length; i++) {
+        root.appendChild(renderGpuRowEditable(n, i, supportedModels, gpuModels));
+      }
+      const remaining = maxGpu - totalGpu;
+      if (gpus.length === 0 && maxGpu > 0) {
+        root.appendChild(el("div", { class: "empty-hint" }, ["GPU 슬롯 비어있음"]));
+      }
+      if (remaining > 0 && supportedModels.length > 0) {
+        root.appendChild(el("button", {
+          class: "add-btn", style: { width: "100%", marginTop: "6px" },
+          onclick: () => addNodeGpu(id),
+        }, ["＋ Add GPU"]));
+      } else if (remaining <= 0 && maxGpu > 0) {
+        root.appendChild(el("div", { style: { fontSize: "11px", color: "var(--text3)", padding: "4px", fontStyle: "italic", textAlign: "center" } }, [
+          "모든 슬롯 사용 중. 추가하려면 기존 GPU 수를 줄이거나 큰 새시 사용",
+        ]));
+      }
     }
   }
 
@@ -2895,6 +3008,75 @@ function renderWorkloadInspector(root, id) {
       ]),
     ]));
   }
+}
+
+function renderGpuRowEditable(n, idx, supportedModels, gpuModels) {
+  const g = n.spec.gpu[idx];
+  const ginfo = gpuModels[g.model] || {};
+  const chassis = n.spec.gpu_chassis || {};
+  // Max for THIS row = total max - other rows total
+  const otherCount = (n.spec.gpu || []).reduce((a, gg, i) => a + (i === idx ? 0 : (gg.count || 0)), 0);
+  const myMax = Math.max(1, (chassis.max_count || 0) - otherCount);
+  const showNvlink = chassis.nvlink_topology !== "none" && (ginfo.nvlink_capable !== false);
+
+  const modelSel = el("select", {
+    style: { padding: "5px 8px", background: "var(--surface3)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: "4px", fontSize: "12px" },
+    onchange: e => updateNodeGpu(n.id, idx, { model: e.target.value }),
+  }, supportedModels.length
+    ? supportedModels.map(m => el("option", { value: m, selected: m === g.model ? "" : null }, [m]))
+    : [el("option", { value: g.model, selected: "" }, [g.model])]
+  );
+
+  const countInput = el("input", {
+    type: "number", min: "1", max: String(myMax), value: g.count,
+    style: { padding: "5px 6px", background: "var(--surface3)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: "4px", fontSize: "12px", width: "60px", textAlign: "center" },
+    oninput: e => {
+      let v = parseInt(e.target.value) || 1;
+      if (v < 1) v = 1;
+      if (v > myMax) { v = myMax; e.target.value = String(myMax); }
+      updateNodeGpu(n.id, idx, { count: v });
+    },
+  });
+
+  const nvlinkToggle = showNvlink
+    ? el("label", {
+        style: { display: "flex", alignItems: "center", gap: "4px", margin: 0, fontSize: "11px", textTransform: "none", letterSpacing: 0, color: g.nvlink_enabled ? "var(--purple)" : "var(--text3)", padding: "0 6px" },
+      }, [
+        el("input", {
+          type: "checkbox",
+          checked: g.nvlink_enabled ? "" : null,
+          onchange: e => updateNodeGpu(n.id, idx, { nvlink_enabled: e.target.checked }),
+        }),
+        "NVLink",
+      ])
+    : el("span", { style: { fontSize: "10px", color: "var(--text3)", padding: "0 6px" } }, [""]);
+
+  const headRow = el("div", {
+    style: { display: "grid", gridTemplateColumns: "1fr 70px auto auto", gap: "6px", alignItems: "center" },
+  }, [
+    modelSel,
+    countInput,
+    nvlinkToggle,
+    el("button", {
+      class: "x", title: "remove",
+      style: { background: "transparent", border: "none", color: "var(--text3)", cursor: "pointer", padding: "4px 8px" },
+      onclick: () => removeNodeGpu(n.id, idx),
+    }, ["✕"]),
+  ]);
+
+  const tdp = ginfo.tdp_w || 0;
+  const totalKw = tdp * g.count / 1000;
+  const tdpLine = el("div", {
+    style: { fontSize: "10px", color: "var(--text3)", marginTop: "4px", fontFamily: "JetBrains Mono" },
+  }, [
+    `${ginfo.form_factor || g.form_factor || "?"}`,
+    tdp ? `  ·  ${g.count}×${tdp}W = ${totalKw.toFixed(1)}kW` : "",
+    ginfo.vram_gb ? `  ·  ${g.count * ginfo.vram_gb}GB VRAM total` : "",
+  ]);
+
+  return el("div", {
+    style: { background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: "5px", padding: "8px 10px", marginBottom: "6px" },
+  }, [headRow, tdpLine]);
 }
 
 function moveNodeToSite(nodeId, newSiteId) {
