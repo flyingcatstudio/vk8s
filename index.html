@@ -8218,15 +8218,16 @@ function buildTplMicroservices(projectName) {
   };
 }
 
-// === LLM Inference Platform ===
+// === LLM Inference Platform (HA) ===
 function buildTplMLInference(projectName) {
   const siteId = "idc-gpu-" + uid();
   const fwId = "fw-" + uid();
+  const swId = "sw-" + uid();
   const lbId = "lb-" + uid();
   const stId = "st-" + uid();
   const objStId = "obj-" + uid();
   const cacheExtId = "ext-redis-" + uid();
-  const node1 = "node-cp-" + uid();
+  const cpNodes = [1, 2, 3].map(i => `cp-${i}-` + uid());
   const nodeGpu = "node-gpu-" + uid();
   const clusterId = "ai-" + uid();
   const ids = {
@@ -8237,29 +8238,33 @@ function buildTplMLInference(projectName) {
   const ing1 = "ing-llm-" + uid();
   const platformWls = _mkPlatformWorkloads();
 
+  const allNodeIds = [...cpNodes, nodeGpu];
   return {
     version: SCHEMA_VERSION, name: projectName,
-    description: "LLM Inference — XE9680 (H200×8) + vLLM + Qdrant + Redis",
+    description: "LLM Inference (HA) — 3× R660 cp + 1× XE9680 (H200×8) + vLLM + Qdrant + Redis",
     mode: "onprem",
     sites: [{
       id: siteId, name: "IDC-AI", kind: "onprem",
       capacity: { rack_units: 84, power_kw: 32, cooling_kw: 40 },
-      node_ids: [node1, nodeGpu],
-      l4_balancers: [{ id: lbId, name: "L4", kind: "software", vendor: "MetalLB", vip: "192.168.20.10", throughput_gbps: 10, ha: false, target_cluster_ids: [clusterId] }],
+      node_ids: allNodeIds,
+      l4_balancers: [{ id: lbId, name: "F5-VIP", kind: "hardware", vendor: "F5", model: "BIG-IP", ip: "192.168.10.5", vip: "192.168.20.10", throughput_gbps: 40, ha: true, target_cluster_ids: [clusterId] }],
       storages: [{ id: stId, name: "model-store", kind: "NAS", vendor: "NetApp", protocol: "NFS", endpoint: "nas.idc.local:2049", capacity_tb: 50, csi_driver: "nfs.csi.k8s.io", target_cluster_ids: [clusterId] }],
-      network_devices: [{ id: fwId, name: "FW", kind: "firewall", vendor: "FortiGate", throughput_gbps: 10, ha: true }],
+      network_devices: [
+        { id: fwId, name: "FW-1", kind: "firewall", vendor: "FortiGate", model: "FG-100F", throughput_gbps: 10, ha: true },
+        { id: swId, name: "TOR-1", kind: "switch", vendor: "Cisco", model: "Nexus 9300", throughput_gbps: 100, ha: true },
+      ],
       external_services: [
         { id: objStId, name: "model-bucket", kind: "object_store", engine: "s3", vendor: "MinIO", endpoint: "s3.idc.local:9000", capacity_gb: 5000, target_cluster_ids: [clusterId] },
         { id: cacheExtId, name: "shared-cache", kind: "cache", engine: "redis", vendor: "self-hosted", endpoint: "redis.idc.local:6379", target_cluster_ids: [clusterId] },
       ],
     }],
     nodes: [
-      {
-        id: node1, name: "cp-node",
+      ...cpNodes.map((id, idx) => ({
+        id, name: `cp-node-${idx + 1}`,
         source: "onprem", brand: "Dell", model: "PowerEdge-R660",
         site_id: siteId, custom: false,
         cluster_roles: ["control-plane", "worker"], purpose: "compute",
-        network: { ip: "192.168.10.11" },
+        network: { ip: `192.168.10.${11 + idx}` },
         spec: {
           vcpu: 64, memory_gb: 512, form_factor: "1U",
           disks: [{ size_gb: 960, type: "NVMe", count: 8 }],
@@ -8268,13 +8273,13 @@ function buildTplMLInference(projectName) {
           gpu_chassis: { max_count: 0, supported_form_factors: [], supported_models: [], nvlink_topology: "none" },
           gpu: [],
         },
-      },
+      })),
       {
         id: nodeGpu, name: "gpu-node-1",
         source: "onprem", brand: "Dell", model: "PowerEdge-XE9680",
         site_id: siteId, custom: false,
         cluster_roles: ["worker"], purpose: "compute",
-        network: { ip: "192.168.10.12" },
+        network: { ip: "192.168.10.21" },
         spec: {
           vcpu: 112, memory_gb: 2048, form_factor: "6U",
           disks: [{ size_gb: 3840, type: "NVMe", count: 8 }],
@@ -8287,8 +8292,8 @@ function buildTplMLInference(projectName) {
     ],
     clusters: [{
       id: clusterId, name: "ai-prod", environment_tag: "ai",
-      k8s_version: "1.30", ha_control_plane: false,
-      node_ids: [node1, nodeGpu],
+      k8s_version: "1.30", ha_control_plane: true,
+      node_ids: allNodeIds,
       network: { pod_cidr: "10.244.0.0/16", service_cidr: "10.96.0.0/12", node_subnet: "192.168.10.0/24", dns_domain: "cluster.local", lb_pool: "192.168.20.0/24" },
       ingress_rules: [{ id: ing1, name: "llm", host: "llm.example.com", tls: true,
                         paths: [{ path: "/v1/chat", path_type: "Prefix", workload_id: ids.api, port: 8080 }] }],
@@ -8360,8 +8365,8 @@ function buildTplHybridCloud(projectName) {
   const dbExtId = "ext-pg-onprem-" + uid();
   const awsAlbId = "aws-alb-" + uid();
   const awsCdn = "aws-cdn-" + uid();
-  const onpremNodeIds = [1, 2].map(i => `idc-node-${i}-` + uid());
-  const awsNodeIds = [1, 2].map(i => `aws-node-${i}-` + uid());
+  const onpremNodeIds = [1, 2, 3].map(i => `idc-node-${i}-` + uid());
+  const awsNodeIds = [1, 2, 3].map(i => `aws-node-${i}-` + uid());
   const onpremClusterId = "onprem-data-" + uid();
   const awsClusterId = "aws-web-" + uid();
   const sitelinkId = "vpn-" + uid();
@@ -8375,7 +8380,7 @@ function buildTplHybridCloud(projectName) {
 
   return {
     version: SCHEMA_VERSION, name: projectName,
-    description: "Hybrid Cloud — IDC(데이터) + AWS(웹/API), VPN으로 연결",
+    description: "Hybrid Cloud (HA) — IDC 3 nodes(데이터) + AWS 3 nodes(웹/API), VPN으로 연결",
     mode: "hybrid",
     sites: [
       {
@@ -8429,7 +8434,7 @@ function buildTplHybridCloud(projectName) {
     clusters: [
       {
         id: onpremClusterId, name: "data-cluster", environment_tag: "data",
-        k8s_version: "1.30", ha_control_plane: false,
+        k8s_version: "1.30", ha_control_plane: true,
         node_ids: onpremNodeIds,
         network: { pod_cidr: "10.244.0.0/16", service_cidr: "10.96.0.0/12", node_subnet: "10.0.0.0/24", dns_domain: "cluster.local", lb_pool: "10.0.10.0/24" },
         ingress_rules: [],
@@ -8449,7 +8454,7 @@ function buildTplHybridCloud(projectName) {
       },
       {
         id: awsClusterId, name: "web-cluster", environment_tag: "prod",
-        k8s_version: "1.30", ha_control_plane: false,
+        k8s_version: "1.30", ha_control_plane: true,
         node_ids: awsNodeIds,
         network: { pod_cidr: "10.245.0.0/16", service_cidr: "10.97.0.0/12", node_subnet: "10.1.0.0/24", dns_domain: "cluster.local" },
         ingress_rules: [{ id: ing1, name: "web", host: "www.example.com", tls: true,
@@ -8488,6 +8493,134 @@ function buildTplHybridCloud(projectName) {
   };
 }
 
+// === Multi-Zone HA Production ===
+// 3 zones (Zone-A/B/C) all onprem, full mesh site links, single cluster
+// spanning all 3 zones, HA control plane (1 cp+w per zone), workloads
+// with anti-affinity spread by zone.
+function buildTplMultiZoneHA(projectName) {
+  const zones = ["A", "B", "C"];
+  const zoneIds = zones.map(z => `zone-${z.toLowerCase()}-` + uid());
+  const fwIds = zones.map(z => `fw-${z.toLowerCase()}-` + uid());
+  const swIds = zones.map(z => `sw-${z.toLowerCase()}-` + uid());
+  const lbIds = zones.map(z => `lb-${z.toLowerCase()}-` + uid());
+  const stIds = zones.map(z => `st-${z.toLowerCase()}-` + uid());
+  const nodeIds = zones.map(z => `node-${z.toLowerCase()}-` + uid());
+  const clusterId = "prod-mzha-" + uid();
+
+  // External replicated DB (primary in Zone-A)
+  const dbExtId = "ext-pg-" + uid();
+
+  const ids = {
+    web: "web-" + uid(),
+    api: "api-" + uid(),
+  };
+  const ing1 = "ing-web-" + uid();
+
+  const platformWls = _mkPlatformWorkloads();
+
+  // Site link mesh: A↔B, B↔C, A↔C
+  const sitelinks = [
+    { id: "ab-" + uid(), name: "A↔B", from_site_id: zoneIds[0], to_site_id: zoneIds[1], kind: "leased", bandwidth_gbps: 10, latency_ms: 2, encrypted: true },
+    { id: "bc-" + uid(), name: "B↔C", from_site_id: zoneIds[1], to_site_id: zoneIds[2], kind: "leased", bandwidth_gbps: 10, latency_ms: 2, encrypted: true },
+    { id: "ac-" + uid(), name: "A↔C", from_site_id: zoneIds[0], to_site_id: zoneIds[2], kind: "leased", bandwidth_gbps: 10, latency_ms: 3, encrypted: true },
+  ];
+
+  return {
+    version: SCHEMA_VERSION, name: projectName,
+    description: "Multi-Zone HA — 3 zones, 풀 메시 leased line, 단일 클러스터가 zone에 분산",
+    mode: "onprem",
+    sites: zones.map((z, i) => ({
+      id: zoneIds[i], name: `Zone-${z}`, kind: "onprem",
+      capacity: { rack_units: 42, power_kw: 16 },
+      node_ids: [nodeIds[i]],
+      l4_balancers: [{
+        id: lbIds[i], name: `L4-${z}`, kind: "hardware", vendor: "F5",
+        ip: `10.${i+1}.0.5`, vip: `203.0.113.${10 + i * 10}`,
+        throughput_gbps: 20, ha: true,
+        target_cluster_ids: [clusterId],
+      }],
+      storages: [{
+        id: stIds[i], name: `nas-${z.toLowerCase()}`, kind: "NAS",
+        vendor: "NetApp", protocol: "NFS",
+        endpoint: `nas.${z.toLowerCase()}.idc.local:2049`,
+        capacity_tb: 50, csi_driver: "nfs.csi.k8s.io",
+        target_cluster_ids: [clusterId],
+      }],
+      network_devices: [
+        { id: fwIds[i], name: `FW-${z}`, kind: "firewall", vendor: "FortiGate", model: "FG-100F", throughput_gbps: 10, ha: true },
+        { id: swIds[i], name: `Switch-${z}`, kind: "switch", vendor: "Cisco", throughput_gbps: 100, ha: true },
+      ],
+      external_services: i === 0 ? [{
+        id: dbExtId, name: "core-db", kind: "database",
+        engine: "postgres", vendor: "self-hosted (replicated)", version: "16",
+        endpoint: "pg-primary.zone-a.local:5432", capacity_gb: 500,
+        target_cluster_ids: [clusterId],
+        notes: "Primary in Zone-A, replicas in B/C via streaming replication",
+      }] : [],
+    })),
+    nodes: zones.map((z, i) => ({
+      id: nodeIds[i], name: `node-${z.toLowerCase()}-1`,
+      source: "onprem", brand: "Dell", model: "PowerEdge-R760",
+      site_id: zoneIds[i], custom: false,
+      cluster_roles: ["control-plane", "worker"], purpose: "compute",
+      labels: { "topology.kubernetes.io/zone": `zone-${z.toLowerCase()}` },
+      network: { ip: `10.${i+1}.0.10` },
+      spec: {
+        vcpu: 64, memory_gb: 1024,
+        disks: [{ size_gb: 1920, type: "NVMe", count: 8 }],
+        nics: [{ speed_gbps: 25, count: 2 }],
+        form_factor: "2U",
+        power: { psu_max_w: 1800, typical_w_base: 400, psu_redundancy: "1+1" },
+        gpu_chassis: { max_count: 0, supported_form_factors: [], supported_models: [], nvlink_topology: "none" },
+        gpu: [],
+      },
+    })),
+    clusters: [{
+      id: clusterId, name: "prod-mzha", environment_tag: "prod",
+      k8s_version: "1.30", ha_control_plane: true,
+      node_ids: nodeIds,
+      network: { pod_cidr: "10.244.0.0/16", service_cidr: "10.96.0.0/12", node_subnet: "10.0.0.0/8", dns_domain: "cluster.local", lb_pool: "203.0.113.0/24" },
+      ingress_rules: [
+        { id: ing1, name: "web", host: "www.example.com", tls: true,
+          paths: [{ path: "/", path_type: "Prefix", workload_id: ids.web, port: 80 }] },
+      ],
+      addons: { cni: "Cilium", ingress: "NGINX", metrics_server: true, gpu_operator: false, service_mesh: "Istio" },
+      namespaces: [
+        { name: "frontend", labels: { tier: "web" } },
+        { name: "backend", labels: { tier: "core" } },
+        ..._platformNamespaces(),
+      ],
+      network_policies: _platformNps(),
+      workloads: [
+        {
+          id: ids.web, name: "web-frontend", category: "Frontend",
+          namespace: "frontend", labels: { app: "web" }, replicas: 6,
+          resources: { requests: { cpu: 0.3, memory_gb: 0.5 } },
+          runtime: { language: "Node.js", framework: "Fastify", version: "20",
+                     concurrency: { model: "event-loop", max_threads: 1 } },
+          network: { service: { type: "ClusterIP", ports: [{ name: "http", port: 80, target_port: 8080 }] } },
+          scheduling: { anti_affinity: "spread-by-zone" },
+          depends_on: [{ target_workload_id: ids.api, protocol: "HTTP", port: 8080, avg_call_ms: 25, fanout_pct: 100 }],
+        },
+        {
+          id: ids.api, name: "api", category: "API",
+          namespace: "backend", labels: { app: "api" }, replicas: 6,
+          resources: { requests: { cpu: 1, memory_gb: 4 } },
+          runtime: { language: "Java", framework: "Spring-Boot", version: "17",
+                     concurrency: { model: "thread-pool", max_threads: 200, heap_gb: 3 },
+                     connection_pool_per_replica: 10 },
+          traffic_profile: { target_rps: 1000, avg_request_ms: 60, p99_request_ms: 250, client_timeout_ms: 3000 },
+          network: { service: { type: "ClusterIP", ports: [{ name: "http", port: 8080, target_port: 8080 }] } },
+          scheduling: { anti_affinity: "spread-by-zone" },
+        },
+        ...platformWls,
+      ],
+    }],
+    site_links: sitelinks,
+    metadata: { created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+  };
+}
+
 const TEMPLATES = [
   {
     id: "3tier-ha", icon: "🌐",
@@ -8509,9 +8642,15 @@ const TEMPLATES = [
   },
   {
     id: "hybrid-cloud", icon: "☁",
-    name: "Hybrid Cloud",
-    description: "IDC(데이터 클러스터) + AWS(웹 클러스터)를 site_link(VPN 1Gbps)로 연결. 양쪽 모두 production preset 적용.",
+    name: "Hybrid Cloud (HA)",
+    description: "IDC(3 nodes 데이터 클러스터) + AWS(3 nodes 웹 클러스터). VPN 1Gbps site_link. 양쪽 모두 HA control plane + production preset.",
     apply: buildTplHybridCloud,
+  },
+  {
+    id: "multi-zone-ha", icon: "🏛",
+    name: "Multi-Zone HA Production",
+    description: "3 zones (Zone-A/B/C) — 각 zone에 R760 + F5 L4(HA) + FortiGate(HA) + Switch + NAS. 단일 클러스터가 3 zone에 분산, 풀 메시 leased line 10Gbps. 워크로드 anti-affinity로 zone 분산. Cilium + Istio.",
+    apply: buildTplMultiZoneHA,
   },
 ];
 
