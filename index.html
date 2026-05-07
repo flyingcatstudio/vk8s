@@ -1036,7 +1036,7 @@ const VIEWS = [
   { id: "topology",  name: "Topology",   ready: true  },
   { id: "capacity",  name: "Capacity",   ready: true  },
   { id: "depgraph",  name: "Dependency", ready: false },
-  { id: "namespace", name: "Namespace",  ready: false },
+  { id: "namespace", name: "Namespace",  ready: true  },
   { id: "bottleneck",name: "Bottleneck", ready: false },
   { id: "export",    name: "Export",     ready: false },
 ];
@@ -1258,6 +1258,36 @@ const HELP = {
     title: "Capacity View — 스케줄링 시뮬레이션",
     body: "각 워커 노드의 실제 활용도를 보여줍니다. 워크로드의 모든 replica를 first-fit 알고리즘으로 노드에 배치 후, 노드별 CPU/Mem/GPU/VRAM/PSU 점유율을 계산.",
     reco: "어떤 노드가 가장 빡빡한지, 어떤 pod이 안 들어가는지 한눈에 파악. anti-affinity / nodeSelector는 현재 미반영(다음 버전).",
+  },
+
+  // ───── Namespace / NetworkPolicy ─────
+  "namespace.name": {
+    cat: "기타",
+    title: "Namespace",
+    body: "k8s 네임스페이스. 같은 클러스터 안에서 리소스를 논리적으로 분리. NetworkPolicy의 단위, ResourceQuota 적용 단위.",
+    reco: "frontend / backend / data 같은 tier 분리, team-a/team-b 같은 소유자 분리, prod/staging 같은 환경 분리에 사용.",
+  },
+  "namespace.default_deny": {
+    cat: "기타",
+    title: "Default Deny",
+    body: "이 namespace로 들어오는/나가는 모든 트래픽을 기본 차단. 명시적 NetworkPolicy로만 허용.",
+    reco: "production 권장 (보안 ↑). 처음엔 모든 통신이 막혀 있어 NP 디버깅 필요. 동작 확인 후 적용 권장.",
+  },
+  "networkpolicy.preset": {
+    cat: "기타",
+    title: "NetworkPolicy Preset",
+    body: "자주 쓰는 NP 패턴. default-deny=차단, allow-from-same-ns=같은 ns만, allow-from-namespace=특정 ns에서, allow-from-ingress=외부 트래픽.",
+    reco: "기본 패턴: 각 ns에 default-deny + 필요한 allow 룰. custom은 직접 셀렉터/포트 지정.",
+  },
+  "networkpolicy.namespace": {
+    cat: "기타",
+    title: "Apply to Namespace",
+    body: "이 NetworkPolicy가 적용될 namespace. 이 ns의 pod들이 정책의 영향을 받음.",
+  },
+  "networkpolicy.from_namespace": {
+    cat: "기타",
+    title: "From Namespace",
+    body: "트래픽 출발지 namespace. allow-from-namespace 패턴에서 사용. 예: 'data' ns에 'backend' ns에서 들어오는 것만 허용.",
   },
 
   // ───── 워크로드 ─────
@@ -1885,6 +1915,101 @@ function updateWorkloadField(id, path, value) {
   emit(); saveSoon();
 }
 
+//============ Namespace + NetworkPolicy actions ============
+function addNamespace(clusterId, seed) {
+  const c = state.project.clusters.find(x => x.id === clusterId);
+  if (!c) return;
+  if (!c.namespaces) c.namespaces = [];
+  if (c.namespaces.some(n => n.name === seed.name)) {
+    alert(`Namespace '${seed.name}' already exists in this cluster.`);
+    return;
+  }
+  c.namespaces.push({
+    name: seed.name,
+    description: seed.description || "",
+    labels: seed.labels || {},
+    default_deny: !!seed.default_deny,
+  });
+  emit(); saveSoon();
+}
+
+function deleteNamespace(clusterId, name) {
+  const c = state.project.clusters.find(x => x.id === clusterId);
+  if (!c || !c.namespaces) return;
+  // Reassign workloads in this NS to "default"
+  for (const w of c.workloads || []) {
+    if (w.namespace === name) w.namespace = "default";
+  }
+  // Delete NPs in this NS or referencing it
+  if (c.network_policies) {
+    c.network_policies = c.network_policies.filter(np => np.namespace !== name);
+    for (const np of c.network_policies) {
+      if (np.ingress) {
+        for (const r of np.ingress) {
+          if (r.from_namespaces) r.from_namespaces = r.from_namespaces.filter(n => n !== name);
+        }
+      }
+      if (np.egress) {
+        for (const r of np.egress) {
+          if (r.to_namespaces) r.to_namespaces = r.to_namespaces.filter(n => n !== name);
+        }
+      }
+    }
+  }
+  c.namespaces = c.namespaces.filter(n => n.name !== name);
+  emit(); saveSoon();
+}
+
+function updateNamespaceField(clusterId, name, path, value) {
+  const c = state.project.clusters.find(x => x.id === clusterId);
+  if (!c || !c.namespaces) return;
+  const ns = c.namespaces.find(n => n.name === name);
+  if (!ns) return;
+  const parts = path.split(".");
+  let obj = ns;
+  while (parts.length > 1) {
+    const p = parts.shift();
+    if (obj[p] == null) obj[p] = {};
+    obj = obj[p];
+  }
+  obj[parts[0]] = value;
+  emit(); saveSoon();
+}
+
+function addNetworkPolicy(clusterId, seed) {
+  const c = state.project.clusters.find(x => x.id === clusterId);
+  if (!c) return;
+  if (!c.network_policies) c.network_policies = [];
+  const id = slug(seed.preset || seed.name) + "-" + uid();
+  const np = {
+    id,
+    name: seed.name || `${seed.preset}-${(c.network_policies.length || 0) + 1}`,
+    namespace: seed.namespace,
+    preset: seed.preset || "custom",
+    policy_types: ["Ingress"],
+  };
+  if (seed.preset === "default-deny") {
+    np.policy_types = ["Ingress", "Egress"];
+    np.ingress = [];
+    np.egress = [];
+  } else if (seed.preset === "allow-from-same-ns") {
+    np.ingress = [{ from_namespaces: [seed.namespace] }];
+  } else if (seed.preset === "allow-from-namespace" && seed.from_namespace) {
+    np.ingress = [{ from_namespaces: [seed.from_namespace] }];
+  } else if (seed.preset === "allow-from-ingress") {
+    np.ingress = [{ from_namespaces: ["ingress-nginx"] }];
+  }
+  c.network_policies.push(np);
+  emit(); saveSoon();
+}
+
+function deleteNetworkPolicy(clusterId, npId) {
+  const c = state.project.clusters.find(x => x.id === clusterId);
+  if (!c || !c.network_policies) return;
+  c.network_policies = c.network_policies.filter(np => np.id !== npId);
+  emit(); saveSoon();
+}
+
 function selectEntity(kind, id) {
   state.ui.selectedKind = kind;
   state.ui.selectedId   = id;
@@ -2115,6 +2240,53 @@ function runValidator(project) {
     if (inCluster.length > 1) {
       F("NODE_IN_MULTIPLE_CLUSTERS", "error",
         `${n.name}: ${inCluster.length}개 클러스터에 속함`, { kind: "node", id: n.id });
+    }
+  }
+
+  // 7. Namespace + NetworkPolicy
+  for (const c of project.clusters || []) {
+    const declared = new Set((c.namespaces || []).map(n => n.name));
+    declared.add("default"); // implicit
+    // Workload namespace declared?
+    for (const w of c.workloads || []) {
+      const ns = w.namespace || "default";
+      if (!declared.has(ns)) {
+        F("WORKLOAD_NAMESPACE_NOT_DECLARED", "warn",
+          `${w.name}: namespace '${ns}' 미선언 — cluster.namespaces에 추가 권장`,
+          { kind: "workload", id: w.id }, "namespace.name");
+      }
+    }
+    // default_deny without any allow rules
+    for (const ns of c.namespaces || []) {
+      if (!ns.default_deny) continue;
+      const nsNps = (c.network_policies || []).filter(np => np.namespace === ns.name);
+      const hasAllow = nsNps.some(np =>
+        np.preset === "allow-from-same-ns" ||
+        np.preset === "allow-from-namespace" ||
+        np.preset === "allow-from-ingress" ||
+        (Array.isArray(np.ingress) && np.ingress.length)
+      );
+      if (!hasAllow) {
+        F("NS_DEFAULT_DENY_NO_ALLOW", "warn",
+          `${c.name}/${ns.name}: default-deny인데 allow 룰 없음 — 모든 트래픽 차단됨`,
+          { kind: "cluster", id: c.id }, "namespace.default_deny");
+      }
+    }
+    // NetworkPolicy referencing nonexistent namespace
+    for (const np of c.network_policies || []) {
+      if (!declared.has(np.namespace)) {
+        F("NETPOL_TARGET_NS_NOT_FOUND", "warn",
+          `NP '${np.name}': 대상 namespace '${np.namespace}' 없음`,
+          { kind: "cluster", id: c.id });
+      }
+      const fromNs = (np.ingress || []).flatMap(r => r.from_namespaces || []);
+      for (const fns of fromNs) {
+        if (!declared.has(fns) && fns !== "ingress-nginx") {
+          F("NETPOL_FROM_NS_NOT_FOUND", "warn",
+            `NP '${np.name}': from-ns '${fns}' 없음`,
+            { kind: "cluster", id: c.id });
+        }
+      }
     }
   }
 
@@ -2784,6 +2956,76 @@ function renderClusterInspector(root, id) {
     ]));
   }
 
+  // Namespaces
+  const namespaces = c.namespaces || [];
+  const nsTitle = el("div", { class: "section-title" }, [`Namespaces (${namespaces.length})`]);
+  nsTitle.appendChild(helpIcon("namespace.name"));
+  root.appendChild(nsTitle);
+  if (!namespaces.length) {
+    root.appendChild(el("div", { class: "empty-hint" }, ["네임스페이스 없음. 워크로드는 'default'에 배치됩니다."]));
+  } else {
+    const list = el("div", { class: "row-list" });
+    for (const ns of namespaces) {
+      const wlInNs = (c.workloads || []).filter(w => (w.namespace || "default") === ns.name).length;
+      list.appendChild(el("div", { class: "row" }, [
+        el("span", { class: "icon" }, [ns.default_deny ? "🔒" : "▦"]),
+        el("span", { class: "name" }, [ns.name]),
+        el("span", { style: { fontSize: "10px", color: "var(--text3)", fontFamily: "JetBrains Mono" } }, [`${wlInNs}w`]),
+        el("label", {
+          style: { fontSize: "10px", color: ns.default_deny ? "var(--orange)" : "var(--text3)", display: "flex", alignItems: "center", gap: "3px", margin: 0, textTransform: "none", letterSpacing: 0, cursor: "pointer" },
+        }, [
+          el("input", {
+            type: "checkbox",
+            style: { width: "10px", height: "10px", margin: 0 },
+            checked: ns.default_deny ? "" : null,
+            onchange: e => updateNamespaceField(id, ns.name, "default_deny", e.target.checked),
+          }),
+          "deny",
+        ]),
+        el("button", {
+          class: "x", onclick: () => { if (confirm(`'${ns.name}' 삭제? (워크로드는 default로 이동)`)) deleteNamespace(id, ns.name); },
+        }, ["✕"]),
+      ]));
+    }
+    root.appendChild(list);
+  }
+  root.appendChild(el("button", {
+    class: "add-btn", style: { width: "100%", marginTop: "6px" },
+    onclick: () => openAddNamespace(id),
+  }, ["＋ Add Namespace"]));
+
+  // Network Policies
+  const nps = c.network_policies || [];
+  const npTitle = el("div", { class: "section-title" }, [`Network Policies (${nps.length})`]);
+  npTitle.appendChild(helpIcon("networkpolicy.preset"));
+  root.appendChild(npTitle);
+  if (!nps.length) {
+    root.appendChild(el("div", { class: "empty-hint" }, ["NP 없음. 모든 ns 간 통신 자유."]));
+  } else {
+    const list = el("div", { class: "row-list" });
+    for (const np of nps) {
+      let presetDesc = "custom";
+      if (np.preset === "default-deny") presetDesc = "🔒 deny all";
+      else if (np.preset === "allow-from-same-ns") presetDesc = `same-ns →`;
+      else if (np.preset === "allow-from-namespace") presetDesc = `${(np.ingress?.[0]?.from_namespaces || ["?"]).join(",")} →`;
+      else if (np.preset === "allow-from-ingress") presetDesc = `🌐 ingress →`;
+      list.appendChild(el("div", { class: "row" }, [
+        el("span", { class: "icon" }, ["🔗"]),
+        el("span", { class: "name", style: { fontSize: "11px" } }, [`${presetDesc} ${np.namespace}`]),
+        el("button", {
+          class: "x", onclick: () => { if (confirm(`'${np.name}' 삭제?`)) deleteNetworkPolicy(id, np.id); },
+        }, ["✕"]),
+      ]));
+    }
+    root.appendChild(list);
+  }
+  if (namespaces.length) {
+    root.appendChild(el("button", {
+      class: "add-btn", style: { width: "100%", marginTop: "6px" },
+      onclick: () => openAddNetworkPolicy(id),
+    }, ["＋ Add Network Policy"]));
+  }
+
   // Workloads
   const workloads = c.workloads || [];
   root.appendChild(el("div", { class: "section-title" }, [`Workloads (${workloads.length})`]));
@@ -2885,6 +3127,11 @@ function renderWorkloadInspector(root, id) {
             el("option", { value: v, selected: v === (w.kind || "Deployment") ? "" : null }, [v]))),
       ]),
     ]));
+    // Namespace dropdown — based on cluster's namespaces
+    const cnsNames = (cluster.namespaces || []).map(n => n.name);
+    if (!cnsNames.includes("default")) cnsNames.unshift("default");
+    const currentNs = w.namespace || "default";
+    if (!cnsNames.includes(currentNs)) cnsNames.push(currentNs);
     root.appendChild(el("div", { class: "field-row" }, [
       el("div", { class: "field" }, [
         lbl("Replicas", "workload.replicas"),
@@ -2892,9 +3139,10 @@ function renderWorkloadInspector(root, id) {
                       oninput: e => updateWorkloadField(id, "replicas", parseInt(e.target.value) || 1) }),
       ]),
       el("div", { class: "field" }, [
-        el("label", {}, ["Namespace"]),
-        el("input", { value: w.namespace || "default",
-                      oninput: e => updateWorkloadField(id, "namespace", e.target.value) }),
+        lbl("Namespace", "namespace.name"),
+        el("select", {
+          onchange: e => updateWorkloadField(id, "namespace", e.target.value),
+        }, cnsNames.map(n => el("option", { value: n, selected: n === currentNs ? "" : null }, [n]))),
       ]),
     ]));
     root.appendChild(el("div", { class: "field" }, [
@@ -3467,12 +3715,128 @@ function renderUnscheduled(list) {
   return card;
 }
 
+//============ Render: Namespace view ============
+function renderNamespace() {
+  const root = $("#viewBody");
+  root.innerHTML = "";
+  const p = state.project;
+  if (!p?.clusters?.length) {
+    root.appendChild(el("div", { class: "view-empty" }, [
+      el("div", { class: "big" }, ["▦"]),
+      el("h2", {}, ["Namespace 뷰"]),
+      el("p", {}, ["클러스터에 네임스페이스를 추가하면 여기서 그래프로 보입니다."]),
+    ]));
+    return;
+  }
+  for (const c of p.clusters) root.appendChild(renderNamespaceCluster(c));
+}
+
+function renderNamespaceCluster(c) {
+  const card = el("div", { class: "topo-site" });
+  card.appendChild(el("div", { class: "topo-site-header" }, [
+    el("span", { class: "name" }, [c.name]),
+    el("span", { class: "kind", style: { background: "rgba(167,139,250,.15)", color: "var(--purple)" } }, ["cluster"]),
+    el("span", { class: "region" }, [
+      `${(c.namespaces || []).length} namespaces · ${(c.network_policies || []).length} policies · ${(c.workloads || []).length} workloads`,
+    ]),
+  ]));
+
+  // Group workloads by namespace
+  const byNs = new Map();
+  byNs.set("default", { ns: null, workloads: [] });
+  for (const ns of c.namespaces || []) byNs.set(ns.name, { ns, workloads: [] });
+  for (const w of c.workloads || []) {
+    const k = w.namespace || "default";
+    if (!byNs.has(k)) byNs.set(k, { ns: null, workloads: [] });
+    byNs.get(k).workloads.push(w);
+  }
+
+  const grid = el("div", {
+    style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: "12px" },
+  });
+  for (const [nsName, info] of byNs) {
+    const isDeny = info.ns?.default_deny;
+    const nsCard = el("div", {
+      style: {
+        background: "var(--surface2)",
+        border: "1px solid " + (isDeny ? "var(--orange)" : "var(--border)"),
+        borderRadius: "8px",
+        padding: "12px",
+        cursor: "pointer",
+      },
+      onclick: () => selectEntity("cluster", c.id),
+    });
+    nsCard.appendChild(el("div", {
+      style: { display: "flex", alignItems: "center", gap: "6px", marginBottom: "8px" },
+    }, [
+      el("span", {}, [isDeny ? "🔒" : "▦"]),
+      el("span", { style: { fontWeight: 600, fontSize: "13px" } }, [nsName]),
+      isDeny ? el("span", {
+        style: { fontSize: "10px", padding: "1px 5px", background: "rgba(251,146,60,.15)", color: "var(--orange)", borderRadius: "3px", fontFamily: "JetBrains Mono", textTransform: "uppercase", letterSpacing: "0.04em" },
+      }, ["deny"]) : null,
+      !info.ns && nsName !== "default" ? el("span", {
+        style: { fontSize: "10px", color: "var(--yellow)", marginLeft: "auto" },
+        title: "namespace not declared in cluster",
+      }, ["⚠"]) : null,
+    ]));
+    if (info.workloads.length === 0) {
+      nsCard.appendChild(el("div", { style: { fontSize: "11px", color: "var(--text3)", fontStyle: "italic" } }, ["워크로드 없음"]));
+    } else {
+      for (const w of info.workloads) {
+        nsCard.appendChild(el("div", {
+          style: { fontSize: "12px", padding: "4px 8px", margin: "2px 0", background: "var(--surface)", borderRadius: "4px", cursor: "pointer", display: "flex", gap: "8px" },
+          onclick: e => { e.stopPropagation(); selectEntity("workload", w.id); },
+        }, [
+          el("span", {}, [`◇ ${w.name}`]),
+          el("span", { style: { color: "var(--text3)", marginLeft: "auto", fontSize: "10px", fontFamily: "JetBrains Mono" } }, [
+            `×${w.replicas}${w.category ? ` · ${w.category}` : ""}`,
+          ]),
+        ]));
+      }
+    }
+    grid.appendChild(nsCard);
+  }
+  card.appendChild(grid);
+
+  // NetworkPolicies
+  const nps = c.network_policies || [];
+  if (nps.length) {
+    const title = el("div", { class: "section-title", style: { marginTop: "16px" } }, [`Network Policies (${nps.length})`]);
+    title.appendChild(helpIcon("networkpolicy.preset"));
+    card.appendChild(title);
+    const npList = el("div", { class: "row-list" });
+    for (const np of nps) {
+      let presetDesc = "custom";
+      if (np.preset === "default-deny") presetDesc = "🔒 deny all";
+      else if (np.preset === "allow-from-same-ns") presetDesc = `same-ns →`;
+      else if (np.preset === "allow-from-namespace") presetDesc = `${(np.ingress?.[0]?.from_namespaces || ["?"]).join(",")} →`;
+      else if (np.preset === "allow-from-ingress") presetDesc = `🌐 ingress →`;
+      npList.appendChild(el("div", { class: "row" }, [
+        el("span", { class: "icon" }, ["🔗"]),
+        el("span", { class: "name", style: { fontSize: "12px" } }, [np.name]),
+        el("span", { style: { fontSize: "11px", color: "var(--text2)", fontFamily: "JetBrains Mono", marginLeft: "auto" } }, [
+          `${presetDesc} ${np.namespace}`,
+        ]),
+      ]));
+    }
+    card.appendChild(npList);
+  }
+
+  // Hint to use cluster inspector to manage
+  card.appendChild(el("div", {
+    style: { marginTop: "12px", fontSize: "11px", color: "var(--text3)", fontStyle: "italic" },
+  }, [`💡 NS·NP 추가/수정은 클러스터 인스펙터 (오른쪽 패널) 에서`]));
+
+  return card;
+}
+
 //============ Render: dispatch ============
 function renderViewBody() {
   if (!state.project) { renderTopology(); return; }
   const v = state.ui.view;
   if (v === "topology") return renderTopology();
   if (v === "capacity") return renderCapacity();
+  if (v === "namespace") return renderNamespace();
   // placeholder for other views
   $("#viewBody").innerHTML = "";
   $("#viewBody").appendChild(el("div", { class: "view-empty" }, [
@@ -3835,6 +4199,10 @@ function openAddWorkload(clusterId) {
 
   const nameInput = el("input", { value: `service-${(c.workloads?.length || 0) + 1}` });
   const catSel = el("select", {}, ["API","Frontend","WAS","DB","Cache","Queue","ML-Inference","ML-Training","Video","Batch","Other"].map(v => el("option", { value: v }, [v])));
+  // namespace dropdown
+  const nsNames = (c.namespaces || []).map(n => n.name);
+  if (!nsNames.includes("default")) nsNames.unshift("default");
+  const nsSel = el("select", {}, nsNames.map(n => el("option", { value: n }, [n])));
   const replicasInput = el("input", { type: "number", min: "1", value: "2" });
   const cpuInput = el("input", { type: "number", min: "0", step: "0.1", value: "0.5" });
   const memInput = el("input", { type: "number", min: "0", step: "0.5", value: "1" });
@@ -3853,6 +4221,7 @@ function openAddWorkload(clusterId) {
     el("div", { class: "field" }, [lbl("Category", "workload.category"), catSel]),
     el("div", { class: "field" }, [lbl("Replicas", "workload.replicas"), replicasInput]),
   ]));
+  root.appendChild(el("div", { class: "field" }, [lbl("Namespace", "namespace.name"), nsSel]));
   root.appendChild(el("div", { class: "field-row" }, [
     el("div", { class: "field" }, [lbl("CPU per pod", "resources.cpu"), cpuInput]),
     el("div", { class: "field" }, [lbl("Memory (GB) per pod", "resources.memory"), memInput]),
@@ -3885,6 +4254,7 @@ function openAddWorkload(clusterId) {
       addWorkload(clusterId, {
         name: nameInput.value.trim() || "service",
         category: catSel.value,
+        namespace: nsSel.value || "default",
         replicas: parseInt(replicasInput.value) || 1,
         cpu: parseFloat(cpuInput.value),
         memory_gb: parseFloat(memInput.value),
@@ -3896,6 +4266,85 @@ function openAddWorkload(clusterId) {
   ]);
   root.appendChild(actions);
 
+  openModal(root);
+}
+
+//============ Add Namespace modal ============
+function openAddNamespace(clusterId) {
+  const c = state.project.clusters.find(x => x.id === clusterId);
+  if (!c) return;
+  const root = el("div");
+  root.appendChild(el("h2", {}, ["Add Namespace"]));
+  const existing = (c.namespaces || []).length;
+  const nameInput = el("input", { value: `ns-${existing + 1}`, placeholder: "frontend / backend / data" });
+  const denyInput = el("input", { type: "checkbox" });
+  root.appendChild(el("div", { class: "field" }, [lbl("Name", "namespace.name"), nameInput]));
+  root.appendChild(el("label", {
+    style: { display: "flex", alignItems: "center", gap: "8px", margin: "8px 0", fontSize: "12px", color: "var(--text)" },
+  }, [
+    denyInput,
+    el("span", {}, ["default-deny (모든 ingress/egress 기본 차단)"]),
+    helpIcon("namespace.default_deny"),
+  ]));
+  root.appendChild(el("div", { class: "modal-actions" }, [
+    el("button", { class: "btn-ghost", onclick: closeModal }, ["Cancel"]),
+    el("button", { class: "btn", onclick: () => {
+      const name = nameInput.value.trim();
+      if (!name) { alert("Name 필수"); return; }
+      addNamespace(clusterId, { name, default_deny: denyInput.checked });
+      closeModal();
+    } }, ["Add"]),
+  ]));
+  openModal(root);
+}
+
+//============ Add Network Policy modal ============
+function openAddNetworkPolicy(clusterId) {
+  const c = state.project.clusters.find(x => x.id === clusterId);
+  if (!c) return;
+  const namespaces = c.namespaces || [];
+  const root = el("div");
+  root.appendChild(el("h2", {}, ["Add Network Policy"]));
+
+  if (!namespaces.length) {
+    root.appendChild(el("div", { class: "empty-hint" }, ["네임스페이스 먼저 추가하세요."]));
+    root.appendChild(el("div", { class: "modal-actions" }, [
+      el("button", { class: "btn-ghost", onclick: closeModal }, ["Close"]),
+    ]));
+    openModal(root);
+    return;
+  }
+
+  const targetSel = el("select", {}, namespaces.map(n => el("option", { value: n.name }, [n.name])));
+  const presetSel = el("select", {}, [
+    ["default-deny", "Default Deny — 모든 ingress/egress 차단"],
+    ["allow-from-same-ns", "Allow from Same NS — 같은 ns 내부만 허용"],
+    ["allow-from-namespace", "Allow from Namespace — 특정 ns에서 허용"],
+    ["allow-from-ingress", "Allow from Ingress — 외부 트래픽 허용"],
+  ].map(([v, l]) => el("option", { value: v }, [l])));
+  const fromNsSel = el("select", {}, namespaces.map(n => el("option", { value: n.name }, [n.name])));
+  const fromNsWrap = el("div", { class: "field", style: { display: "none" } }, [
+    lbl("From Namespace", "networkpolicy.from_namespace"), fromNsSel,
+  ]);
+  presetSel.addEventListener("change", () => {
+    fromNsWrap.style.display = presetSel.value === "allow-from-namespace" ? "" : "none";
+  });
+
+  root.appendChild(el("div", { class: "field" }, [lbl("Apply to namespace", "networkpolicy.namespace"), targetSel]));
+  root.appendChild(el("div", { class: "field" }, [lbl("Preset", "networkpolicy.preset"), presetSel]));
+  root.appendChild(fromNsWrap);
+
+  root.appendChild(el("div", { class: "modal-actions" }, [
+    el("button", { class: "btn-ghost", onclick: closeModal }, ["Cancel"]),
+    el("button", { class: "btn", onclick: () => {
+      addNetworkPolicy(clusterId, {
+        namespace: targetSel.value,
+        preset: presetSel.value,
+        from_namespace: fromNsSel.value,
+      });
+      closeModal();
+    } }, ["Add"]),
+  ]));
   openModal(root);
 }
 
