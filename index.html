@@ -1,0 +1,1820 @@
+<!DOCTYPE html>
+<html lang="ko" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vk8s — k8s capacity studio</title>
+<meta name="description" content="vk8s: 가상 Kubernetes 환경을 설계·시뮬레이션하고 인프라 호환성을 검증하는 브라우저 도구.">
+<meta name="author" content="FCStudio">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="canonical" href="https://aiotool.net/vk8s/">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&family=Pretendard:wght@300;400;500;600;700&display=swap');
+
+  :root {
+    --bg: #08090c;
+    --surface: #111318;
+    --surface2: #181b23;
+    --surface3: #1e222d;
+    --border: #252a36;
+    --border2: #353c4d;
+    --text: #e8ecf4;
+    --text2: #8892a4;
+    --text3: #5a6377;
+    --accent: #4d9cff;
+    --accent2: #1a6ddb;
+    --accent-glow: rgba(77,156,255,0.12);
+    --green: #34d399;
+    --green-glow: rgba(52,211,153,0.1);
+    --yellow: #fbbf24;
+    --red: #f87171;
+    --purple: #a78bfa;
+    --orange: #fb923c;
+
+    --topbar-h: 48px;
+    --tree-w: 260px;
+    --inspector-w: 380px;
+    --findings-h: 32px;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Pretendard', 'Outfit', -apple-system, sans-serif;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  button { font: inherit; color: inherit; cursor: pointer; }
+  input, select, textarea { font: inherit; color: inherit; }
+
+  /* === Layout === */
+  .app {
+    display: grid;
+    grid-template-columns: var(--tree-w) 1fr var(--inspector-w);
+    grid-template-rows: var(--topbar-h) 1fr var(--findings-h);
+    grid-template-areas:
+      "topbar topbar topbar"
+      "tree   canvas inspector"
+      "findings findings findings";
+    height: 100vh;
+  }
+  .app[data-left-collapsed="true"]  { grid-template-columns: 0 1fr var(--inspector-w); }
+  .app[data-right-collapsed="true"] { grid-template-columns: var(--tree-w) 1fr 0; }
+  .app[data-left-collapsed="true"][data-right-collapsed="true"] { grid-template-columns: 0 1fr 0; }
+  .app[data-findings-expanded="true"] { grid-template-rows: var(--topbar-h) 1fr 240px; }
+
+  /* === Topbar === */
+  .topbar {
+    grid-area: topbar;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 0 16px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+  }
+  .topbar .logo {
+    font-family: 'Outfit';
+    font-weight: 700;
+    font-size: 16px;
+    letter-spacing: -0.02em;
+  }
+  .topbar .logo .dot { color: var(--accent); }
+  .topbar .project-name {
+    font-weight: 500;
+    color: var(--text);
+  }
+  .topbar .mode-badge {
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-family: 'JetBrains Mono';
+    text-transform: uppercase;
+  }
+  .topbar .mode-badge[data-mode="onprem"] { background: rgba(251,146,60,.15); color: var(--orange); }
+  .topbar .mode-badge[data-mode="cloud"]  { background: rgba(77,156,255,.15); color: var(--accent); }
+  .topbar .mode-badge[data-mode="hybrid"] { background: rgba(167,139,250,.15); color: var(--purple); }
+  .topbar .spacer { flex: 1; }
+  .topbar .icon-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text2);
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    transition: all .15s;
+  }
+  .topbar .icon-btn:hover {
+    border-color: var(--border2);
+    color: var(--text);
+    background: var(--surface2);
+  }
+  .save-status {
+    font-size: 11px;
+    color: var(--text3);
+    font-family: 'JetBrains Mono';
+  }
+
+  /* === Tree === */
+  .tree {
+    grid-area: tree;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    padding: 12px 8px;
+  }
+  .tree-section {
+    margin-bottom: 12px;
+  }
+  .tree-section-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    color: var(--text2);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+  }
+  .tree-section-header .count {
+    color: var(--text3);
+    font-family: 'JetBrains Mono';
+  }
+  .tree-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    margin: 1px 0;
+    border-radius: 4px;
+    cursor: pointer;
+    color: var(--text);
+    border-left: 2px solid transparent;
+  }
+  .tree-item:hover { background: var(--surface2); }
+  .tree-item.selected {
+    background: var(--accent-glow);
+    border-left-color: var(--accent);
+  }
+  .tree-item .icon { flex-shrink: 0; }
+  .tree-item .label {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tree-item .meta {
+    font-size: 10px;
+    color: var(--text3);
+    font-family: 'JetBrains Mono';
+  }
+  .tree-item.child { padding-left: 24px; }
+  .tree-actions {
+    margin-top: 8px;
+    padding: 0 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .add-btn {
+    background: var(--surface2);
+    border: 1px dashed var(--border2);
+    color: var(--text2);
+    padding: 8px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    text-align: left;
+    transition: all .15s;
+  }
+  .add-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: var(--accent-glow);
+  }
+  .empty-hint {
+    color: var(--text3);
+    font-size: 11px;
+    padding: 4px 10px;
+    font-style: italic;
+  }
+
+  /* === Canvas === */
+  .canvas {
+    grid-area: canvas;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    overflow: hidden;
+  }
+  .view-tabs {
+    display: flex;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 0 12px;
+    gap: 2px;
+    flex-shrink: 0;
+  }
+  .view-tab {
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text2);
+    padding: 10px 14px;
+    font-size: 12px;
+    transition: all .15s;
+  }
+  .view-tab:hover { color: var(--text); }
+  .view-tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+  .view-tab.disabled {
+    color: var(--text3);
+    cursor: not-allowed;
+  }
+  .view-tab .tab-num {
+    color: var(--text3);
+    font-size: 10px;
+    margin-right: 6px;
+    font-family: 'JetBrains Mono';
+  }
+  .view-body {
+    flex: 1;
+    overflow: auto;
+    padding: 24px;
+  }
+  .view-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text2);
+    text-align: center;
+    gap: 12px;
+  }
+  .view-empty .big { font-size: 48px; opacity: 0.3; }
+  .view-empty h2 { font-weight: 500; color: var(--text); }
+  .view-empty p { font-size: 12px; max-width: 360px; }
+
+  /* === Topology === */
+  .topo-site {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  .topo-site-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+  .topo-site-header .name {
+    font-weight: 600;
+    font-size: 14px;
+  }
+  .topo-site-header .kind {
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    text-transform: uppercase;
+    font-family: 'JetBrains Mono';
+  }
+  .topo-site-header .kind[data-kind="onprem"] { background: rgba(251,146,60,.15); color: var(--orange); }
+  .topo-site-header .kind[data-kind="cloud"]  { background: rgba(77,156,255,.15); color: var(--accent); }
+  .topo-site-header .region {
+    font-size: 11px;
+    color: var(--text3);
+    font-family: 'JetBrains Mono';
+  }
+  .topo-site-bars {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .topo-bar-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--text2);
+    margin-bottom: 4px;
+  }
+  .topo-bar-label .val { font-family: 'JetBrains Mono'; }
+  .bar {
+    height: 6px;
+    background: var(--surface3);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    background: var(--green);
+    transition: width .3s, background .3s;
+  }
+  .bar-fill[data-level="medium"] { background: var(--accent); }
+  .bar-fill[data-level="high"]   { background: var(--yellow); }
+  .bar-fill[data-level="critical"]{ background: var(--red); }
+
+  .topo-nodes {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px;
+  }
+  .topo-node {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    cursor: pointer;
+    transition: all .15s;
+    position: relative;
+  }
+  .topo-node:hover {
+    border-color: var(--border2);
+    transform: translateY(-1px);
+  }
+  .topo-node.selected {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent), 0 0 20px var(--accent-glow);
+  }
+  .topo-node .node-name {
+    font-weight: 600;
+    font-size: 13px;
+    margin-bottom: 2px;
+  }
+  .topo-node .node-model {
+    font-size: 11px;
+    color: var(--text2);
+    margin-bottom: 8px;
+    font-family: 'JetBrains Mono';
+  }
+  .topo-node .node-stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px 10px;
+    font-size: 11px;
+  }
+  .topo-node .stat {
+    display: flex;
+    justify-content: space-between;
+    color: var(--text2);
+  }
+  .topo-node .stat .v { color: var(--text); font-family: 'JetBrains Mono'; }
+  .topo-node .gpu-line {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--border);
+    font-size: 11px;
+    color: var(--purple);
+    font-family: 'JetBrains Mono';
+  }
+  .topo-empty-site {
+    color: var(--text3);
+    font-size: 12px;
+    font-style: italic;
+    padding: 16px;
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+    text-align: center;
+  }
+
+  /* === Inspector === */
+  .inspector {
+    grid-area: inspector;
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    overflow-y: auto;
+    padding: 16px;
+  }
+  .inspector-empty {
+    color: var(--text3);
+    text-align: center;
+    padding: 40px 20px;
+    font-size: 12px;
+    font-style: italic;
+  }
+  .insp-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+  .insp-header .kind {
+    font-size: 10px;
+    text-transform: uppercase;
+    color: var(--text3);
+    font-family: 'JetBrains Mono';
+    letter-spacing: 0.05em;
+  }
+  .insp-header .name {
+    flex: 1;
+    font-weight: 600;
+    font-size: 14px;
+  }
+  .insp-header .delete {
+    background: transparent;
+    border: none;
+    color: var(--text3);
+    padding: 4px 8px;
+    border-radius: 4px;
+  }
+  .insp-header .delete:hover { color: var(--red); background: rgba(248,113,113,.1); }
+
+  .field {
+    margin-bottom: 12px;
+  }
+  .field label {
+    display: block;
+    font-size: 11px;
+    color: var(--text2);
+    margin-bottom: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 500;
+  }
+  .field input, .field select, .field textarea {
+    width: 100%;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 7px 10px;
+    border-radius: 5px;
+    outline: none;
+  }
+  .field input:focus, .field select:focus, .field textarea:focus {
+    border-color: var(--accent);
+  }
+  .field-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  .field-readonly {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    padding: 7px 10px;
+    border-radius: 5px;
+    color: var(--text);
+    font-family: 'JetBrains Mono';
+    font-size: 12px;
+  }
+
+  .section-title {
+    font-size: 11px;
+    color: var(--text2);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin: 18px 0 8px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--border);
+    font-weight: 600;
+  }
+
+  .gpu-config {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px;
+    margin-bottom: 8px;
+  }
+  .chassis-info {
+    font-size: 11px;
+    color: var(--text2);
+    font-family: 'JetBrains Mono';
+    margin-bottom: 8px;
+    line-height: 1.6;
+  }
+  .chassis-info strong { color: var(--purple); }
+  .gpu-row {
+    display: grid;
+    grid-template-columns: 1.6fr 0.6fr 0.8fr auto;
+    gap: 6px;
+    align-items: center;
+    margin-top: 6px;
+  }
+
+  /* === Findings strip === */
+  .findings {
+    grid-area: findings;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .findings-summary {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 6px 16px;
+    flex-shrink: 0;
+    font-size: 12px;
+  }
+  .findings-summary .count {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text2);
+  }
+  .findings-summary .count .icon { font-size: 14px; }
+  .findings-summary .count[data-sev="error"] .icon { color: var(--red); }
+  .findings-summary .count[data-sev="warn"] .icon  { color: var(--yellow); }
+  .findings-summary .count[data-sev="info"] .icon  { color: var(--accent); }
+  .findings-summary .spacer { flex: 1; }
+  .findings-summary .toggle {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text2);
+    padding: 3px 10px;
+    border-radius: 4px;
+    font-size: 11px;
+  }
+  .findings-summary .toggle:hover { color: var(--text); border-color: var(--border2); }
+
+  .findings-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px 0;
+    border-top: 1px solid var(--border);
+  }
+  .finding-row {
+    display: grid;
+    grid-template-columns: 24px 200px 1fr;
+    gap: 12px;
+    padding: 6px 16px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .finding-row:hover { background: var(--surface2); }
+  .finding-row .id { font-family: 'JetBrains Mono'; font-size: 10px; color: var(--text3); }
+  .finding-row .msg { color: var(--text); }
+
+  /* === Splash === */
+  .overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(8,9,12,0.92);
+    backdrop-filter: blur(8px);
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 32px;
+  }
+  .overlay.hidden { display: none; }
+  .splash-card {
+    width: 100%;
+    max-width: 720px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 32px;
+  }
+  .splash-card h1 {
+    font-family: 'Outfit';
+    font-weight: 700;
+    font-size: 28px;
+    margin-bottom: 4px;
+    letter-spacing: -0.02em;
+  }
+  .splash-card .tagline {
+    color: var(--text2);
+    margin-bottom: 28px;
+  }
+  .mode-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+  .mode-option {
+    background: var(--surface2);
+    border: 2px solid var(--border);
+    border-radius: 10px;
+    padding: 18px;
+    cursor: pointer;
+    transition: all .15s;
+    text-align: left;
+  }
+  .mode-option:hover {
+    border-color: var(--border2);
+    background: var(--surface3);
+  }
+  .mode-option.selected {
+    border-color: var(--accent);
+    background: var(--accent-glow);
+  }
+  .mode-option .title {
+    font-weight: 600;
+    font-size: 15px;
+    margin-bottom: 4px;
+  }
+  .mode-option .desc {
+    font-size: 11px;
+    color: var(--text2);
+    line-height: 1.5;
+  }
+  .splash-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 16px;
+  }
+  .splash-actions .field { flex: 1; margin: 0; }
+
+  .btn {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    padding: 9px 18px;
+    border-radius: 6px;
+    font-weight: 500;
+    transition: background .15s;
+  }
+  .btn:hover { background: var(--accent2); }
+  .btn:disabled { background: var(--surface3); color: var(--text3); cursor: not-allowed; }
+  .btn-ghost {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text2);
+    padding: 9px 18px;
+    border-radius: 6px;
+    font-weight: 500;
+  }
+  .btn-ghost:hover { border-color: var(--border2); color: var(--text); }
+
+  /* === Modal === */
+  .modal-card {
+    width: 100%;
+    max-width: 560px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+  }
+  .modal-card h2 {
+    font-size: 18px;
+    font-weight: 600;
+    margin-bottom: 20px;
+  }
+  .modal-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-top: 20px;
+  }
+  .compat-result {
+    font-size: 11px;
+    font-family: 'JetBrains Mono';
+    padding: 8px 10px;
+    border-radius: 5px;
+    background: var(--surface2);
+    margin-top: 10px;
+    line-height: 1.6;
+  }
+  .compat-result .ok { color: var(--green); }
+  .compat-result .warn { color: var(--yellow); }
+  .compat-result .err { color: var(--red); }
+
+  /* === Misc === */
+  .loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text2);
+  }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--surface3); border-radius: 5px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--border2); }
+</style>
+</head>
+<body>
+
+<div class="app" id="app">
+  <header class="topbar">
+    <span class="logo"><span class="dot">●</span> vk8s</span>
+    <span class="project-name" id="topProjectName">—</span>
+    <span class="mode-badge" id="topMode" data-mode=""></span>
+    <span class="save-status" id="saveStatus"></span>
+    <span class="spacer"></span>
+    <button class="icon-btn" id="btnImport" title="Import JSON">⤒ Import</button>
+    <button class="icon-btn" id="btnExport" title="Export JSON">⤓ Export</button>
+    <button class="icon-btn" id="btnNewProject" title="New project">＋ New</button>
+  </header>
+
+  <aside class="tree" id="tree"></aside>
+
+  <main class="canvas">
+    <div class="view-tabs" id="viewTabs"></div>
+    <div class="view-body" id="viewBody"></div>
+  </main>
+
+  <aside class="inspector" id="inspector">
+    <div class="inspector-empty">엔티티를 선택하세요</div>
+  </aside>
+
+  <footer class="findings">
+    <div class="findings-summary">
+      <span class="count" data-sev="error"><span class="icon">⊗</span> <span id="cntErr">0</span> errors</span>
+      <span class="count" data-sev="warn"><span class="icon">▲</span> <span id="cntWarn">0</span> warnings</span>
+      <span class="count" data-sev="info"><span class="icon">ⓘ</span> <span id="cntInfo">0</span> info</span>
+      <span class="spacer"></span>
+      <span style="font-size:10px;color:var(--text3);font-family:'JetBrains Mono'">validator coming in Phase 2</span>
+      <button class="toggle" id="btnFindings">Findings ▾</button>
+    </div>
+    <div class="findings-list" id="findingsList" style="display:none"></div>
+  </footer>
+</div>
+
+<div class="overlay" id="splash">
+  <div class="splash-card">
+    <h1><span style="color:var(--accent)">●</span> vk8s</h1>
+    <div class="tagline">k8s capacity studio — 가상 Kubernetes 환경 설계 및 호환성 검증</div>
+
+    <div class="section-title">Mode</div>
+    <div class="mode-grid">
+      <button class="mode-option" data-mode="onprem">
+        <div class="title">On-Prem</div>
+        <div class="desc">IDC, 직접 보유 서버. Dell / HPE / Lenovo / Supermicro 카탈로그.</div>
+      </button>
+      <button class="mode-option" data-mode="cloud">
+        <div class="title">Cloud</div>
+        <div class="desc">AWS, NCP. 인스턴스 타입 카탈로그. 상면/전력 산정 없음.</div>
+      </button>
+      <button class="mode-option" data-mode="hybrid">
+        <div class="title">Hybrid</div>
+        <div class="desc">두 환경 함께 운용. 환경별 클러스터 분리 권장.</div>
+      </button>
+    </div>
+
+    <div class="splash-actions">
+      <div class="field">
+        <label for="splashName">Project name</label>
+        <input id="splashName" placeholder="ai-platform-2026" value="my-vk8s-project">
+      </div>
+      <button class="btn-ghost" id="btnSplashImport">Import</button>
+      <button class="btn" id="btnSplashCreate" disabled>Create →</button>
+    </div>
+  </div>
+</div>
+
+<div class="overlay hidden" id="modal">
+  <div class="modal-card" id="modalContent"></div>
+</div>
+
+<input type="file" id="fileImport" accept=".json" style="display:none">
+
+<script>
+//============================================================
+// vk8s — Phase 1
+// Static single-page app. localStorage persistence. No backend.
+//============================================================
+
+//============ Constants ============
+const SCHEMA_VERSION = "0.2";
+const STORAGE_KEY    = "vk8s.project.current";
+const CATALOG_FILES  = [
+  "data/gpu-models.json",
+  "data/runtime-profiles.json",
+  "data/catalog/cloud/aws.json",
+  "data/catalog/cloud/ncp.json",
+  "data/catalog/onprem/dell.json",
+  "data/catalog/onprem/hpe.json",
+  "data/catalog/onprem/lenovo.json",
+  "data/catalog/onprem/supermicro.json",
+];
+const VIEWS = [
+  { id: "topology",  name: "Topology",   ready: true  },
+  { id: "capacity",  name: "Capacity",   ready: false },
+  { id: "depgraph",  name: "Dependency", ready: false },
+  { id: "namespace", name: "Namespace",  ready: false },
+  { id: "bottleneck",name: "Bottleneck", ready: false },
+  { id: "export",    name: "Export",     ready: false },
+];
+
+//============ State ============
+const state = {
+  catalog: { entries: [], gpuModels: {}, runtime: {}, loaded: false },
+  project: null,
+  ui: { selectedKind: null, selectedId: null, view: "topology" },
+};
+
+const listeners = new Set();
+function emit() { listeners.forEach(fn => { try { fn(); } catch (e) { console.error(e); } }); }
+function subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); }
+
+//============ Helpers ============
+const $ = sel => document.querySelector(sel);
+const el = (tag, attrs = {}, children = []) => {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") node.className = v;
+    else if (k === "style") Object.assign(node.style, v);
+    else if (k.startsWith("on") && typeof v === "function") node.addEventListener(k.slice(2).toLowerCase(), v);
+    else if (k === "dataset") for (const [dk, dv] of Object.entries(v)) node.dataset[dk] = dv;
+    else if (v != null) node.setAttribute(k, v);
+  }
+  for (const c of [].concat(children)) {
+    if (c == null) continue;
+    node.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+  }
+  return node;
+};
+const slug = s => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+const uid  = () => Math.random().toString(36).slice(2, 8);
+function clsLevel(pct) {
+  if (pct >= 90) return "critical";
+  if (pct >= 80) return "high";
+  if (pct >= 50) return "medium";
+  return "low";
+}
+
+//============ Catalog loader ============
+async function loadCatalog() {
+  const results = await Promise.all(CATALOG_FILES.map(async p => {
+    const res = await fetch(p);
+    if (!res.ok) throw new Error(`Failed to load ${p}: ${res.status}`);
+    return [p, await res.json()];
+  }));
+  const map = Object.fromEntries(results);
+  state.catalog.gpuModels = map["data/gpu-models.json"].models;
+  state.catalog.runtime   = map["data/runtime-profiles.json"].profiles;
+  const entries = [];
+  for (const [path, doc] of results) {
+    if (path.includes("/catalog/")) {
+      for (const e of (doc.entries || [])) entries.push(e);
+    }
+  }
+  state.catalog.entries = entries;
+  state.catalog.loaded  = true;
+  console.log(`Loaded ${entries.length} catalog entries, ${Object.keys(state.catalog.gpuModels).length} GPU models`);
+}
+
+//============ Persistence ============
+let saveTimer = null;
+function saveSoon() {
+  $("#saveStatus").textContent = "saving…";
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    if (state.project) localStorage.setItem(STORAGE_KEY, JSON.stringify(state.project));
+    $("#saveStatus").textContent = "saved";
+    setTimeout(() => { if ($("#saveStatus").textContent === "saved") $("#saveStatus").textContent = ""; }, 1500);
+  }, 600);
+}
+function loadProject() {
+  const raw = localStorage.getItem(STORAGE_KEY);
+  if (!raw) return null;
+  try {
+    const p = JSON.parse(raw);
+    if (p && p.version) return p;
+  } catch (e) { console.warn("Failed to load saved project", e); }
+  return null;
+}
+
+//============ Project actions ============
+function createProject(mode, name) {
+  state.project = {
+    version: SCHEMA_VERSION,
+    name: name.trim() || "untitled",
+    mode,
+    sites: [],
+    nodes: [],
+    clusters: [],
+    metadata: {
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    },
+  };
+  // For non-hybrid, create a default site so Add Node has somewhere to land
+  if (mode === "onprem") {
+    addSite({ name: "IDC-1", kind: "onprem",
+              capacity: { rack_units: 42, power_kw: 16 } }, /*silent*/true);
+  } else if (mode === "cloud") {
+    addSite({ name: "AWS Seoul", kind: "cloud",
+              cloud_provider: "AWS", region: "ap-northeast-2" }, /*silent*/true);
+  }
+  emit(); saveSoon();
+}
+
+function addSite(seed, silent = false) {
+  if (!state.project) return;
+  const id = slug(seed.name) + "-" + uid();
+  const site = {
+    id,
+    name: seed.name,
+    kind: seed.kind,
+    node_ids: [],
+  };
+  if (seed.kind === "cloud") {
+    site.cloud_provider = seed.cloud_provider || "AWS";
+    site.region = seed.region || "";
+  }
+  if (seed.kind === "onprem") {
+    site.capacity = seed.capacity || { rack_units: 42, power_kw: 16 };
+  }
+  state.project.sites.push(site);
+  if (!silent) { selectEntity("site", id); emit(); saveSoon(); }
+  return site;
+}
+
+function addNode(seed) {
+  if (!state.project) return;
+  // seed: { catalogKey, siteId, name, qty }
+  const tmpl = state.catalog.entries.find(e => e.key === seed.catalogKey);
+  if (!tmpl) throw new Error("Catalog entry not found: " + seed.catalogKey);
+  const site = state.project.sites.find(s => s.id === seed.siteId);
+  if (!site) throw new Error("Site not found: " + seed.siteId);
+  const qty = Math.max(1, parseInt(seed.qty) || 1);
+  const created = [];
+  for (let i = 0; i < qty; i++) {
+    const id = slug(tmpl.key) + "-" + uid();
+    const node = {
+      id,
+      name: seed.name ? (qty === 1 ? seed.name : `${seed.name}-${i+1}`) : `${tmpl.display_name} #${state.project.nodes.length + i + 1}`,
+      source: tmpl.source,
+      brand: tmpl.brand,
+      model: tmpl.key,
+      custom: false,
+      site_id: site.id,
+      cluster_role: "unassigned",
+      spec: JSON.parse(JSON.stringify(tmpl.spec)),
+    };
+    state.project.nodes.push(node);
+    site.node_ids.push(id);
+    created.push(node);
+  }
+  if (created.length === 1) selectEntity("node", created[0].id);
+  emit(); saveSoon();
+  return created;
+}
+
+function deleteEntity(kind, id) {
+  if (!state.project) return;
+  if (kind === "site") {
+    const site = state.project.sites.find(s => s.id === id);
+    if (!site) return;
+    if (site.node_ids.length) {
+      if (!confirm(`이 사이트에는 ${site.node_ids.length}개의 노드가 있습니다. 모두 함께 삭제됩니다. 진행?`)) return;
+      site.node_ids.slice().forEach(nid => deleteEntity("node", nid));
+    }
+    state.project.sites = state.project.sites.filter(s => s.id !== id);
+  } else if (kind === "node") {
+    state.project.nodes = state.project.nodes.filter(n => n.id !== id);
+    state.project.sites.forEach(s => s.node_ids = s.node_ids.filter(nid => nid !== id));
+  }
+  if (state.ui.selectedId === id) state.ui.selectedId = null;
+  emit(); saveSoon();
+}
+
+function selectEntity(kind, id) {
+  state.ui.selectedKind = kind;
+  state.ui.selectedId   = id;
+  emit();
+}
+
+function updateNodeField(id, path, value) {
+  const n = state.project.nodes.find(x => x.id === id);
+  if (!n) return;
+  // simple dot-path setter
+  const parts = path.split(".");
+  let obj = n;
+  while (parts.length > 1) {
+    const p = parts.shift();
+    if (obj[p] == null) obj[p] = {};
+    obj = obj[p];
+  }
+  obj[parts[0]] = value;
+  emit(); saveSoon();
+}
+
+function updateSiteField(id, path, value) {
+  const s = state.project.sites.find(x => x.id === id);
+  if (!s) return;
+  const parts = path.split(".");
+  let obj = s;
+  while (parts.length > 1) {
+    const p = parts.shift();
+    if (obj[p] == null) obj[p] = {};
+    obj = obj[p];
+  }
+  obj[parts[0]] = value;
+  emit(); saveSoon();
+}
+
+//============ Compatibility check (subset for Add Node preview) ============
+function checkNodeCompatibility(spec, gpuModels) {
+  const issues = [];
+  const chassis = spec.gpu_chassis || {};
+  const installed = spec.gpu || [];
+  const totalGpu = installed.reduce((a, g) => a + (g.count || 0), 0);
+
+  if (totalGpu > 0 && (chassis.max_count || 0) === 0) {
+    issues.push({ sev: "err", msg: "이 새시는 GPU 미지원" });
+  }
+  if (totalGpu > (chassis.max_count || 0)) {
+    issues.push({ sev: "err", msg: `GPU ${totalGpu}장 > 새시 max_count ${chassis.max_count || 0}` });
+  }
+  for (const g of installed) {
+    if (g.form_factor && !(chassis.supported_form_factors || []).includes(g.form_factor)) {
+      issues.push({ sev: "err", msg: `${g.model}: 폼팩터 ${g.form_factor} 미지원 (${(chassis.supported_form_factors||[]).join(",") || "none"})` });
+    }
+    if (g.model && !(chassis.supported_models || []).includes(g.model)) {
+      issues.push({ sev: "err", msg: `${g.model}: 새시 supported_models에 없음` });
+    }
+    if (g.nvlink_enabled && chassis.nvlink_topology === "none") {
+      issues.push({ sev: "err", msg: `${g.model}: NVLink 미지원 새시` });
+    }
+    if (g.nvlink_enabled && chassis.nvlink_topology === "bridge-pair" && (g.count > 2 || g.count % 2 !== 0)) {
+      issues.push({ sev: "warn", msg: `NVLink Bridge는 2장 페어링만` });
+    }
+  }
+  return issues;
+}
+
+//============ Power calc ============
+function computeNodePowerW(node, gpuModels) {
+  const spec = node.spec || {};
+  const base = (spec.power && spec.power.typical_w_base) || 0;
+  let gpuW = 0;
+  for (const g of (spec.gpu || [])) {
+    const ginfo = gpuModels[g.model];
+    if (ginfo) gpuW += (g.count || 0) * (ginfo.tdp_w || 0);
+  }
+  const diskCount = (spec.disks || []).reduce((a, d) => a + (d.count || 1), 0);
+  return base + gpuW + diskCount * 10;
+}
+function siteFormFactorU(formFactor) {
+  if (!formFactor || formFactor === "Tower") return 0;
+  const m = String(formFactor).match(/^(\d+)U$/);
+  return m ? parseInt(m[1]) : 0;
+}
+function siteUsage(site, project, gpuModels) {
+  if (site.kind !== "onprem") return null;
+  const nodes = (site.node_ids || []).map(id => project.nodes.find(n => n.id === id)).filter(Boolean);
+  const u = nodes.reduce((a, n) => a + siteFormFactorU(n.spec?.form_factor), 0);
+  const w = nodes.reduce((a, n) => a + computeNodePowerW(n, gpuModels), 0);
+  return {
+    u_used: u,
+    u_max: site.capacity?.rack_units || 0,
+    kw_used: w / 1000,
+    kw_max: site.capacity?.power_kw || 0,
+  };
+}
+
+//============ Render: Topbar ============
+function renderTopbar() {
+  if (!state.project) {
+    $("#topProjectName").textContent = "—";
+    $("#topMode").textContent = "";
+    $("#topMode").dataset.mode = "";
+    return;
+  }
+  $("#topProjectName").textContent = state.project.name;
+  $("#topMode").textContent = state.project.mode;
+  $("#topMode").dataset.mode = state.project.mode;
+}
+
+//============ Render: View tabs ============
+function renderViewTabs() {
+  const root = $("#viewTabs");
+  root.innerHTML = "";
+  VIEWS.forEach((v, i) => {
+    const btn = el("button", {
+      class: "view-tab" + (state.ui.view === v.id ? " active" : "") + (v.ready ? "" : " disabled"),
+      onclick: () => {
+        if (!v.ready) return;
+        state.ui.view = v.id;
+        emit();
+      },
+    }, [
+      el("span", { class: "tab-num" }, [String(i + 1)]),
+      v.name,
+    ]);
+    root.appendChild(btn);
+  });
+}
+
+//============ Render: Tree ============
+function renderTree() {
+  const root = $("#tree");
+  root.innerHTML = "";
+  if (!state.project) {
+    root.appendChild(el("div", { class: "empty-hint" }, ["프로젝트가 없습니다."]));
+    return;
+  }
+  const p = state.project;
+
+  // Sites section (with nested nodes)
+  const sitesSec = el("div", { class: "tree-section" });
+  sitesSec.appendChild(el("div", { class: "tree-section-header" }, [
+    "Sites ", el("span", { class: "count" }, [`(${p.sites.length})`]),
+  ]));
+  if (!p.sites.length) {
+    sitesSec.appendChild(el("div", { class: "empty-hint" }, ["사이트를 추가하세요."]));
+  }
+  for (const s of p.sites) {
+    const usage = siteUsage(s, p, state.catalog.gpuModels);
+    const meta = s.kind === "onprem"
+      ? `${usage?.u_used || 0}U / ${(usage?.kw_used || 0).toFixed(1)}kW`
+      : `${s.cloud_provider || ""} ${s.region || ""}`;
+    sitesSec.appendChild(el("div", {
+      class: "tree-item" + (state.ui.selectedKind === "site" && state.ui.selectedId === s.id ? " selected" : ""),
+      onclick: () => selectEntity("site", s.id),
+    }, [
+      el("span", { class: "icon" }, [s.kind === "onprem" ? "🏢" : "☁"]),
+      el("span", { class: "label" }, [s.name]),
+      el("span", { class: "meta" }, [meta]),
+    ]));
+    // child nodes
+    const nodes = (s.node_ids || []).map(id => p.nodes.find(n => n.id === id)).filter(Boolean);
+    for (const n of nodes) {
+      sitesSec.appendChild(el("div", {
+        class: "tree-item child" + (state.ui.selectedKind === "node" && state.ui.selectedId === n.id ? " selected" : ""),
+        onclick: () => selectEntity("node", n.id),
+      }, [
+        el("span", { class: "icon" }, ["▣"]),
+        el("span", { class: "label" }, [n.name]),
+        el("span", { class: "meta" }, [n.spec?.form_factor || ""]),
+      ]));
+    }
+  }
+  root.appendChild(sitesSec);
+
+  // Actions
+  const actions = el("div", { class: "tree-actions" });
+  if (state.project.mode === "hybrid" || state.project.sites.length === 0 || state.project.sites.length < 5) {
+    actions.appendChild(el("button", { class: "add-btn", onclick: openAddSite }, ["＋ Add Site"]));
+  }
+  actions.appendChild(el("button", { class: "add-btn", onclick: openAddNode }, ["＋ Add Node"]));
+  root.appendChild(actions);
+}
+
+//============ Render: Inspector ============
+function renderInspector() {
+  const root = $("#inspector");
+  root.innerHTML = "";
+  if (!state.project || !state.ui.selectedId) {
+    root.appendChild(el("div", { class: "inspector-empty" }, ["엔티티를 선택하세요"]));
+    return;
+  }
+  const k = state.ui.selectedKind, id = state.ui.selectedId;
+  if (k === "site") renderSiteInspector(root, id);
+  else if (k === "node") renderNodeInspector(root, id);
+}
+
+function renderSiteInspector(root, id) {
+  const s = state.project.sites.find(x => x.id === id);
+  if (!s) return;
+  root.appendChild(el("div", { class: "insp-header" }, [
+    el("span", { class: "kind" }, ["Site"]),
+    el("span", { class: "name" }, [s.name]),
+    el("button", {
+      class: "delete", title: "Delete site",
+      onclick: () => { if (confirm(`사이트 '${s.name}' 삭제?`)) deleteEntity("site", id); },
+    }, ["🗑"]),
+  ]));
+
+  const nameField = el("input", { value: s.name, oninput: e => updateSiteField(id, "name", e.target.value) });
+  root.appendChild(el("div", { class: "field" }, [el("label", {}, ["Name"]), nameField]));
+
+  root.appendChild(el("div", { class: "field" }, [
+    el("label", {}, ["Kind"]),
+    el("div", { class: "field-readonly" }, [s.kind]),
+  ]));
+
+  if (s.kind === "cloud") {
+    root.appendChild(el("div", { class: "field-row" }, [
+      el("div", { class: "field" }, [
+        el("label", {}, ["Provider"]),
+        el("input", { value: s.cloud_provider || "", oninput: e => updateSiteField(id, "cloud_provider", e.target.value) }),
+      ]),
+      el("div", { class: "field" }, [
+        el("label", {}, ["Region"]),
+        el("input", { value: s.region || "", oninput: e => updateSiteField(id, "region", e.target.value) }),
+      ]),
+    ]));
+  }
+
+  if (s.kind === "onprem") {
+    root.appendChild(el("div", { class: "section-title" }, ["Capacity"]));
+    root.appendChild(el("div", { class: "field-row" }, [
+      el("div", { class: "field" }, [
+        el("label", {}, ["Rack Units (U)"]),
+        el("input", { type: "number", min: "0", value: s.capacity?.rack_units || 0,
+                      oninput: e => updateSiteField(id, "capacity.rack_units", parseInt(e.target.value) || 0) }),
+      ]),
+      el("div", { class: "field" }, [
+        el("label", {}, ["Power (kW)"]),
+        el("input", { type: "number", min: "0", step: "0.5", value: s.capacity?.power_kw || 0,
+                      oninput: e => updateSiteField(id, "capacity.power_kw", parseFloat(e.target.value) || 0) }),
+      ]),
+    ]));
+    root.appendChild(el("div", { class: "field" }, [
+      el("label", {}, ["Cooling (kW, optional)"]),
+      el("input", { type: "number", min: "0", step: "0.5", value: s.capacity?.cooling_kw || "",
+                    oninput: e => updateSiteField(id, "capacity.cooling_kw", parseFloat(e.target.value) || undefined) }),
+    ]));
+
+    const usage = siteUsage(s, state.project, state.catalog.gpuModels);
+    if (usage) {
+      const uPct = usage.u_max ? (usage.u_used / usage.u_max * 100) : 0;
+      const kwPct = usage.kw_max ? (usage.kw_used / usage.kw_max * 100) : 0;
+      root.appendChild(el("div", { class: "section-title" }, ["Usage"]));
+      root.appendChild(makeBarLine("Rack Units", `${usage.u_used} / ${usage.u_max} U`, uPct));
+      root.appendChild(makeBarLine("Power",      `${usage.kw_used.toFixed(1)} / ${usage.kw_max} kW`, kwPct));
+    }
+  }
+
+  root.appendChild(el("div", { class: "section-title" }, [`Nodes in this site (${s.node_ids.length})`]));
+  if (!s.node_ids.length) {
+    root.appendChild(el("div", { class: "empty-hint" }, ["노드가 없습니다."]));
+  } else {
+    for (const nid of s.node_ids) {
+      const n = state.project.nodes.find(x => x.id === nid);
+      if (!n) continue;
+      root.appendChild(el("div", {
+        class: "tree-item",
+        onclick: () => selectEntity("node", nid),
+      }, [
+        el("span", { class: "icon" }, ["▣"]),
+        el("span", { class: "label" }, [n.name]),
+        el("span", { class: "meta" }, [n.spec?.form_factor || ""]),
+      ]));
+    }
+  }
+}
+
+function makeBarLine(label, valueText, pct) {
+  pct = Math.max(0, Math.min(100, pct));
+  return el("div", { class: "field" }, [
+    el("div", { class: "topo-bar-label" }, [
+      el("span", {}, [label]),
+      el("span", { class: "val" }, [`${pct.toFixed(0)}%  ${valueText}`]),
+    ]),
+    el("div", { class: "bar" }, [
+      el("div", { class: "bar-fill", dataset: { level: clsLevel(pct) }, style: { width: pct + "%" } }),
+    ]),
+  ]);
+}
+
+function renderNodeInspector(root, id) {
+  const n = state.project.nodes.find(x => x.id === id);
+  if (!n) return;
+  const spec = n.spec || {};
+  const chassis = spec.gpu_chassis || {};
+  const gpus = spec.gpu || [];
+  const gpuModels = state.catalog.gpuModels;
+
+  root.appendChild(el("div", { class: "insp-header" }, [
+    el("span", { class: "kind" }, ["Node"]),
+    el("span", { class: "name" }, [n.name]),
+    el("button", {
+      class: "delete", title: "Delete node",
+      onclick: () => { if (confirm(`노드 '${n.name}' 삭제?`)) deleteEntity("node", id); },
+    }, ["🗑"]),
+  ]));
+
+  root.appendChild(el("div", { class: "field" }, [
+    el("label", {}, ["Name"]),
+    el("input", { value: n.name, oninput: e => updateNodeField(id, "name", e.target.value) }),
+  ]));
+
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [
+      el("label", {}, ["Brand · Model"]),
+      el("div", { class: "field-readonly" }, [`${n.brand} · ${n.model}`]),
+    ]),
+    el("div", { class: "field" }, [
+      el("label", {}, ["Source"]),
+      el("div", { class: "field-readonly" }, [n.source]),
+    ]),
+  ]));
+
+  // Site selector
+  const siteOpts = state.project.sites.filter(s => s.kind === n.source).map(s =>
+    el("option", { value: s.id, selected: s.id === n.site_id ? "" : null }, [s.name + (s.kind === "cloud" ? ` (${s.region || ""})` : "")]));
+  root.appendChild(el("div", { class: "field" }, [
+    el("label", {}, ["Site"]),
+    el("select", {
+      onchange: e => moveNodeToSite(id, e.target.value),
+    }, siteOpts),
+  ]));
+
+  // Cluster role
+  root.appendChild(el("div", { class: "field" }, [
+    el("label", {}, ["Cluster Role"]),
+    el("select", {
+      onchange: e => updateNodeField(id, "cluster_role", e.target.value),
+    }, ["unassigned", "control-plane", "worker", "etcd"].map(r =>
+      el("option", { value: r, selected: r === n.cluster_role ? "" : null }, [r]))),
+  ]));
+
+  // Spec
+  root.appendChild(el("div", { class: "section-title" }, ["Spec"]));
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [
+      el("label", {}, ["vCPU"]),
+      el("div", { class: "field-readonly" }, [String(spec.vcpu || 0)]),
+    ]),
+    el("div", { class: "field" }, [
+      el("label", {}, ["Memory (GB)"]),
+      el("div", { class: "field-readonly" }, [String(spec.memory_gb || 0)]),
+    ]),
+  ]));
+  if (spec.form_factor || spec.power) {
+    root.appendChild(el("div", { class: "field-row" }, [
+      el("div", { class: "field" }, [
+        el("label", {}, ["Form factor"]),
+        el("div", { class: "field-readonly" }, [spec.form_factor || "—"]),
+      ]),
+      el("div", { class: "field" }, [
+        el("label", {}, ["Typical Power (W)"]),
+        el("div", { class: "field-readonly" }, [
+          String(computeNodePowerW(n, gpuModels)) + " W"
+        ]),
+      ]),
+    ]));
+  }
+
+  // GPU
+  if ((chassis.max_count || 0) > 0 || gpus.length) {
+    root.appendChild(el("div", { class: "section-title" }, ["GPU"]));
+    const chassisDesc = `Chassis: max ${chassis.max_count || 0} · ${(chassis.supported_form_factors || []).join("/") || "—"} · ${chassis.nvlink_topology || "none"}`;
+    const supports = `Supports: ${(chassis.supported_models || []).join(", ") || "—"}`;
+    root.appendChild(el("div", { class: "chassis-info" }, [
+      el("strong", {}, [chassisDesc]), el("br"), supports,
+    ]));
+    if (n.source === "cloud") {
+      root.appendChild(el("div", { class: "empty-hint" }, ["Cloud 인스턴스는 GPU 구성 고정"]));
+    }
+    for (let i = 0; i < gpus.length; i++) {
+      const g = gpus[i];
+      const ginfo = gpuModels[g.model] || {};
+      root.appendChild(el("div", { class: "gpu-config" }, [
+        el("div", { style: { fontSize: "12px", marginBottom: "6px" } }, [
+          el("strong", {}, [g.model]),
+          ` ×${g.count}  ${g.form_factor || ginfo.form_factor || ""}  ${ginfo.vram_gb ? `· ${ginfo.vram_gb}GB VRAM` : ""}`,
+          g.nvlink_enabled ? el("span", { style: { color: "var(--purple)" } }, [" · NVLink"]) : null,
+        ]),
+        el("div", { style: { fontSize: "11px", color: "var(--text2)" } }, [
+          ginfo.tdp_w ? `TDP ${ginfo.tdp_w}W × ${g.count} = ${(ginfo.tdp_w * g.count) / 1000}kW total` : "",
+        ]),
+      ]));
+    }
+    if (!gpus.length) {
+      root.appendChild(el("div", { class: "empty-hint" }, ["GPU 미장착"]));
+    }
+  }
+
+  // Compatibility check
+  const issues = checkNodeCompatibility(spec, gpuModels);
+  if (issues.length) {
+    root.appendChild(el("div", { class: "section-title" }, ["Findings (this node)"]));
+    const list = el("div", { class: "compat-result" });
+    for (const i of issues) {
+      const cls = i.sev === "err" ? "err" : (i.sev === "warn" ? "warn" : "ok");
+      list.appendChild(el("div", { class: cls }, [`${i.sev === "err" ? "⊗" : "▲"} ${i.msg}`]));
+    }
+    root.appendChild(list);
+  }
+}
+
+function moveNodeToSite(nodeId, newSiteId) {
+  const n = state.project.nodes.find(x => x.id === nodeId);
+  if (!n || n.site_id === newSiteId) return;
+  // remove from old
+  state.project.sites.forEach(s => s.node_ids = s.node_ids.filter(id => id !== nodeId));
+  n.site_id = newSiteId;
+  const news = state.project.sites.find(s => s.id === newSiteId);
+  if (news) news.node_ids.push(nodeId);
+  emit(); saveSoon();
+}
+
+//============ Render: Topology ============
+function renderTopology() {
+  const root = $("#viewBody");
+  root.innerHTML = "";
+  const p = state.project;
+  if (!p) {
+    root.appendChild(el("div", { class: "view-empty" }, [
+      el("div", { class: "big" }, ["○"]),
+      el("h2", {}, ["프로젝트가 없습니다"]),
+      el("p", {}, ["좌상단 New로 시작하거나 Import 하세요."]),
+    ]));
+    return;
+  }
+  if (!p.sites.length) {
+    root.appendChild(el("div", { class: "view-empty" }, [
+      el("div", { class: "big" }, ["⌗"]),
+      el("h2", {}, ["사이트가 없습니다"]),
+      el("p", {}, ["트리에서 ＋ Add Site로 첫 사이트를 만드세요."]),
+    ]));
+    return;
+  }
+
+  for (const s of p.sites) {
+    const card = el("div", { class: "topo-site" });
+    const header = el("div", { class: "topo-site-header" }, [
+      el("span", { class: "name" }, [s.name]),
+      el("span", { class: "kind", dataset: { kind: s.kind } }, [s.kind]),
+      el("span", { class: "region" }, [s.kind === "cloud" ? `${s.cloud_provider || ""} · ${s.region || ""}` : ""]),
+    ]);
+    card.appendChild(header);
+
+    if (s.kind === "onprem") {
+      const usage = siteUsage(s, p, state.catalog.gpuModels);
+      const uPct  = usage.u_max ? usage.u_used / usage.u_max * 100 : 0;
+      const kwPct = usage.kw_max ? usage.kw_used / usage.kw_max * 100 : 0;
+      card.appendChild(el("div", { class: "topo-site-bars" }, [
+        makeBarLine("Rack U",  `${usage.u_used}/${usage.u_max}U`,  uPct),
+        makeBarLine("Power",   `${usage.kw_used.toFixed(1)}/${usage.kw_max}kW`, kwPct),
+      ]));
+    }
+
+    const nodes = (s.node_ids || []).map(id => p.nodes.find(n => n.id === id)).filter(Boolean);
+    if (!nodes.length) {
+      card.appendChild(el("div", { class: "topo-empty-site" }, ["노드 없음. ＋ Add Node로 추가."]));
+    } else {
+      const grid = el("div", { class: "topo-nodes" });
+      for (const n of nodes) {
+        const isSel = state.ui.selectedKind === "node" && state.ui.selectedId === n.id;
+        const totalGpu = (n.spec.gpu || []).reduce((a, g) => a + g.count, 0);
+        const gpuMax = (n.spec.gpu_chassis?.max_count || 0);
+        const power = computeNodePowerW(n, state.catalog.gpuModels);
+        grid.appendChild(el("div", {
+          class: "topo-node" + (isSel ? " selected" : ""),
+          onclick: () => selectEntity("node", n.id),
+        }, [
+          el("div", { class: "node-name" }, [n.name]),
+          el("div", { class: "node-model" }, [`${n.brand} · ${n.model}${n.spec.form_factor ? ` · ${n.spec.form_factor}` : ""}`]),
+          el("div", { class: "node-stats" }, [
+            el("span", { class: "stat" }, [el("span", {}, ["vCPU"]), el("span", { class: "v" }, [String(n.spec.vcpu || 0)])]),
+            el("span", { class: "stat" }, [el("span", {}, ["RAM"]), el("span", { class: "v" }, [`${n.spec.memory_gb || 0} GB`])]),
+            n.source === "onprem"
+              ? el("span", { class: "stat" }, [el("span", {}, ["Power"]), el("span", { class: "v" }, [`${(power/1000).toFixed(1)} kW`])])
+              : el("span", { class: "stat" }, [el("span", {}, ["NIC"]), el("span", { class: "v" }, [`${(n.spec.nics?.[0]?.speed_gbps || 0)} G`])]),
+            gpuMax > 0
+              ? el("span", { class: "stat" }, [el("span", {}, ["GPU"]), el("span", { class: "v" }, [`${totalGpu}/${gpuMax}`])])
+              : el("span", { class: "stat" }, [el("span", {}, ["Disk"]), el("span", { class: "v" }, [`${(n.spec.disks?.[0]?.size_gb || 0)} GB`])]),
+          ]),
+          totalGpu ? el("div", { class: "gpu-line" }, [
+            `🟩 ${(n.spec.gpu || []).map(g => `${g.count}× ${g.model}`).join(", ")}`
+          ]) : null,
+        ]));
+      }
+      card.appendChild(grid);
+    }
+    root.appendChild(card);
+  }
+}
+
+//============ Render: dispatch ============
+function renderViewBody() {
+  if (!state.project) { renderTopology(); return; }
+  const v = state.ui.view;
+  if (v === "topology") return renderTopology();
+  // placeholder for other views
+  $("#viewBody").innerHTML = "";
+  $("#viewBody").appendChild(el("div", { class: "view-empty" }, [
+    el("div", { class: "big" }, ["⏳"]),
+    el("h2", {}, [`${VIEWS.find(x => x.id === v)?.name || v} view`]),
+    el("p", {}, ["다음 단계에서 추가됩니다."]),
+  ]));
+}
+
+function renderAll() {
+  renderTopbar();
+  renderViewTabs();
+  renderTree();
+  renderInspector();
+  renderViewBody();
+}
+
+//============ Modal helpers ============
+function openModal(content) {
+  $("#modalContent").innerHTML = "";
+  $("#modalContent").appendChild(content);
+  $("#modal").classList.remove("hidden");
+}
+function closeModal() { $("#modal").classList.add("hidden"); }
+
+//============ Add Site modal ============
+function openAddSite() {
+  if (!state.project) return;
+  const mode = state.project.mode;
+  let kind = mode === "hybrid" ? "onprem" : mode;
+
+  const root = el("div");
+  root.appendChild(el("h2", {}, ["Add Site"]));
+
+  const kindRow = el("div", { class: "field" }, [
+    el("label", {}, ["Kind"]),
+    el("select", {
+      disabled: mode === "hybrid" ? null : "",
+      onchange: e => { kind = e.target.value; rerender(); },
+    }, ["onprem", "cloud"].map(k => el("option", { value: k, selected: k === kind ? "" : null }, [k]))),
+  ]);
+  root.appendChild(kindRow);
+
+  const nameInput = el("input", { value: kind === "onprem" ? `IDC-${state.project.sites.filter(s=>s.kind==='onprem').length+1}` : `${"AWS"}-${state.project.sites.filter(s=>s.kind==='cloud').length+1}` });
+  root.appendChild(el("div", { class: "field" }, [el("label", {}, ["Name"]), nameInput]));
+
+  const onpremSection = el("div");
+  const cloudSection  = el("div");
+  const ru = el("input", { type: "number", min: "0", value: "42" });
+  const pkw = el("input", { type: "number", min: "0", step: "0.5", value: "16" });
+  const cool = el("input", { type: "number", min: "0", step: "0.5", placeholder: "선택" });
+  onpremSection.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [el("label", {}, ["Rack Units (U)"]), ru]),
+    el("div", { class: "field" }, [el("label", {}, ["Power (kW)"]), pkw]),
+  ]));
+  onpremSection.appendChild(el("div", { class: "field" }, [el("label", {}, ["Cooling (kW)"]), cool]));
+
+  const provSel = el("select", {}, ["AWS", "NCP", "Azure", "GCP"].map(p =>
+    el("option", { value: p, selected: p === "AWS" ? "" : null }, [p])));
+  const region = el("input", { placeholder: "ap-northeast-2", value: "ap-northeast-2" });
+  cloudSection.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [el("label", {}, ["Provider"]), provSel]),
+    el("div", { class: "field" }, [el("label", {}, ["Region"]), region]),
+  ]));
+
+  const conditional = el("div");
+  root.appendChild(conditional);
+
+  function rerender() {
+    conditional.innerHTML = "";
+    conditional.appendChild(kind === "onprem" ? onpremSection : cloudSection);
+  }
+  rerender();
+
+  const actions = el("div", { class: "modal-actions" }, [
+    el("button", { class: "btn-ghost", onclick: closeModal }, ["Cancel"]),
+    el("button", { class: "btn", onclick: () => {
+      const seed = { name: nameInput.value.trim() || "site-1", kind };
+      if (kind === "onprem") seed.capacity = {
+        rack_units: parseInt(ru.value) || 0,
+        power_kw: parseFloat(pkw.value) || 0,
+      };
+      if (kind === "onprem" && cool.value) seed.capacity.cooling_kw = parseFloat(cool.value);
+      if (kind === "cloud") { seed.cloud_provider = provSel.value; seed.region = region.value; }
+      addSite(seed);
+      closeModal();
+    } }, ["Add Site"]),
+  ]);
+  root.appendChild(actions);
+
+  openModal(root);
+}
+
+//============ Add Node modal ============
+function openAddNode() {
+  if (!state.project) return;
+  if (!state.project.sites.length) {
+    alert("먼저 사이트를 추가하세요.");
+    return;
+  }
+
+  const root = el("div");
+  root.appendChild(el("h2", {}, ["Add Node"]));
+
+  // Determine source filter based on mode
+  const mode = state.project.mode;
+  const allowedSources = mode === "hybrid" ? ["onprem", "cloud"] : [mode];
+  const entries = state.catalog.entries.filter(e => allowedSources.includes(e.source));
+
+  // Brand options
+  const brands = [...new Set(entries.map(e => e.brand))].sort();
+  let selectedBrand = brands[0];
+  let selectedKey = entries.find(e => e.brand === selectedBrand)?.key;
+
+  const brandSel = el("select", {
+    onchange: e => { selectedBrand = e.target.value;
+      const first = entries.find(x => x.brand === selectedBrand);
+      selectedKey = first?.key;
+      rerenderModel();
+    },
+  }, brands.map(b => el("option", { value: b }, [b])));
+
+  const modelWrap = el("div");
+
+  const previewWrap = el("div");
+
+  const qtyInput = el("input", { type: "number", min: "1", value: "1" });
+
+  // Site
+  const siteOpts = () => state.project.sites
+    .filter(s => allowedSources.includes(s.kind) && (s.kind === entryFor(selectedKey)?.source))
+    .map(s => el("option", { value: s.id }, [`${s.name} (${s.kind})`]));
+  const siteSel = el("select", {});
+
+  const nameInput = el("input", { placeholder: "(자동 생성)", value: "" });
+
+  function entryFor(key) { return entries.find(e => e.key === key); }
+
+  function rerenderModel() {
+    modelWrap.innerHTML = "";
+    const filtered = entries.filter(e => e.brand === selectedBrand);
+    const sel = el("select", {
+      onchange: e => { selectedKey = e.target.value; rerenderPreview(); },
+    }, filtered.map(e =>
+      el("option", { value: e.key, selected: e.key === selectedKey ? "" : null },
+        [`${e.display_name} (${e.category})`])));
+    modelWrap.appendChild(el("div", { class: "field" }, [
+      el("label", {}, ["Model"]), sel,
+    ]));
+
+    // Update sites filter
+    siteSel.innerHTML = "";
+    siteOpts().forEach(o => siteSel.appendChild(o));
+
+    rerenderPreview();
+  }
+
+  function rerenderPreview() {
+    previewWrap.innerHTML = "";
+    const e = entryFor(selectedKey);
+    if (!e) return;
+    const spec = e.spec;
+    const chassis = spec.gpu_chassis || {};
+    const gpus = spec.gpu || [];
+    const power = computeNodePowerW({ spec }, state.catalog.gpuModels);
+
+    previewWrap.appendChild(el("div", { class: "section-title" }, ["Preview"]));
+    previewWrap.appendChild(el("div", { class: "compat-result" }, [
+      el("div", {}, [`${spec.vcpu} vCPU · ${spec.memory_gb} GB RAM${spec.form_factor ? ` · ${spec.form_factor}` : ""}`]),
+      e.source === "onprem" ? el("div", {}, [`Power ~${(power/1000).toFixed(1)} kW (TDP base ${spec.power?.typical_w_base || 0}W + GPUs)`]) : null,
+      chassis.max_count
+        ? el("div", {}, [`GPU chassis: max ${chassis.max_count} · ${(chassis.supported_form_factors||[]).join("/")} · ${chassis.nvlink_topology}`])
+        : null,
+      gpus.length
+        ? el("div", { class: "ok" }, [`Pre-installed GPU: ${gpus.map(g => `${g.count}× ${g.model}`).join(", ")}`])
+        : null,
+      e.notes ? el("div", { style: { color: "var(--text2)", marginTop: "4px" } }, [`📝 ${e.notes}`]) : null,
+    ]));
+
+    // Compat check
+    const issues = checkNodeCompatibility(spec, state.catalog.gpuModels);
+    if (issues.length) {
+      const list = el("div", { class: "compat-result" });
+      for (const i of issues) list.appendChild(el("div", { class: i.sev === "err" ? "err" : "warn" }, [`${i.sev === "err" ? "⊗" : "▲"} ${i.msg}`]));
+      previewWrap.appendChild(list);
+    }
+  }
+
+  root.appendChild(el("div", { class: "field" }, [el("label", {}, ["Brand"]), brandSel]));
+  root.appendChild(modelWrap);
+  root.appendChild(previewWrap);
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [el("label", {}, ["Quantity"]), qtyInput]),
+    el("div", { class: "field" }, [el("label", {}, ["Site"]), siteSel]),
+  ]));
+  root.appendChild(el("div", { class: "field" }, [el("label", {}, ["Name (optional)"]), nameInput]));
+
+  rerenderModel();
+
+  const actions = el("div", { class: "modal-actions" }, [
+    el("button", { class: "btn-ghost", onclick: closeModal }, ["Cancel"]),
+    el("button", { class: "btn", onclick: () => {
+      if (!siteSel.value) { alert("Source에 맞는 사이트가 없습니다. 먼저 사이트를 추가하세요."); return; }
+      addNode({
+        catalogKey: selectedKey,
+        siteId: siteSel.value,
+        name: nameInput.value.trim() || null,
+        qty: parseInt(qtyInput.value) || 1,
+      });
+      closeModal();
+    } }, ["Add"]),
+  ]);
+  root.appendChild(actions);
+
+  openModal(root);
+}
+
+//============ Splash ============
+function renderSplash() {
+  const splash = $("#splash");
+  if (!state.project) splash.classList.remove("hidden");
+  else                splash.classList.add("hidden");
+}
+
+function bindSplash() {
+  let chosen = null;
+  for (const btn of document.querySelectorAll(".mode-option")) {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".mode-option").forEach(b => b.classList.remove("selected"));
+      btn.classList.add("selected");
+      chosen = btn.dataset.mode;
+      $("#btnSplashCreate").disabled = !chosen;
+    });
+  }
+  $("#btnSplashCreate").addEventListener("click", () => {
+    if (!chosen) return;
+    createProject(chosen, $("#splashName").value);
+  });
+  $("#btnSplashImport").addEventListener("click", () => $("#fileImport").click());
+}
+
+//============ Import / Export ============
+function exportProject() {
+  if (!state.project) return;
+  const blob = new Blob([JSON.stringify(state.project, null, 2)], { type: "application/json" });
+  const a = el("a", {
+    href: URL.createObjectURL(blob),
+    download: `${slug(state.project.name) || "vk8s-project"}.json`,
+  });
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 0);
+}
+function importProjectFromFile(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const obj = JSON.parse(reader.result);
+      if (!obj.version || !obj.mode) throw new Error("Not a vk8s project file");
+      state.project = obj;
+      state.ui.selectedKind = state.ui.selectedId = null;
+      emit(); saveSoon();
+    } catch (e) {
+      alert("Import 실패: " + e.message);
+    }
+  };
+  reader.readAsText(file);
+}
+
+//============ Findings strip toggle ============
+function bindFindings() {
+  const btn = $("#btnFindings");
+  const list = $("#findingsList");
+  btn.addEventListener("click", () => {
+    const open = list.style.display !== "none";
+    list.style.display = open ? "none" : "block";
+    btn.textContent = open ? "Findings ▾" : "Findings ▴";
+    document.getElementById("app").dataset.findingsExpanded = String(!open);
+  });
+}
+
+//============ Init ============
+async function init() {
+  // Bind chrome events
+  bindSplash();
+  bindFindings();
+  $("#btnNewProject").addEventListener("click", () => {
+    if (state.project && !confirm("현재 프로젝트를 닫고 새로 시작합니다. 계속?")) return;
+    state.project = null;
+    state.ui.selectedKind = state.ui.selectedId = null;
+    localStorage.removeItem(STORAGE_KEY);
+    emit();
+  });
+  $("#btnExport").addEventListener("click", exportProject);
+  $("#btnImport").addEventListener("click", () => $("#fileImport").click());
+  $("#fileImport").addEventListener("change", e => {
+    const file = e.target.files[0];
+    if (file) importProjectFromFile(file);
+    e.target.value = "";
+  });
+  // Modal background click closes
+  $("#modal").addEventListener("click", e => { if (e.target.id === "modal") closeModal(); });
+  // Keyboard
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape") closeModal();
+    if ((e.metaKey || e.ctrlKey) && e.key === "s") { e.preventDefault(); saveSoon(); }
+    if (e.key === "Delete" && state.ui.selectedId && document.activeElement.tagName !== "INPUT") {
+      deleteEntity(state.ui.selectedKind, state.ui.selectedId);
+    }
+  });
+
+  // Load catalog
+  try {
+    await loadCatalog();
+  } catch (e) {
+    alert("Catalog 로드 실패: " + e.message + "\n로컬 file:// 으로 열면 fetch 차단됩니다. 정적 서버로 실행하세요. (예: python3 -m http.server)");
+    console.error(e);
+    return;
+  }
+
+  // Restore project from localStorage
+  const saved = loadProject();
+  if (saved) state.project = saved;
+
+  // Subscribe + initial render
+  subscribe(renderAll);
+  subscribe(renderSplash);
+  emit();
+}
+
+init();
+</script>
+
+</body>
+</html>
