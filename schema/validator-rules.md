@@ -1,4 +1,8 @@
-# vk8s Validator Rules (v0.2)
+# vk8s Validator Rules (v0.3)
+
+> v0.3 변경: `node.cluster_role` (단일 enum) → `node.cluster_roles` (배열). 룰의 control-plane / worker / etcd 카운트는 모두 `roles.includes("...")` 로 계산. dev 단일노드 클러스터에서 한 노드가 control-plane+worker를 동시에 갖는 패턴 지원.
+
+
 
 검증 룰 카탈로그. 각 룰은 `id`, `severity`(`block` | `warn`), `scope`(검사 단위), 발동 조건, 메시지 템플릿을 가진다.
 

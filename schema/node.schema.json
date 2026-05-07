@@ -34,9 +34,12 @@
       "type": "string",
       "description": "이 노드가 속한 Site의 id"
     },
-    "cluster_role": {
-      "enum": ["control-plane", "worker", "etcd", "unassigned"],
-      "default": "unassigned"
+    "cluster_roles": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "enum": ["control-plane", "worker", "etcd"] },
+      "default": [],
+      "description": "이 노드가 클러스터에서 맡는 역할들. 빈 배열은 'unassigned'. control-plane+worker 겸용은 dev/단일노드 클러스터에서 일반적."
     },
     "labels": {
       "type": "object",

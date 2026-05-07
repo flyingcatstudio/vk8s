@@ -1,4 +1,4 @@
-# vk8s Schema (v0.2)
+# vk8s Schema (v0.3)
 
 vk8s 프로젝트의 데이터 모델 정의. JSON Schema 2020-12 기준.
 
@@ -73,6 +73,10 @@ Cluster 내 `namespaces[]`/`network_policies[]` 인라인. NetworkPolicy 별도 
 ### 8. Helm은 워크로드 단위
 Workload 1개 = chart 1개. Export 시 umbrella chart로 묶을지는 export 옵션.
 
+## v0.2 → v0.3 변경
+
+- `Node.cluster_role` (단일 enum) → `Node.cluster_roles` (배열). dev 단일노드 클러스터의 control-plane+worker 겸용 지원. 빈 배열 = unassigned.
+
 ## v0.1 → v0.2 변경
 
 - Cluster: `namespaces[]`, `network_policies[]` 추가
@@ -84,7 +88,7 @@ Workload 1개 = chart 1개. Export 시 umbrella chart로 묶을지는 export 옵
 
 ```json
 {
-  "version": "0.2",
+  "version": "0.3",
   "name": "ai-platform-2026",
   "mode": "hybrid",
   "sites": [
@@ -98,7 +102,7 @@ Workload 1개 = chart 1개. Export 시 umbrella chart로 묶을지는 export 옵
     {
       "id": "node-gpu-1", "source": "onprem", "brand": "Dell",
       "model": "PowerEdge-XE9680", "site_id": "idc-seoul-1",
-      "cluster_role": "worker",
+      "cluster_roles": ["worker"],
       "spec": {
         "vcpu": 112, "memory_gb": 2048, "form_factor": "6U",
         "power": { "psu_max_w": 10800, "typical_w_base": 2500, "psu_redundancy": "N+N" },

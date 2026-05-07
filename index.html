@@ -1020,7 +1020,7 @@
 //============================================================
 
 //============ Constants ============
-const SCHEMA_VERSION = "0.2";
+const SCHEMA_VERSION = "0.3";
 const STORAGE_KEY    = "vk8s.project.current";
 const CATALOG_FILES  = [
   "data/gpu-models.json",
@@ -1106,11 +1106,11 @@ const HELP = {
     body: "서버가 차지하는 랙 공간. 1U는 얇고 GPU 적게, 4U/6U/8U는 GPU 다수 장착 가능.",
     reco: "Web/API/일반 DB: 1U–2U. GPU 추론: 2U–4U. GPU 학습: 6U–8U.",
   },
-  "node.cluster_role": {
+  "node.cluster_roles": {
     cat: "노드",
-    title: "Cluster Role",
-    body: "k8s에서 이 노드가 맡는 역할. control-plane=두뇌, worker=실제 워크로드 실행, etcd=상태 저장.",
-    reco: "운영은 control-plane을 분리하는 게 안전. 개발/PoC는 control+worker 겸용도 무방.",
+    title: "Cluster Roles (다중 선택)",
+    body: "k8s에서 이 노드가 맡는 역할들. 여러 개 동시 선택 가능. control-plane=두뇌, worker=실제 워크로드 실행, etcd=상태 저장.",
+    reco: "운영: control-plane 전용 노드 분리(보안/안정성). 개발/단일노드: control-plane+worker 겸용 OK (k3s/minikube/kind 기본 패턴). worker 미선택 시 워크로드 스케줄 불가.",
   },
   "role.control-plane": {
     cat: "노드",
@@ -1132,8 +1132,9 @@ const HELP = {
   },
   "role.unassigned": {
     cat: "노드",
-    title: "Unassigned",
-    body: "아직 클러스터에 속하지 않은 상태. 클러스터에 추가하면 자동으로 worker가 됩니다.",
+    title: "Unassigned (역할 없음)",
+    body: "cluster_roles 가 빈 배열인 상태. 클러스터에 속해 있지 않거나, 속해 있어도 어떤 역할도 없는 (k8s에서 동작 안 하는) 상태.",
+    reco: "클러스터에 추가하면 자동으로 ['worker']가 됩니다. 의도적으로 비워두는 경우는 드뭅니다.",
   },
 
   // ───── GPU ─────
@@ -1523,12 +1524,29 @@ function saveSoon() {
     setTimeout(() => { if ($("#saveStatus").textContent === "saved") $("#saveStatus").textContent = ""; }, 1500);
   }, 600);
 }
+function migrateProject(p) {
+  if (!p || !p.version) return p;
+  if (p.version === "0.1" || p.version === "0.2") {
+    // 0.2 → 0.3: cluster_role (singular enum) → cluster_roles (array)
+    for (const n of p.nodes || []) {
+      if (n.cluster_roles == null) {
+        const r = n.cluster_role;
+        n.cluster_roles = (!r || r === "unassigned") ? [] : [r];
+      }
+      delete n.cluster_role;
+    }
+    p.version = "0.3";
+    console.log("Project migrated to v0.3");
+  }
+  return p;
+}
+
 function loadProject() {
   const raw = localStorage.getItem(STORAGE_KEY);
   if (!raw) return null;
   try {
     const p = JSON.parse(raw);
-    if (p && p.version) return p;
+    if (p && p.version) return migrateProject(p);
   } catch (e) { console.warn("Failed to load saved project", e); }
   return null;
 }
@@ -1598,7 +1616,7 @@ function addNode(seed) {
       model: tmpl.key,
       custom: false,
       site_id: site.id,
-      cluster_role: "unassigned",
+      cluster_roles: [],
       spec: JSON.parse(JSON.stringify(tmpl.spec)),
     };
     state.project.nodes.push(node);
@@ -1627,10 +1645,10 @@ function deleteEntity(kind, id) {
   } else if (kind === "cluster") {
     const c = (state.project.clusters || []).find(x => x.id === id);
     if (!c) return;
-    // unassign nodes from this cluster (set role back to unassigned)
+    // unassign nodes from this cluster (clear roles)
     for (const nid of c.node_ids || []) {
       const n = state.project.nodes.find(x => x.id === nid);
-      if (n) n.cluster_role = "unassigned";
+      if (n) n.cluster_roles = [];
     }
     state.project.clusters = state.project.clusters.filter(x => x.id !== id);
   } else if (kind === "workload") {
@@ -1687,8 +1705,10 @@ function assignNodeToCluster(nodeId, clusterId, defaultRole, silent = false) {
     if (other.id !== clusterId) other.node_ids = (other.node_ids || []).filter(nid => nid !== nodeId);
   }
   if (!c.node_ids.includes(nodeId)) c.node_ids.push(nodeId);
-  if (n.cluster_role === "unassigned" || defaultRole) {
-    n.cluster_role = defaultRole || "worker";
+  if (!Array.isArray(n.cluster_roles)) n.cluster_roles = [];
+  // If node has no roles yet, default to ["worker"] (or specified defaultRole)
+  if (n.cluster_roles.length === 0) {
+    n.cluster_roles = [defaultRole || "worker"];
   }
   if (!silent) { emit(); saveSoon(); }
 }
@@ -1698,7 +1718,17 @@ function removeNodeFromCluster(nodeId, clusterId) {
   const n = state.project.nodes.find(x => x.id === nodeId);
   if (!c) return;
   c.node_ids = (c.node_ids || []).filter(nid => nid !== nodeId);
-  if (n) n.cluster_role = "unassigned";
+  if (n) n.cluster_roles = [];
+  emit(); saveSoon();
+}
+
+function setNodeRoleEnabled(nodeId, role, enabled) {
+  const n = state.project.nodes.find(x => x.id === nodeId);
+  if (!n) return;
+  if (!Array.isArray(n.cluster_roles)) n.cluster_roles = [];
+  const has = n.cluster_roles.includes(role);
+  if (enabled && !has) n.cluster_roles.push(role);
+  else if (!enabled && has) n.cluster_roles = n.cluster_roles.filter(r => r !== role);
   emit(); saveSoon();
 }
 
@@ -1894,7 +1924,8 @@ function runValidator(project) {
   for (const c of project.clusters || []) {
     const nodes = (c.node_ids || []).map(id => project.nodes.find(n => n.id === id)).filter(Boolean);
     if (!nodes.length) continue;
-    const cp = nodes.filter(n => n.cluster_role === "control-plane").length;
+    const roleOf = n => Array.isArray(n.cluster_roles) ? n.cluster_roles : [];
+    const cp = nodes.filter(n => roleOf(n).includes("control-plane")).length;
     if (cp === 0) {
       F("CLUSTER_NO_CONTROL_PLANE", "error",
         `${c.name}: control plane 노드 없음`, { kind: "cluster", id: c.id });
@@ -1926,9 +1957,11 @@ function runValidator(project) {
     }
 
     // 5. Workload checks (per cluster)
+    // Worker capacity: nodes with 'worker' role (so control-plane+worker dual-role contributes)
     const wls = c.workloads || [];
-    const totalCpu = nodes.filter(n => n.cluster_role !== "control-plane").reduce((a, n) => a + (n.spec?.vcpu || 0), 0);
-    const totalMem = nodes.filter(n => n.cluster_role !== "control-plane").reduce((a, n) => a + (n.spec?.memory_gb || 0), 0);
+    const workerNodes = nodes.filter(n => roleOf(n).includes("worker"));
+    const totalCpu = workerNodes.reduce((a, n) => a + (n.spec?.vcpu || 0), 0);
+    const totalMem = workerNodes.reduce((a, n) => a + (n.spec?.memory_gb || 0), 0);
     const wlCpu = wls.reduce((a, w) => a + (w.resources?.requests?.cpu || 0) * (w.replicas || 1), 0);
     const wlMem = wls.reduce((a, w) => a + (w.resources?.requests?.memory_gb || 0) * (w.replicas || 1), 0);
     if (wls.length && totalCpu > 0 && wlCpu > totalCpu) {
@@ -1940,12 +1973,18 @@ function runValidator(project) {
         `${c.name}: 워크로드 RAM ${wlMem.toFixed(0)}GB > 가용 ${totalMem}GB`, { kind: "cluster", id: c.id });
     }
 
-    // GPU workload but no GPU node
+    // No worker capacity at all but workloads exist
+    if (wls.length && workerNodes.length === 0) {
+      F("CLUSTER_NO_WORKER", "error",
+        `${c.name}: worker 역할 노드가 없음 — 워크로드 스케줄 불가`, { kind: "cluster", id: c.id }, "node.cluster_roles");
+    }
+
+    // GPU workload but no GPU node (count only worker-capable GPUs)
     for (const w of wls) {
       const gReq = w.resources?.requests?.gpu;
       if (!gReq) continue;
       const totalNeeded = (gReq.count || 0) * (w.replicas || 1);
-      const totalAvail = nodes.reduce((a, n) =>
+      const totalAvail = workerNodes.reduce((a, n) =>
         a + (n.spec?.gpu || []).reduce((aa, g) => aa + (g.count || 0), 0), 0);
       if (totalNeeded > 0 && totalAvail === 0) {
         F("WORKLOAD_GPU_NO_NODE", "error",
@@ -1956,10 +1995,10 @@ function runValidator(project) {
           `${w.name}: GPU ${totalNeeded}장 요구, ${totalAvail}장 가용`, { kind: "workload", id: w.id });
       }
       if (gReq.model) {
-        const have = nodes.some(n => (n.spec?.gpu || []).some(g => g.model === gReq.model));
+        const have = workerNodes.some(n => (n.spec?.gpu || []).some(g => g.model === gReq.model));
         if (!have) {
           F("WORKLOAD_GPU_MODEL_NOT_AVAILABLE", "error",
-            `${w.name}: ${gReq.model} 요구, 클러스터에 없음`, { kind: "workload", id: w.id });
+            `${w.name}: ${gReq.model} 요구, worker 노드에 없음`, { kind: "workload", id: w.id });
         }
       }
     }
@@ -2126,7 +2165,9 @@ function renderTree() {
     const nodes = (s.node_ids || []).map(id => p.nodes.find(n => n.id === id)).filter(Boolean);
     for (const n of nodes) {
       const cluster = getNodeCluster(n.id);
-      const meta = cluster ? cluster.name : (n.spec?.form_factor || "");
+      const roles = Array.isArray(n.cluster_roles) ? n.cluster_roles : [];
+      const roleAbbr = roles.map(r => r === "control-plane" ? "cp" : r === "worker" ? "w" : r).join("+");
+      const meta = cluster ? `${cluster.name}${roleAbbr ? ` ${roleAbbr}` : ""}` : (n.spec?.form_factor || "");
       sitesSec.appendChild(el("div", {
         class: "tree-item child" + (state.ui.selectedKind === "node" && state.ui.selectedId === n.id ? " selected" : ""),
         onclick: () => selectEntity("node", n.id),
@@ -2356,15 +2397,48 @@ function renderNodeInspector(root, id) {
     ]),
   ]));
 
-  // Cluster role (only meaningful when assigned)
-  root.appendChild(el("div", { class: "field" }, [
-    lbl("Cluster Role", "node.cluster_role"),
-    el("select", {
-      disabled: myCluster ? null : "",
-      onchange: e => updateNodeField(id, "cluster_role", e.target.value),
-    }, ["unassigned", "control-plane", "worker", "etcd"].map(r =>
-      el("option", { value: r, selected: r === n.cluster_role ? "" : null }, [r]))),
-  ]));
+  // Cluster roles (multi-select, only meaningful when assigned)
+  const roles = Array.isArray(n.cluster_roles) ? n.cluster_roles : [];
+  const rolesField = el("div", { class: "field" }, [
+    lbl("Cluster Roles", "node.cluster_roles"),
+    el("div", {
+      style: { display: "flex", flexWrap: "wrap", gap: "8px", padding: "6px 0" },
+    }, ["control-plane", "worker", "etcd"].map(r => {
+      const checked = roles.includes(r);
+      return el("label", {
+        style: {
+          display: "inline-flex", alignItems: "center", gap: "6px",
+          padding: "4px 10px", borderRadius: "5px",
+          background: checked ? "var(--accent-glow)" : "var(--surface2)",
+          border: "1px solid " + (checked ? "var(--accent)" : "var(--border)"),
+          fontSize: "12px", textTransform: "none", letterSpacing: 0,
+          color: "var(--text)", cursor: myCluster ? "pointer" : "not-allowed",
+          margin: 0, opacity: myCluster ? 1 : 0.5,
+        },
+      }, [
+        el("input", {
+          type: "checkbox",
+          checked: checked ? "" : null,
+          disabled: myCluster ? null : "",
+          onchange: e => setNodeRoleEnabled(id, r, e.target.checked),
+        }),
+        r,
+        helpIcon("role." + r),
+      ]);
+    })),
+  ]);
+  root.appendChild(rolesField);
+  if (!myCluster) {
+    root.appendChild(el("div", { class: "empty-hint" }, ["클러스터 할당 후 역할 지정 가능"]));
+  } else if (roles.length === 0) {
+    root.appendChild(el("div", { style: { fontSize: "11px", color: "var(--yellow)", padding: "4px 0" } }, [
+      "▲ 역할이 없습니다. 클러스터에 속하지만 어떤 일도 안 합니다.",
+    ]));
+  } else if (roles.length > 1) {
+    root.appendChild(el("div", { style: { fontSize: "11px", color: "var(--text2)", padding: "4px 0", fontStyle: "italic" } }, [
+      `💡 ${roles.join(" + ")} 겸용 — dev/단일노드 클러스터에서 일반적인 패턴`,
+    ]));
+  }
 
   // Spec
   root.appendChild(el("div", { class: "section-title" }, ["Spec"]));
@@ -2521,14 +2595,35 @@ function renderClusterInspector(root, id) {
   } else {
     const list = el("div", { class: "row-list" });
     for (const n of assignedNodes) {
+      const roles = Array.isArray(n.cluster_roles) ? n.cluster_roles : [];
+      const roleChips = el("div", { style: { display: "flex", gap: "4px" } }, ["control-plane", "worker", "etcd"].map(r => {
+        const checked = roles.includes(r);
+        const label = r === "control-plane" ? "cp" : r === "worker" ? "w" : "etcd";
+        return el("label", {
+          title: r,
+          style: {
+            display: "inline-flex", alignItems: "center", gap: "3px",
+            padding: "1px 5px", borderRadius: "3px",
+            background: checked ? "var(--accent-glow)" : "var(--surface3)",
+            border: "1px solid " + (checked ? "var(--accent)" : "var(--border)"),
+            fontSize: "10px", color: checked ? "var(--accent)" : "var(--text2)",
+            fontFamily: "JetBrains Mono", cursor: "pointer", margin: 0,
+            textTransform: "none", letterSpacing: 0,
+          },
+        }, [
+          el("input", {
+            type: "checkbox",
+            style: { width: "10px", height: "10px", margin: 0 },
+            checked: checked ? "" : null,
+            onchange: e => setNodeRoleEnabled(n.id, r, e.target.checked),
+          }),
+          label,
+        ]);
+      }));
       list.appendChild(el("div", { class: "row" }, [
         el("span", { class: "icon" }, ["▣"]),
         el("span", { class: "name", style: { cursor: "pointer" }, onclick: () => selectEntity("node", n.id) }, [n.name]),
-        el("select", {
-          class: "role",
-          onchange: e => updateNodeField(n.id, "cluster_role", e.target.value),
-        }, ["control-plane", "worker", "etcd"].map(r =>
-          el("option", { value: r, selected: r === n.cluster_role ? "" : null }, [r]))),
+        roleChips,
         el("button", { class: "x", title: "remove", onclick: () => removeNodeFromCluster(n.id, id) }, ["✕"]),
       ]));
     }
@@ -2599,7 +2694,7 @@ function renderClusterInspector(root, id) {
   }, ["＋ Add Workload"]));
 
   // Findings preview (basic checks)
-  const cpCount = assignedNodes.filter(n => n.cluster_role === "control-plane").length;
+  const cpCount = assignedNodes.filter(n => (n.cluster_roles || []).includes("control-plane")).length;
   const issues = [];
   if (assignedNodes.length && cpCount === 0) issues.push({ sev: "err", msg: "control plane 노드 없음" });
   if (c.ha_control_plane && cpCount > 0 && cpCount < 3) issues.push({ sev: "err", msg: `HA control plane은 ≥3 필요 (현재 ${cpCount})` });
@@ -2931,10 +3026,13 @@ function renderTopology() {
           ]) : null,
           (() => {
             const cl = getNodeCluster(n.id);
-            return cl ? el("div", { class: "cluster-badge" }, [
+            if (!cl) return null;
+            const roles = Array.isArray(n.cluster_roles) ? n.cluster_roles : [];
+            const roleStr = roles.map(r => r === "control-plane" ? "cp" : r).join(" + ") || "no-role";
+            return el("div", { class: "cluster-badge" }, [
               `⎈ ${cl.name}`,
-              el("span", { class: "role" }, [n.cluster_role]),
-            ]) : null;
+              el("span", { class: "role" }, [roleStr]),
+            ]);
           })(),
         ]));
       }
@@ -3424,7 +3522,7 @@ function importProjectFromFile(file) {
     try {
       const obj = JSON.parse(reader.result);
       if (!obj.version || !obj.mode) throw new Error("Not a vk8s project file");
-      state.project = obj;
+      state.project = migrateProject(obj);
       state.ui.selectedKind = state.ui.selectedId = null;
       emit(); saveSoon();
     } catch (e) {
