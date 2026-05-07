@@ -1020,7 +1020,7 @@
 //============================================================
 
 //============ Constants ============
-const SCHEMA_VERSION = "0.5";
+const SCHEMA_VERSION = "0.6";
 const STORAGE_KEY    = "vk8s.project.current";
 const CATALOG_FILES  = [
   "data/gpu-models.json",
@@ -1437,6 +1437,102 @@ const HELP = {
     body: "총 저장 용량. PVC가 이 풀에서 빌려감.",
   },
 
+  // ───── Network Devices ─────
+  "netdev.kind": {
+    cat: "네트워크 장비",
+    title: "Network Device Kind",
+    body: "switch=L2/L3 스위치, router=라우터, firewall=stateful 방화벽, waf=L7 웹 방화벽, cdn=CDN, vpn=VPN 게이트웨이, dns=DNS 서버, ddos=DDoS 방어.",
+    reco: "IDC: switch + firewall + (router) 기본. Cloud: WAF + DDoS + DNS는 cloud 서비스 활용 (Cloudflare/AWS Shield).",
+  },
+  "netdev.throughput": {
+    cat: "네트워크 장비",
+    title: "Throughput (Gbps)",
+    body: "장비의 처리 대역폭. firewall은 inspection 켜면 실제 처리량 떨어짐.",
+    reco: "TOR 스위치: 100Gbps+. 방화벽: 10-40Gbps. WAF: 트래픽에 비례.",
+  },
+
+  // ───── External Services ─────
+  "extsvc.kind": {
+    cat: "외부 서비스",
+    title: "External Service Kind",
+    body: "관리형 외부 자원. database (RDS/Cloud SQL), cache (ElastiCache), queue (SQS/Kafka MSK), registry (ECR/Harbor), backup, monitoring, logging, secret_store, identity, object_store.",
+    reco: "워크로드의 stateful 부분을 외부로 빼는 게 일반적. cluster 안에서 DB 운영하는 것보다 안정적.",
+  },
+  "extsvc.engine": {
+    cat: "외부 서비스",
+    title: "Engine",
+    body: "구체 엔진 — postgres / mysql / redis / kafka / harbor / vault 등.",
+  },
+  "extsvc.endpoint": {
+    cat: "외부 서비스",
+    title: "Endpoint",
+    body: "워크로드가 접속하는 주소. 예: prod-db.cluster-abc.us-east-1.rds.amazonaws.com:5432",
+  },
+  "extsvc.capacity": {
+    cat: "외부 서비스",
+    title: "Capacity (GB)",
+    body: "할당 용량. RDS는 storage 크기, 캐시는 memory 크기.",
+  },
+
+  // ───── Site Link ─────
+  "sitelink.kind": {
+    cat: "사이트 연결",
+    title: "Site Link Kind",
+    body: "vpn=site-to-site VPN(IPSec/Wireguard), direct_connect=AWS DX/Cloud Interconnect (전용 사설 회선), internet=공용, leased=전용회선(MPLS 등), private_link=AWS PrivateLink/GCP PSC.",
+    reco: "production 트래픽: direct_connect 또는 leased. 백업/관리: VPN. private_link는 특정 SaaS 호출.",
+  },
+  "sitelink.bandwidth": {
+    cat: "사이트 연결",
+    title: "Bandwidth (Gbps)",
+    body: "최대 처리량. VPN은 인터넷 회선과 IPSec 오버헤드의 한계.",
+  },
+  "sitelink.latency": {
+    cat: "사이트 연결",
+    title: "Latency (ms)",
+    body: "왕복 지연시간. 사이트 거리·회선 종류에 따라 다름. 같은 region 내 직결: 1-5ms. 다른 region: 50-200ms.",
+  },
+
+  // ───── Node purpose / extras ─────
+  "node.purpose": {
+    cat: "노드",
+    title: "Node Purpose",
+    body: "노드의 운영 목적. compute=일반 워크로드, bastion=SSH 점프 호스트(외부 접근 단일 진입점), storage=Ceph/Rook 등 SDS 전용, edge=CDN 엣지 / 5G MEC 등.",
+    reco: "대부분 compute. 보안 정책상 SSH 접근 단일 노드 만들 때 bastion 지정.",
+  },
+  "workload.pvc": {
+    cat: "워크로드",
+    title: "Persistent Volume Claim",
+    body: "Pod이 마운트할 영구 스토리지. size_gb, storage_class (cluster.addons.csi 또는 외부 storage 참조), access_mode (RWO=한 Pod, ROX=여러 Pod 읽기, RWX=여러 Pod 읽기/쓰기).",
+    reco: "DB는 RWO. 공유 파일 (이미지/문서)은 RWX. CI 캐시/임시는 RWO.",
+  },
+  "workload.depends_on": {
+    cat: "워크로드",
+    title: "Workload Dependencies",
+    body: "이 워크로드가 호출하는 다른 워크로드 (downstream). 의존 그래프와 트래픽 전파, NetworkPolicy 검증, 병목 분석에 사용.",
+    reco: "fanout_pct: 들어온 요청 중 몇 %가 호출. calls/req: 한 요청당 호출 횟수 (N+1 문제 등). avg_call_ms: 평균 응답시간.",
+  },
+  "ns.quota.cpu": {
+    cat: "기타",
+    title: "Namespace CPU Quota",
+    body: "이 namespace의 모든 Pod CPU request 합 한계.",
+    reco: "팀별/환경별 배분 시 사용. quota 초과 시 Pod 생성 거부.",
+  },
+  "ns.quota.memory": {
+    cat: "기타",
+    title: "Namespace Memory Quota (GB)",
+    body: "이 namespace의 모든 Pod 메모리 request 합 한계.",
+  },
+  "ns.quota.gpu": {
+    cat: "기타",
+    title: "Namespace GPU Quota",
+    body: "이 namespace의 GPU 사용 한계. 공유 GPU 클러스터에서 팀별 분리.",
+  },
+  "ns.quota.pods": {
+    cat: "기타",
+    title: "Namespace Max Pods",
+    body: "이 namespace 내 동시 Pod 개수 한계.",
+  },
+
   // ───── 워크로드 ─────
   "workload.category": {
     cat: "워크로드",
@@ -1796,13 +1892,26 @@ function migrateProject(p) {
     console.log("Project migrated to v0.4");
   }
   if (p.version === "0.4") {
-    // 0.4 → 0.5: optional Site.l4_balancers and Site.storages (just bump)
+    // 0.4 → 0.5: optional Site.l4_balancers and Site.storages
     for (const s of p.sites || []) {
       if (!Array.isArray(s.l4_balancers)) s.l4_balancers = [];
       if (!Array.isArray(s.storages)) s.storages = [];
     }
     p.version = "0.5";
     console.log("Project migrated to v0.5");
+  }
+  if (p.version === "0.5") {
+    // 0.5 → 0.6: network_devices, external_services, site_links, Node.purpose
+    for (const s of p.sites || []) {
+      if (!Array.isArray(s.network_devices)) s.network_devices = [];
+      if (!Array.isArray(s.external_services)) s.external_services = [];
+    }
+    for (const n of p.nodes || []) {
+      if (!n.purpose) n.purpose = "compute";
+    }
+    if (!Array.isArray(p.site_links)) p.site_links = [];
+    p.version = "0.6";
+    console.log("Project migrated to v0.6");
   }
   return p;
 }
@@ -1860,6 +1969,8 @@ function addSite(seed, silent = false) {
   }
   site.l4_balancers = [];
   site.storages = [];
+  site.network_devices = [];
+  site.external_services = [];
   state.project.sites.push(site);
   if (!silent) { selectEntity("site", id); emit(); saveSoon(); }
   return site;
@@ -1885,6 +1996,7 @@ function addNode(seed) {
       custom: false,
       site_id: site.id,
       cluster_roles: [],
+      purpose: "compute",
       spec: JSON.parse(JSON.stringify(tmpl.spec)),
     };
     state.project.nodes.push(node);
@@ -1927,6 +2039,15 @@ function deleteEntity(kind, id) {
     return;
   } else if (kind === "storage") {
     deleteStorage(id);
+    return;
+  } else if (kind === "netdev") {
+    deleteNetworkDevice(id);
+    return;
+  } else if (kind === "extsvc") {
+    deleteExternalService(id);
+    return;
+  } else if (kind === "sitelink") {
+    deleteSiteLink(id);
     return;
   }
   if (state.ui.selectedId === id) state.ui.selectedId = null;
@@ -2392,6 +2513,141 @@ function updateStorageField(id, path, value) {
   if (!found) return;
   const parts = path.split(".");
   let obj = found.storage;
+  while (parts.length > 1) {
+    const p = parts.shift();
+    if (obj[p] == null) obj[p] = {};
+    obj = obj[p];
+  }
+  obj[parts[0]] = value;
+  emit(); saveSoon();
+}
+
+//============ Network Device actions ============
+function addNetworkDevice(siteId, seed) {
+  const s = state.project.sites.find(x => x.id === siteId);
+  if (!s) return;
+  if (!s.network_devices) s.network_devices = [];
+  const id = slug(seed.name) + "-" + uid();
+  s.network_devices.push({
+    id, name: seed.name, kind: seed.kind || "switch",
+    vendor: seed.vendor || "", model: seed.model || "",
+    ip: seed.ip || "", vip: seed.vip || "",
+    throughput_gbps: seed.throughput_gbps || 0,
+    ha: !!seed.ha, zones: seed.zones || [], notes: seed.notes || "",
+  });
+  selectEntity("netdev", id);
+  emit(); saveSoon();
+}
+function findNetworkDevice(id) {
+  for (const s of state.project.sites || []) {
+    const d = (s.network_devices || []).find(x => x.id === id);
+    if (d) return { site: s, device: d };
+  }
+  return null;
+}
+function deleteNetworkDevice(id) {
+  for (const s of state.project.sites || []) {
+    if (!s.network_devices) continue;
+    const idx = s.network_devices.findIndex(d => d.id === id);
+    if (idx >= 0) { s.network_devices.splice(idx, 1); break; }
+  }
+  if (state.ui.selectedId === id) state.ui.selectedId = null;
+  emit(); saveSoon();
+}
+function updateNetworkDeviceField(id, path, value) {
+  const found = findNetworkDevice(id);
+  if (!found) return;
+  const parts = path.split(".");
+  let obj = found.device;
+  while (parts.length > 1) {
+    const p = parts.shift();
+    if (obj[p] == null) obj[p] = {};
+    obj = obj[p];
+  }
+  obj[parts[0]] = value;
+  emit(); saveSoon();
+}
+
+//============ External Service actions ============
+function addExternalService(siteId, seed) {
+  const s = state.project.sites.find(x => x.id === siteId);
+  if (!s) return;
+  if (!s.external_services) s.external_services = [];
+  const id = slug(seed.name) + "-" + uid();
+  s.external_services.push({
+    id, name: seed.name, kind: seed.kind || "database",
+    engine: seed.engine || "", vendor: seed.vendor || "",
+    version: seed.version || "", endpoint: seed.endpoint || "",
+    capacity_gb: seed.capacity_gb || 0,
+    region: seed.region || "",
+    target_cluster_ids: seed.target_cluster_ids || [],
+    notes: seed.notes || "",
+  });
+  selectEntity("extsvc", id);
+  emit(); saveSoon();
+}
+function findExternalService(id) {
+  for (const s of state.project.sites || []) {
+    const e = (s.external_services || []).find(x => x.id === id);
+    if (e) return { site: s, service: e };
+  }
+  return null;
+}
+function deleteExternalService(id) {
+  for (const s of state.project.sites || []) {
+    if (!s.external_services) continue;
+    const idx = s.external_services.findIndex(d => d.id === id);
+    if (idx >= 0) { s.external_services.splice(idx, 1); break; }
+  }
+  if (state.ui.selectedId === id) state.ui.selectedId = null;
+  emit(); saveSoon();
+}
+function updateExternalServiceField(id, path, value) {
+  const found = findExternalService(id);
+  if (!found) return;
+  const parts = path.split(".");
+  let obj = found.service;
+  while (parts.length > 1) {
+    const p = parts.shift();
+    if (obj[p] == null) obj[p] = {};
+    obj = obj[p];
+  }
+  obj[parts[0]] = value;
+  emit(); saveSoon();
+}
+
+//============ Site Link actions ============
+function addSiteLink(seed) {
+  if (!state.project) return;
+  if (!state.project.site_links) state.project.site_links = [];
+  const id = slug(seed.name || `${seed.from_site_id}-${seed.to_site_id}`) + "-" + uid();
+  state.project.site_links.push({
+    id, name: seed.name || `${seed.kind}-link`,
+    from_site_id: seed.from_site_id,
+    to_site_id: seed.to_site_id,
+    kind: seed.kind || "vpn",
+    bandwidth_gbps: seed.bandwidth_gbps || 1,
+    latency_ms: seed.latency_ms || 10,
+    encrypted: seed.encrypted !== false,
+    notes: seed.notes || "",
+  });
+  selectEntity("sitelink", id);
+  emit(); saveSoon();
+}
+function findSiteLink(id) {
+  return (state.project?.site_links || []).find(l => l.id === id);
+}
+function deleteSiteLink(id) {
+  if (!state.project?.site_links) return;
+  state.project.site_links = state.project.site_links.filter(l => l.id !== id);
+  if (state.ui.selectedId === id) state.ui.selectedId = null;
+  emit(); saveSoon();
+}
+function updateSiteLinkField(id, path, value) {
+  const link = findSiteLink(id);
+  if (!link) return;
+  const parts = path.split(".");
+  let obj = link;
   while (parts.length > 1) {
     const p = parts.shift();
     if (obj[p] == null) obj[p] = {};
@@ -2999,8 +3255,61 @@ function renderTree() {
         el("span", { class: "meta" }, [st.kind || ""]),
       ]));
     }
+    // Network devices
+    const ndIcon = { switch: "⇄", router: "⊞", firewall: "🛡", waf: "🛡", cdn: "🌍", vpn: "🔐", dns: "🌐", ddos: "⚠" };
+    for (const d of (s.network_devices || [])) {
+      sitesSec.appendChild(el("div", {
+        class: "tree-item child" + (state.ui.selectedKind === "netdev" && state.ui.selectedId === d.id ? " selected" : ""),
+        onclick: () => selectEntity("netdev", d.id),
+      }, [
+        el("span", { class: "icon" }, [ndIcon[d.kind] || "▢"]),
+        el("span", { class: "label" }, [d.name]),
+        el("span", { class: "meta" }, [d.kind || ""]),
+      ]));
+    }
+    // External services
+    const extIcon = { database: "🗄", cache: "⚡", queue: "📨", registry: "📦", backup: "💼", monitoring: "📊", logging: "📝", secret_store: "🔑", identity: "👤", object_store: "🪣", custom: "❓" };
+    for (const e of (s.external_services || [])) {
+      sitesSec.appendChild(el("div", {
+        class: "tree-item child" + (state.ui.selectedKind === "extsvc" && state.ui.selectedId === e.id ? " selected" : ""),
+        onclick: () => selectEntity("extsvc", e.id),
+      }, [
+        el("span", { class: "icon" }, [extIcon[e.kind] || "❓"]),
+        el("span", { class: "label" }, [e.name]),
+        el("span", { class: "meta" }, [e.kind || ""]),
+      ]));
+    }
   }
   root.appendChild(sitesSec);
+
+  // Site Links (project-level)
+  const links = p.site_links || [];
+  if (links.length || (p.sites?.length || 0) > 1) {
+    const linksSec = el("div", { class: "tree-section" });
+    linksSec.appendChild(el("div", { class: "tree-section-header" }, [
+      "Site Links ", el("span", { class: "count" }, [`(${links.length})`]),
+    ]));
+    for (const link of links) {
+      const fromSite = (p.sites || []).find(s => s.id === link.from_site_id);
+      const toSite = (p.sites || []).find(s => s.id === link.to_site_id);
+      linksSec.appendChild(el("div", {
+        class: "tree-item" + (state.ui.selectedKind === "sitelink" && state.ui.selectedId === link.id ? " selected" : ""),
+        onclick: () => selectEntity("sitelink", link.id),
+      }, [
+        el("span", { class: "icon" }, ["⇆"]),
+        el("span", { class: "label" }, [link.name || `${fromSite?.name || "?"}→${toSite?.name || "?"}`]),
+        el("span", { class: "meta" }, [link.kind]),
+      ]));
+    }
+    if ((p.sites?.length || 0) > 1) {
+      linksSec.appendChild(el("button", {
+        class: "add-btn",
+        style: { width: "calc(100% - 16px)", margin: "4px 8px 0" },
+        onclick: openAddSiteLink,
+      }, ["＋ Add Site Link"]));
+    }
+    root.appendChild(linksSec);
+  }
 
   // Clusters section
   const clusters = p.clusters || [];
@@ -3060,6 +3369,9 @@ function renderInspector() {
   else if (k === "workload") renderWorkloadInspector(root, id);
   else if (k === "l4") renderL4Inspector(root, id);
   else if (k === "storage") renderStorageInspector(root, id);
+  else if (k === "netdev") renderNetworkDeviceInspector(root, id);
+  else if (k === "extsvc") renderExternalServiceInspector(root, id);
+  else if (k === "sitelink") renderSiteLinkInspector(root, id);
 }
 
 function renderSiteInspector(root, id) {
@@ -3211,6 +3523,52 @@ function renderSiteInspector(root, id) {
     class: "add-btn", style: { width: "100%", marginTop: "6px" },
     onclick: () => openAddStorage(id),
   }, ["＋ Add Storage"]));
+
+  // Network Devices
+  const ndIcon = { switch: "⇄", router: "⊞", firewall: "🛡", waf: "🛡", cdn: "🌍", vpn: "🔐", dns: "🌐", ddos: "⚠" };
+  const nds = s.network_devices || [];
+  root.appendChild(el("div", { class: "section-title" }, [`Network Devices (${nds.length})`]));
+  if (!nds.length) {
+    root.appendChild(el("div", { class: "empty-hint" }, ["네트워크 장비 없음 — 스위치/방화벽/WAF/CDN/VPN/DNS"]));
+  } else {
+    for (const d of nds) {
+      root.appendChild(el("div", {
+        class: "tree-item",
+        onclick: () => selectEntity("netdev", d.id),
+      }, [
+        el("span", { class: "icon" }, [ndIcon[d.kind] || "▢"]),
+        el("span", { class: "label" }, [d.name]),
+        el("span", { class: "meta" }, [`${d.kind}${d.vendor ? ` · ${d.vendor}` : ""}`]),
+      ]));
+    }
+  }
+  root.appendChild(el("button", {
+    class: "add-btn", style: { width: "100%", marginTop: "6px" },
+    onclick: () => openAddNetworkDevice(id),
+  }, ["＋ Add Network Device"]));
+
+  // External Services
+  const extIcon = { database: "🗄", cache: "⚡", queue: "📨", registry: "📦", backup: "💼", monitoring: "📊", logging: "📝", secret_store: "🔑", identity: "👤", object_store: "🪣", custom: "❓" };
+  const exts = s.external_services || [];
+  root.appendChild(el("div", { class: "section-title" }, [`External Services (${exts.length})`]));
+  if (!exts.length) {
+    root.appendChild(el("div", { class: "empty-hint" }, ["외부 서비스 없음 — 관리형 DB/Cache/Queue/Registry 등"]));
+  } else {
+    for (const e of exts) {
+      root.appendChild(el("div", {
+        class: "tree-item",
+        onclick: () => selectEntity("extsvc", e.id),
+      }, [
+        el("span", { class: "icon" }, [extIcon[e.kind] || "❓"]),
+        el("span", { class: "label" }, [e.name]),
+        el("span", { class: "meta" }, [`${e.kind}${e.engine ? `/${e.engine}` : ""}`]),
+      ]));
+    }
+  }
+  root.appendChild(el("button", {
+    class: "add-btn", style: { width: "100%", marginTop: "6px" },
+    onclick: () => openAddExternalService(id),
+  }, ["＋ Add External Service"]));
 }
 
 function makeBarLine(label, valueText, pct) {
@@ -3273,6 +3631,15 @@ function renderNodeInspector(root, id) {
     }, siteOpts),
   ]));
 
+  // Purpose
+  root.appendChild(el("div", { class: "field" }, [
+    lbl("Purpose", "node.purpose"),
+    el("select", {
+      onchange: e => updateNodeField(id, "purpose", e.target.value),
+    }, ["compute", "bastion", "storage", "edge"].map(p =>
+      el("option", { value: p, selected: p === (n.purpose || "compute") ? "" : null }, [p]))),
+  ]));
+
   // Network IP
   const ipVal = n.network?.ip || "";
   root.appendChild(el("div", { class: "field" }, [
@@ -3284,6 +3651,83 @@ function renderNodeInspector(root, id) {
       oninput: e => updateNodeField(id, "network.ip", e.target.value),
     }),
   ]));
+
+  // Network interfaces (multi-NIC)
+  const ifaces = n.network?.interfaces || [];
+  root.appendChild(el("div", { class: "section-title" }, [`Network Interfaces (${ifaces.length})`]));
+  for (let i = 0; i < ifaces.length; i++) {
+    const ifc = ifaces[i];
+    root.appendChild(el("div", {
+      style: { background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: "5px", padding: "8px 10px", marginBottom: "6px" },
+    }, [
+      el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 70px auto", gap: "6px", alignItems: "end" } }, [
+        el("div", { class: "field", style: { margin: 0 } }, [
+          el("label", { style: { fontSize: "10px" } }, ["name"]),
+          el("input", {
+            "data-focus-key": `node.${id}.iface.${i}.name`,
+            style: { padding: "4px 6px", fontSize: "11px" },
+            value: ifc.name || "",
+            oninput: e => {
+              const ns = [...ifaces]; ns[i] = { ...ns[i], name: e.target.value };
+              updateNodeField(id, "network.interfaces", ns);
+            },
+          }),
+        ]),
+        el("div", { class: "field", style: { margin: 0 } }, [
+          el("label", { style: { fontSize: "10px" } }, ["IP"]),
+          el("input", {
+            "data-focus-key": `node.${id}.iface.${i}.ip`,
+            style: { padding: "4px 6px", fontSize: "11px" },
+            value: ifc.ip || "",
+            oninput: e => {
+              const ns = [...ifaces]; ns[i] = { ...ns[i], ip: e.target.value };
+              updateNodeField(id, "network.interfaces", ns);
+            },
+          }),
+        ]),
+        el("div", { class: "field", style: { margin: 0 } }, [
+          el("label", { style: { fontSize: "10px" } }, ["VLAN"]),
+          el("input", {
+            "data-focus-key": `node.${id}.iface.${i}.vlan`,
+            type: "number", style: { padding: "4px 6px", fontSize: "11px" },
+            value: ifc.vlan || "",
+            oninput: e => {
+              const ns = [...ifaces]; ns[i] = { ...ns[i], vlan: parseInt(e.target.value) || undefined };
+              updateNodeField(id, "network.interfaces", ns);
+            },
+          }),
+        ]),
+        el("button", {
+          class: "x", style: { padding: "4px 8px" },
+          onclick: () => {
+            const ns = ifaces.filter((_, j) => j !== i);
+            updateNodeField(id, "network.interfaces", ns);
+          },
+        }, ["✕"]),
+      ]),
+      el("div", { class: "field", style: { margin: "4px 0 0", display: "flex", gap: "6px", alignItems: "center" } }, [
+        el("label", { style: { fontSize: "10px", margin: 0 } }, ["purpose"]),
+        el("select", {
+          style: { padding: "3px 6px", fontSize: "11px", flex: 1 },
+          onchange: e => {
+            const ns = [...ifaces]; ns[i] = { ...ns[i], purpose: e.target.value || undefined };
+            updateNodeField(id, "network.interfaces", ns);
+          },
+        }, [
+          el("option", { value: "" }, ["(none)"]),
+          ...["mgmt", "pod", "storage", "external"].map(p =>
+            el("option", { value: p, selected: p === ifc.purpose ? "" : null }, [p])),
+        ]),
+      ]),
+    ]));
+  }
+  root.appendChild(el("button", {
+    class: "add-btn", style: { width: "100%", marginTop: "4px" },
+    onclick: () => {
+      const ns = [...ifaces, { name: `eth${ifaces.length}`, ip: "", purpose: "mgmt" }];
+      updateNodeField(id, "network.interfaces", ns);
+    },
+  }, ["＋ Add Interface"]));
 
   // Cluster
   const myCluster = getNodeCluster(id);
@@ -3718,10 +4162,12 @@ function renderClusterInspector(root, id) {
     const list = el("div", { class: "row-list" });
     for (const ns of namespaces) {
       const wlInNs = (c.workloads || []).filter(w => (w.namespace || "default") === ns.name).length;
+      const rq = ns.resource_quota || {};
+      const rqText = rq.cpu || rq.memory_gb ? `${rq.cpu || "—"}c/${rq.memory_gb || "—"}GB` : "no quota";
       list.appendChild(el("div", { class: "row" }, [
         el("span", { class: "icon" }, [ns.default_deny ? "🔒" : "▦"]),
         el("span", { class: "name" }, [ns.name]),
-        el("span", { style: { fontSize: "10px", color: "var(--text3)", fontFamily: "JetBrains Mono" } }, [`${wlInNs}w`]),
+        el("span", { style: { fontSize: "10px", color: "var(--text3)", fontFamily: "JetBrains Mono" } }, [`${wlInNs}w · ${rqText}`]),
         el("label", {
           style: { fontSize: "10px", color: ns.default_deny ? "var(--orange)" : "var(--text3)", display: "flex", alignItems: "center", gap: "3px", margin: 0, textTransform: "none", letterSpacing: 0, cursor: "pointer" },
         }, [
@@ -3733,6 +4179,11 @@ function renderClusterInspector(root, id) {
           }),
           "deny",
         ]),
+        el("button", {
+          class: "x", title: "edit quota",
+          style: { fontSize: "10px" },
+          onclick: () => openEditNamespace(id, ns.name),
+        }, ["⚙"]),
         el("button", {
           class: "x", onclick: () => { if (confirm(`'${ns.name}' 삭제? (워크로드는 default로 이동)`)) deleteNamespace(id, ns.name); },
         }, ["✕"]),
@@ -4027,6 +4478,279 @@ function renderStorageInspector(root, id) {
   root.appendChild(el("div", { class: "field-readonly" }, [site.name]));
 }
 
+function renderNetworkDeviceInspector(root, id) {
+  const found = findNetworkDevice(id);
+  if (!found) return;
+  const { site, device: d } = found;
+  root.appendChild(el("div", { class: "insp-header" }, [
+    el("span", { class: "kind" }, ["Network Device"]),
+    el("span", { class: "name" }, [d.name]),
+    el("button", {
+      class: "delete",
+      onclick: () => { if (confirm(`'${d.name}' 삭제?`)) deleteNetworkDevice(id); },
+    }, ["🗑"]),
+  ]));
+
+  root.appendChild(el("div", { class: "field" }, [
+    el("label", {}, ["Name"]),
+    el("input", {
+      "data-focus-key": `netdev.${id}.name`,
+      value: d.name, oninput: e => updateNetworkDeviceField(id, "name", e.target.value),
+    }),
+  ]));
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [
+      lbl("Kind", "netdev.kind"),
+      el("select", { onchange: e => updateNetworkDeviceField(id, "kind", e.target.value) },
+        ["switch", "router", "firewall", "waf", "cdn", "vpn", "dns", "ddos"].map(k =>
+          el("option", { value: k, selected: k === (d.kind || "switch") ? "" : null }, [k]))),
+    ]),
+    el("div", { class: "field" }, [
+      el("label", {}, ["Vendor"]),
+      el("input", {
+        "data-focus-key": `netdev.${id}.vendor`,
+        value: d.vendor || "", placeholder: "Cisco / FortiGate / Cloudflare",
+        oninput: e => updateNetworkDeviceField(id, "vendor", e.target.value),
+      }),
+    ]),
+  ]));
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [
+      el("label", {}, ["Model"]),
+      el("input", {
+        "data-focus-key": `netdev.${id}.model`,
+        value: d.model || "",
+        oninput: e => updateNetworkDeviceField(id, "model", e.target.value),
+      }),
+    ]),
+    el("div", { class: "field" }, [
+      lbl("Throughput (Gbps)", "netdev.throughput"),
+      el("input", {
+        "data-focus-key": `netdev.${id}.throughput`,
+        type: "number", min: "0",
+        value: d.throughput_gbps || 0,
+        oninput: e => updateNetworkDeviceField(id, "throughput_gbps", parseFloat(e.target.value) || 0),
+      }),
+    ]),
+  ]));
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [
+      el("label", {}, ["IP"]),
+      el("input", {
+        "data-focus-key": `netdev.${id}.ip`,
+        value: d.ip || "",
+        oninput: e => updateNetworkDeviceField(id, "ip", e.target.value),
+      }),
+    ]),
+    el("div", { class: "field" }, [
+      el("label", {}, ["VIP"]),
+      el("input", {
+        "data-focus-key": `netdev.${id}.vip`,
+        value: d.vip || "",
+        oninput: e => updateNetworkDeviceField(id, "vip", e.target.value),
+      }),
+    ]),
+  ]));
+  root.appendChild(el("label", {
+    style: { display: "flex", alignItems: "center", gap: "8px", margin: "8px 0", fontSize: "12px", color: "var(--text)" },
+  }, [
+    el("input", {
+      type: "checkbox", checked: d.ha ? "" : null,
+      onchange: e => updateNetworkDeviceField(id, "ha", e.target.checked),
+    }),
+    el("span", {}, ["HA (이중화)"]),
+  ]));
+  root.appendChild(el("div", { class: "field" }, [
+    el("label", {}, ["Notes"]),
+    el("input", {
+      "data-focus-key": `netdev.${id}.notes`,
+      value: d.notes || "",
+      oninput: e => updateNetworkDeviceField(id, "notes", e.target.value),
+    }),
+  ]));
+  root.appendChild(el("div", { class: "section-title" }, ["Site"]));
+  root.appendChild(el("div", { class: "field-readonly" }, [site.name]));
+}
+
+function renderExternalServiceInspector(root, id) {
+  const found = findExternalService(id);
+  if (!found) return;
+  const { site, service: e } = found;
+  root.appendChild(el("div", { class: "insp-header" }, [
+    el("span", { class: "kind" }, ["External Service"]),
+    el("span", { class: "name" }, [e.name]),
+    el("button", {
+      class: "delete",
+      onclick: () => { if (confirm(`'${e.name}' 삭제?`)) deleteExternalService(id); },
+    }, ["🗑"]),
+  ]));
+
+  root.appendChild(el("div", { class: "field" }, [
+    el("label", {}, ["Name"]),
+    el("input", {
+      "data-focus-key": `extsvc.${id}.name`,
+      value: e.name, oninput: ev => updateExternalServiceField(id, "name", ev.target.value),
+    }),
+  ]));
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [
+      lbl("Kind", "extsvc.kind"),
+      el("select", { onchange: ev => updateExternalServiceField(id, "kind", ev.target.value) },
+        ["database", "cache", "queue", "registry", "backup", "monitoring", "logging", "secret_store", "identity", "object_store", "custom"]
+          .map(k => el("option", { value: k, selected: k === (e.kind || "database") ? "" : null }, [k]))),
+    ]),
+    el("div", { class: "field" }, [
+      lbl("Engine", "extsvc.engine"),
+      el("input", {
+        "data-focus-key": `extsvc.${id}.engine`,
+        value: e.engine || "", placeholder: "postgres / redis / kafka / harbor",
+        oninput: ev => updateExternalServiceField(id, "engine", ev.target.value),
+      }),
+    ]),
+  ]));
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [
+      el("label", {}, ["Vendor"]),
+      el("input", {
+        "data-focus-key": `extsvc.${id}.vendor`,
+        value: e.vendor || "", placeholder: "AWS RDS / Cloud SQL",
+        oninput: ev => updateExternalServiceField(id, "vendor", ev.target.value),
+      }),
+    ]),
+    el("div", { class: "field" }, [
+      el("label", {}, ["Version"]),
+      el("input", {
+        "data-focus-key": `extsvc.${id}.version`,
+        value: e.version || "",
+        oninput: ev => updateExternalServiceField(id, "version", ev.target.value),
+      }),
+    ]),
+  ]));
+  root.appendChild(el("div", { class: "field" }, [
+    lbl("Endpoint", "extsvc.endpoint"),
+    el("input", {
+      "data-focus-key": `extsvc.${id}.endpoint`,
+      value: e.endpoint || "", placeholder: "prod.db.example.com:5432",
+      oninput: ev => updateExternalServiceField(id, "endpoint", ev.target.value),
+    }),
+  ]));
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [
+      lbl("Capacity (GB)", "extsvc.capacity"),
+      el("input", {
+        "data-focus-key": `extsvc.${id}.capacity`,
+        type: "number", min: "0",
+        value: e.capacity_gb || 0,
+        oninput: ev => updateExternalServiceField(id, "capacity_gb", parseFloat(ev.target.value) || 0),
+      }),
+    ]),
+    el("div", { class: "field" }, [
+      el("label", {}, ["Region"]),
+      el("input", {
+        "data-focus-key": `extsvc.${id}.region`,
+        value: e.region || "",
+        oninput: ev => updateExternalServiceField(id, "region", ev.target.value),
+      }),
+    ]),
+  ]));
+
+  // Target clusters
+  const clusters = state.project.clusters || [];
+  if (clusters.length) {
+    root.appendChild(el("div", { class: "section-title" }, ["Used by clusters"]));
+    const list = el("div", { class: "checkbox-list" });
+    for (const c of clusters) {
+      const sel = (e.target_cluster_ids || []).includes(c.id);
+      list.appendChild(el("label", {}, [
+        el("input", {
+          type: "checkbox", checked: sel ? "" : null,
+          onchange: ev => {
+            const cur = new Set(e.target_cluster_ids || []);
+            if (ev.target.checked) cur.add(c.id); else cur.delete(c.id);
+            updateExternalServiceField(id, "target_cluster_ids", Array.from(cur));
+          },
+        }),
+        el("span", {}, [c.name]),
+      ]));
+    }
+    root.appendChild(list);
+  }
+  root.appendChild(el("div", { class: "section-title" }, ["Site"]));
+  root.appendChild(el("div", { class: "field-readonly" }, [site.name]));
+}
+
+function renderSiteLinkInspector(root, id) {
+  const link = findSiteLink(id);
+  if (!link) return;
+  const sites = state.project.sites || [];
+  root.appendChild(el("div", { class: "insp-header" }, [
+    el("span", { class: "kind" }, ["Site Link"]),
+    el("span", { class: "name" }, [link.name]),
+    el("button", {
+      class: "delete",
+      onclick: () => { if (confirm(`'${link.name}' 삭제?`)) deleteSiteLink(id); },
+    }, ["🗑"]),
+  ]));
+
+  root.appendChild(el("div", { class: "field" }, [
+    el("label", {}, ["Name"]),
+    el("input", {
+      "data-focus-key": `sitelink.${id}.name`,
+      value: link.name || "",
+      oninput: e => updateSiteLinkField(id, "name", e.target.value),
+    }),
+  ]));
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [
+      el("label", {}, ["From"]),
+      el("select", { onchange: e => updateSiteLinkField(id, "from_site_id", e.target.value) },
+        sites.map(s => el("option", { value: s.id, selected: s.id === link.from_site_id ? "" : null }, [s.name]))),
+    ]),
+    el("div", { class: "field" }, [
+      el("label", {}, ["To"]),
+      el("select", { onchange: e => updateSiteLinkField(id, "to_site_id", e.target.value) },
+        sites.map(s => el("option", { value: s.id, selected: s.id === link.to_site_id ? "" : null }, [s.name]))),
+    ]),
+  ]));
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [
+      lbl("Kind", "sitelink.kind"),
+      el("select", { onchange: e => updateSiteLinkField(id, "kind", e.target.value) },
+        ["vpn", "direct_connect", "internet", "leased", "private_link"].map(k =>
+          el("option", { value: k, selected: k === (link.kind || "vpn") ? "" : null }, [k]))),
+    ]),
+    el("div", { class: "field" }, [
+      lbl("Bandwidth (Gbps)", "sitelink.bandwidth"),
+      el("input", {
+        "data-focus-key": `sitelink.${id}.bandwidth`,
+        type: "number", min: "0", step: "0.1",
+        value: link.bandwidth_gbps || 0,
+        oninput: e => updateSiteLinkField(id, "bandwidth_gbps", parseFloat(e.target.value) || 0),
+      }),
+    ]),
+  ]));
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [
+      lbl("Latency (ms)", "sitelink.latency"),
+      el("input", {
+        "data-focus-key": `sitelink.${id}.latency`,
+        type: "number", min: "0",
+        value: link.latency_ms || 0,
+        oninput: e => updateSiteLinkField(id, "latency_ms", parseFloat(e.target.value) || 0),
+      }),
+    ]),
+    el("div", { class: "field" }, [
+      el("label", { style: { display: "flex", alignItems: "center", gap: "6px", marginTop: "20px", fontSize: "12px", textTransform: "none", letterSpacing: 0, color: "var(--text)" } }, [
+        el("input", {
+          type: "checkbox", checked: link.encrypted !== false ? "" : null,
+          onchange: e => updateSiteLinkField(id, "encrypted", e.target.checked),
+        }),
+        "Encrypted",
+      ]),
+    ]),
+  ]));
+}
+
 function renderWorkloadInspector(root, id) {
   const found = findWorkload(id);
   if (!found) return;
@@ -4046,7 +4770,7 @@ function renderWorkloadInspector(root, id) {
 
   // Tabs
   if (!state.ui.workloadTab) state.ui.workloadTab = "basic";
-  const tabs = ["basic", "resources", "runtime", "network"];
+  const tabs = ["basic", "resources", "runtime", "network", "deps"];
   const tabBar = el("div", {
     style: { display: "flex", gap: "2px", borderBottom: "1px solid var(--border)", marginBottom: "12px" },
   }, tabs.map(t =>
@@ -4165,6 +4889,69 @@ function renderWorkloadInspector(root, id) {
       el("div", {}, [`${totalCpu} vCPU · ${totalMem} GB RAM · ${gpuReq.count ? `${gpuReq.count * (w.replicas || 1)} GPUs` : "no GPU"}`]),
       el("div", { style: { color: "var(--text2)" } }, [`(per pod × ${w.replicas} replicas)`]),
     ]));
+
+    // Persistent Volumes
+    const pvs = w.persistent_volumes || [];
+    root.appendChild(el("div", { class: "section-title" }, [`Persistent Volumes (${pvs.length})`, helpIcon("workload.pvc")]));
+    for (let i = 0; i < pvs.length; i++) {
+      const pv = pvs[i];
+      root.appendChild(el("div", {
+        style: { background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: "5px", padding: "8px 10px", marginBottom: "6px" },
+      }, [
+        el("div", { style: { display: "grid", gridTemplateColumns: "70px 1fr 90px auto", gap: "6px", alignItems: "end" } }, [
+          el("div", { class: "field", style: { margin: 0 } }, [
+            el("label", { style: { fontSize: "10px" } }, ["size GB"]),
+            el("input", {
+              "data-focus-key": `workload.${id}.pvc.${i}.size`,
+              type: "number", min: "0", style: { padding: "4px 6px", fontSize: "11px" },
+              value: pv.size_gb || 0,
+              oninput: e => {
+                const ns = [...pvs]; ns[i] = { ...ns[i], size_gb: parseFloat(e.target.value) || 0 };
+                updateWorkloadField(id, "persistent_volumes", ns);
+              },
+            }),
+          ]),
+          el("div", { class: "field", style: { margin: 0 } }, [
+            el("label", { style: { fontSize: "10px" } }, ["storage_class"]),
+            el("input", {
+              "data-focus-key": `workload.${id}.pvc.${i}.sc`,
+              style: { padding: "4px 6px", fontSize: "11px" },
+              value: pv.storage_class || "",
+              placeholder: "gp3 / nfs-csi",
+              oninput: e => {
+                const ns = [...pvs]; ns[i] = { ...ns[i], storage_class: e.target.value };
+                updateWorkloadField(id, "persistent_volumes", ns);
+              },
+            }),
+          ]),
+          el("div", { class: "field", style: { margin: 0 } }, [
+            el("label", { style: { fontSize: "10px" } }, ["access"]),
+            el("select", {
+              style: { padding: "3px 4px", fontSize: "11px" },
+              onchange: e => {
+                const ns = [...pvs]; ns[i] = { ...ns[i], access_mode: e.target.value };
+                updateWorkloadField(id, "persistent_volumes", ns);
+              },
+            }, ["RWO", "ROX", "RWX"].map(am =>
+              el("option", { value: am, selected: am === (pv.access_mode || "RWO") ? "" : null }, [am]))),
+          ]),
+          el("button", {
+            class: "x", style: { padding: "4px 8px" },
+            onclick: () => {
+              const ns = pvs.filter((_, j) => j !== i);
+              updateWorkloadField(id, "persistent_volumes", ns);
+            },
+          }, ["✕"]),
+        ]),
+      ]));
+    }
+    root.appendChild(el("button", {
+      class: "add-btn", style: { width: "100%", marginTop: "4px" },
+      onclick: () => {
+        const ns = [...pvs, { size_gb: 10, access_mode: "RWO", storage_class: "" }];
+        updateWorkloadField(id, "persistent_volumes", ns);
+      },
+    }, ["＋ Add PVC"]));
   }
   else if (state.ui.workloadTab === "runtime") {
     const r = w.runtime || {};
@@ -4378,6 +5165,120 @@ function renderWorkloadInspector(root, id) {
       }
     } else {
       root.appendChild(el("div", { class: "empty-hint" }, ["Headless / no service. 직접 IP 접근 또는 다른 메커니즘."]));
+    }
+  }
+  else if (state.ui.workloadTab === "deps") {
+    const deps = w.depends_on || [];
+    const sameClusterWls = (cluster.workloads || []).filter(x => x.id !== w.id);
+    root.appendChild(el("div", { class: "section-title" }, [`Dependencies (${deps.length})`, helpIcon("workload.depends_on")]));
+    if (!sameClusterWls.length && !deps.length) {
+      root.appendChild(el("div", { class: "empty-hint" }, ["같은 클러스터에 다른 워크로드 없음."]));
+    }
+    for (let i = 0; i < deps.length; i++) {
+      const d = deps[i];
+      const target = (cluster.workloads || []).find(x => x.id === d.target_workload_id);
+      root.appendChild(el("div", {
+        style: { background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: "5px", padding: "8px 10px", marginBottom: "6px" },
+      }, [
+        el("div", { style: { display: "grid", gridTemplateColumns: "1fr 80px 70px auto", gap: "6px", alignItems: "end" } }, [
+          el("div", { class: "field", style: { margin: 0 } }, [
+            el("label", { style: { fontSize: "10px" } }, ["target workload"]),
+            el("select", {
+              style: { padding: "3px 6px", fontSize: "11px" },
+              onchange: e => {
+                const ns = [...deps]; ns[i] = { ...ns[i], target_workload_id: e.target.value };
+                updateWorkloadField(id, "depends_on", ns);
+              },
+            }, sameClusterWls.map(wx =>
+              el("option", { value: wx.id, selected: wx.id === d.target_workload_id ? "" : null }, [wx.name]))),
+          ]),
+          el("div", { class: "field", style: { margin: 0 } }, [
+            el("label", { style: { fontSize: "10px" } }, ["protocol"]),
+            el("select", {
+              style: { padding: "3px 4px", fontSize: "11px" },
+              onchange: e => {
+                const ns = [...deps]; ns[i] = { ...ns[i], protocol: e.target.value };
+                updateWorkloadField(id, "depends_on", ns);
+              },
+            }, ["HTTP", "gRPC", "TCP", "UDP", "AMQP", "Kafka", "JDBC", "Redis"].map(p =>
+              el("option", { value: p, selected: p === (d.protocol || "HTTP") ? "" : null }, [p]))),
+          ]),
+          el("div", { class: "field", style: { margin: 0 } }, [
+            el("label", { style: { fontSize: "10px" } }, ["port"]),
+            el("input", {
+              "data-focus-key": `workload.${id}.deps.${i}.port`,
+              type: "number", min: "1", max: "65535",
+              style: { padding: "4px 6px", fontSize: "11px" },
+              value: d.port || "",
+              oninput: e => {
+                const ns = [...deps]; ns[i] = { ...ns[i], port: parseInt(e.target.value) || undefined };
+                updateWorkloadField(id, "depends_on", ns);
+              },
+            }),
+          ]),
+          el("button", {
+            class: "x", style: { padding: "4px 8px" },
+            onclick: () => {
+              const ns = deps.filter((_, j) => j !== i);
+              updateWorkloadField(id, "depends_on", ns);
+            },
+          }, ["✕"]),
+        ]),
+        el("div", { class: "field-row", style: { marginTop: "4px" } }, [
+          el("div", { class: "field", style: { margin: 0 } }, [
+            el("label", { style: { fontSize: "10px" } }, ["avg call ms"]),
+            el("input", {
+              "data-focus-key": `workload.${id}.deps.${i}.avg_call`,
+              type: "number", min: "0", step: "1",
+              style: { padding: "4px 6px", fontSize: "11px" },
+              value: d.avg_call_ms || "",
+              oninput: e => {
+                const ns = [...deps]; ns[i] = { ...ns[i], avg_call_ms: parseFloat(e.target.value) || undefined };
+                updateWorkloadField(id, "depends_on", ns);
+              },
+            }),
+          ]),
+          el("div", { class: "field", style: { margin: 0 } }, [
+            el("label", { style: { fontSize: "10px" } }, ["fanout %"]),
+            el("input", {
+              "data-focus-key": `workload.${id}.deps.${i}.fanout`,
+              type: "number", min: "0", max: "100", step: "1",
+              style: { padding: "4px 6px", fontSize: "11px" },
+              value: d.fanout_pct || 100,
+              oninput: e => {
+                const ns = [...deps]; ns[i] = { ...ns[i], fanout_pct: parseFloat(e.target.value) || 100 };
+                updateWorkloadField(id, "depends_on", ns);
+              },
+            }),
+          ]),
+          el("div", { class: "field", style: { margin: 0 } }, [
+            el("label", { style: { fontSize: "10px" } }, ["calls/req"]),
+            el("input", {
+              "data-focus-key": `workload.${id}.deps.${i}.calls_per_request`,
+              type: "number", min: "0.1", step: "0.1",
+              style: { padding: "4px 6px", fontSize: "11px" },
+              value: d.calls_per_request || 1,
+              oninput: e => {
+                const ns = [...deps]; ns[i] = { ...ns[i], calls_per_request: parseFloat(e.target.value) || 1 };
+                updateWorkloadField(id, "depends_on", ns);
+              },
+            }),
+          ]),
+        ]),
+      ]));
+    }
+    if (sameClusterWls.length) {
+      root.appendChild(el("button", {
+        class: "add-btn", style: { width: "100%", marginTop: "4px" },
+        onclick: () => {
+          const ns = [...deps, {
+            target_workload_id: sameClusterWls[0].id, protocol: "HTTP",
+            port: sameClusterWls[0].network?.service?.ports?.[0]?.port || 8080,
+            avg_call_ms: 20, fanout_pct: 100, calls_per_request: 1,
+          }];
+          updateWorkloadField(id, "depends_on", ns);
+        },
+      }, ["＋ Add Dependency"]));
     }
   }
 }
@@ -4711,6 +5612,7 @@ function renderTopologyDiagram(root, p) {
 
   // Layout constants
   const L4_H = 40, L4_W = 160, NODE_W = 180, NODE_H = 70, ST_H = 40, ST_W = 160;
+  const ND_H = 36, ND_W = 140, EX_H = 40, EX_W = 160;
   const COL_GAP = 14, ROW_GAP = 30, SITE_PAD = 24, SITE_GAP = 40;
   const ITEM_GAP = 12;
 
@@ -4721,32 +5623,51 @@ function renderTopologyDiagram(root, p) {
   const placed = []; // { kind, item, x, y, w, h, refIds }
 
   for (const s of p.sites) {
-    // Width: max of (l4 row, node grid row, storage row)
     const nodes = (s.node_ids || []).map(id => p.nodes.find(n => n.id === id)).filter(Boolean);
     const l4s = s.l4_balancers || [];
     const storages = s.storages || [];
+    const netdevs = s.network_devices || [];
+    const extsvcs = s.external_services || [];
     const nodesPerRow = Math.max(1, Math.min(nodes.length, 4));
     const nodeGridW = nodesPerRow * NODE_W + (nodesPerRow - 1) * COL_GAP;
     const l4RowW = l4s.length ? (l4s.length * L4_W + (l4s.length - 1) * ITEM_GAP) : 0;
     const stRowW = storages.length ? (storages.length * ST_W + (storages.length - 1) * ITEM_GAP) : 0;
-    const innerW = Math.max(nodeGridW, l4RowW, stRowW, 300);
+    const ndRowW = netdevs.length ? (netdevs.length * ND_W + (netdevs.length - 1) * ITEM_GAP) : 0;
+    const exRowW = extsvcs.length ? (extsvcs.length * EX_W + (extsvcs.length - 1) * ITEM_GAP) : 0;
+    const innerW = Math.max(nodeGridW, l4RowW, stRowW, ndRowW, exRowW, 300);
     const siteW = innerW + SITE_PAD * 2;
 
     const nodeRows = Math.ceil(nodes.length / nodesPerRow) || 1;
     let innerH = 0;
+    if (netdevs.length) innerH += ND_H + ROW_GAP;
     if (l4s.length) innerH += L4_H + ROW_GAP;
     innerH += nodeRows * NODE_H + (nodeRows - 1) * COL_GAP;
     if (storages.length) innerH += ROW_GAP + ST_H;
+    if (extsvcs.length) innerH += ROW_GAP + EX_H;
     if (!nodes.length) innerH = Math.max(innerH, 80);
-    const siteH = innerH + SITE_PAD * 2 + 20; // +20 for header
+    const siteH = innerH + SITE_PAD * 2 + 20;
 
     const siteX = 10;
     const siteY = cursorY;
     placed.push({ kind: "site", item: s, x: siteX, y: siteY, w: siteW, h: siteH });
 
-    // Position children
-    let innerY = siteY + SITE_PAD + 20; // 20 for header
+    let innerY = siteY + SITE_PAD + 20;
 
+    // Network devices (top)
+    if (netdevs.length) {
+      const startX = siteX + SITE_PAD + (innerW - ndRowW) / 2;
+      for (let i = 0; i < netdevs.length; i++) {
+        placed.push({
+          kind: "netdev", item: netdevs[i],
+          x: startX + i * (ND_W + ITEM_GAP),
+          y: innerY,
+          w: ND_W, h: ND_H,
+        });
+      }
+      innerY += ND_H + ROW_GAP;
+    }
+
+    // L4
     if (l4s.length) {
       const startX = siteX + SITE_PAD + (innerW - l4RowW) / 2;
       for (let i = 0; i < l4s.length; i++) {
@@ -4760,19 +5681,30 @@ function renderTopologyDiagram(root, p) {
       innerY += L4_H + ROW_GAP;
     }
 
-    // Nodes
+    // Nodes (with cluster boundary tracking — collect bounds)
     const nodeStartX = siteX + SITE_PAD + (innerW - nodeGridW) / 2;
+    const nodeBoundsByCluster = new Map();
     for (let i = 0; i < nodes.length; i++) {
       const r = Math.floor(i / nodesPerRow), col = i % nodesPerRow;
+      const nx = nodeStartX + col * (NODE_W + COL_GAP);
+      const ny = innerY + r * (NODE_H + COL_GAP);
       placed.push({
         kind: "node", item: nodes[i],
-        x: nodeStartX + col * (NODE_W + COL_GAP),
-        y: innerY + r * (NODE_H + COL_GAP),
-        w: NODE_W, h: NODE_H,
+        x: nx, y: ny, w: NODE_W, h: NODE_H,
       });
+      const cl = getNodeCluster(nodes[i].id);
+      if (cl) {
+        const b = nodeBoundsByCluster.get(cl.id) || { cluster: cl, minX: nx, minY: ny, maxX: nx + NODE_W, maxY: ny + NODE_H };
+        b.minX = Math.min(b.minX, nx);
+        b.minY = Math.min(b.minY, ny);
+        b.maxX = Math.max(b.maxX, nx + NODE_W);
+        b.maxY = Math.max(b.maxY, ny + NODE_H);
+        nodeBoundsByCluster.set(cl.id, b);
+      }
     }
     innerY += nodeRows * NODE_H + (nodeRows - 1) * COL_GAP;
 
+    // Storage
     if (storages.length) {
       innerY += ROW_GAP;
       const startX = siteX + SITE_PAD + (innerW - stRowW) / 2;
@@ -4784,7 +5716,25 @@ function renderTopologyDiagram(root, p) {
           w: ST_W, h: ST_H,
         });
       }
+      innerY += ST_H;
     }
+
+    // External services
+    if (extsvcs.length) {
+      innerY += ROW_GAP;
+      const startX = siteX + SITE_PAD + (innerW - exRowW) / 2;
+      for (let i = 0; i < extsvcs.length; i++) {
+        placed.push({
+          kind: "extsvc", item: extsvcs[i],
+          x: startX + i * (EX_W + ITEM_GAP),
+          y: innerY,
+          w: EX_W, h: EX_H,
+        });
+      }
+    }
+
+    // Save cluster bounds for this site
+    placed.push({ kind: "_cluster_bounds", siteId: s.id, bounds: nodeBoundsByCluster });
 
     maxX = Math.max(maxX, siteX + siteW);
     cursorY += siteH + SITE_GAP;
@@ -4844,6 +5794,32 @@ function renderTopologyDiagram(root, p) {
       fill: isOnprem ? colors.orange : colors.accent,
       "font-size": "10", "font-family": "JetBrains Mono",
     }, [it.item.kind]));
+  }
+
+  // STEP 1.5: Cluster boundary boxes (faint colored rect around nodes belonging to same cluster)
+  const clusterColors = ["#a78bfa", "#34d399", "#fbbf24", "#f87171", "#4d9cff"];
+  const clusterIdxByKey = new Map();
+  let cidx = 0;
+  for (const it of placed) {
+    if (it.kind !== "_cluster_bounds") continue;
+    for (const [cid, b] of it.bounds) {
+      let i = clusterIdxByKey.get(cid);
+      if (i == null) { i = cidx++; clusterIdxByKey.set(cid, i); }
+      const c = b.cluster;
+      const color = clusterColors[i % clusterColors.length];
+      const PAD = 8;
+      root_svg.appendChild(svg("rect", {
+        x: b.minX - PAD, y: b.minY - PAD,
+        width: (b.maxX - b.minX) + PAD * 2, height: (b.maxY - b.minY) + PAD * 2,
+        rx: 8, ry: 8,
+        fill: color, "fill-opacity": 0.05,
+        stroke: color, "stroke-opacity": 0.5, "stroke-width": 1, "stroke-dasharray": "5,3",
+      }));
+      root_svg.appendChild(svg("text", {
+        x: b.minX - PAD + 6, y: b.minY - PAD - 4,
+        fill: color, "font-size": "10", "font-family": "JetBrains Mono", "font-weight": "600",
+      }, [`⎈ ${c.name}`]));
+    }
   }
 
   // STEP 2: Draw connection lines (above site rects, below inner boxes)
@@ -4919,7 +5895,41 @@ function renderTopologyDiagram(root, p) {
 
   // STEP 3: Draw inner boxes (above lines)
   for (const it of placed) {
-    if (it.kind === "site") continue; // already drawn in STEP 1
+    if (it.kind === "site" || it.kind === "_cluster_bounds") continue;
+    if (it.kind === "netdev") {
+      const ndIcon = { switch: "⇄", router: "⊞", firewall: "🛡", waf: "🛡", cdn: "🌍", vpn: "🔐", dns: "🌐", ddos: "⚠" };
+      const haColor = it.item.ha ? colors.green : colors.border2;
+      const g = svg("g", { style: "cursor:pointer", onclick: () => selectEntity("netdev", it.item.id) });
+      g.appendChild(svg("rect", {
+        x: it.x, y: it.y, width: it.w, height: it.h, rx: 6, ry: 6,
+        fill: colors.surface2, stroke: haColor, "stroke-width": 1.5,
+      }));
+      g.appendChild(svg("text", {
+        x: it.x + 8, y: it.y + 14, fill: colors.text, "font-size": "10", "font-weight": "600",
+      }, [`${ndIcon[it.item.kind] || "▢"} ${it.item.name}`]));
+      g.appendChild(svg("text", {
+        x: it.x + 8, y: it.y + 27, fill: colors.text2, "font-size": "9", "font-family": "JetBrains Mono",
+      }, [`${it.item.kind}${it.item.vendor ? ` · ${it.item.vendor}` : ""}`]));
+      root_svg.appendChild(g);
+      continue;
+    }
+    if (it.kind === "extsvc") {
+      const exIcon = { database: "🗄", cache: "⚡", queue: "📨", registry: "📦", backup: "💼", monitoring: "📊", logging: "📝", secret_store: "🔑", identity: "👤", object_store: "🪣", custom: "❓" };
+      const g = svg("g", { style: "cursor:pointer", onclick: () => selectEntity("extsvc", it.item.id) });
+      g.appendChild(svg("rect", {
+        x: it.x, y: it.y, width: it.w, height: it.h, rx: 6, ry: 6,
+        fill: colors.surface2, stroke: colors.purple, "stroke-width": 1.5,
+        "stroke-dasharray": "6,2",
+      }));
+      g.appendChild(svg("text", {
+        x: it.x + 8, y: it.y + 16, fill: colors.text, "font-size": "11", "font-weight": "600",
+      }, [`${exIcon[it.item.kind] || "❓"} ${it.item.name}`]));
+      g.appendChild(svg("text", {
+        x: it.x + 8, y: it.y + 30, fill: colors.text2, "font-size": "10", "font-family": "JetBrains Mono",
+      }, [`${it.item.kind}${it.item.engine ? `/${it.item.engine}` : ""}`]));
+      root_svg.appendChild(g);
+      continue;
+    }
     if (it.kind === "l4") {
       const haColor = it.item.ha ? colors.green : colors.border2;
       const g = svg("g", { style: "cursor:pointer", onclick: () => selectEntity("l4", it.item.id) });
@@ -4989,15 +5999,51 @@ function renderTopologyDiagram(root, p) {
     }
   }
 
+  // STEP 4: Site links (project-level, between sites)
+  for (const link of (p.site_links || [])) {
+    const fromSite = placed.find(x => x.kind === "site" && x.item.id === link.from_site_id);
+    const toSite = placed.find(x => x.kind === "site" && x.item.id === link.to_site_id);
+    if (!fromSite || !toSite) continue;
+    // Connect site rects (right edge of upper site to left edge of lower)
+    const x1 = fromSite.x + fromSite.w;
+    const y1 = fromSite.y + fromSite.h / 2;
+    const x2 = toSite.x + toSite.w;
+    const y2 = toSite.y + toSite.h / 2;
+    // Use a curved path between sites
+    const cx = Math.max(x1, x2) + 60;
+    const path = `M ${x1} ${y1} C ${cx} ${y1}, ${cx} ${y2}, ${x2} ${y2}`;
+    const linkColor = { vpn: colors.purple, direct_connect: colors.accent, internet: colors.text3, leased: colors.green, private_link: colors.orange }[link.kind] || colors.accent;
+    const g = svg("g", { style: "cursor:pointer", onclick: () => selectEntity("sitelink", link.id) });
+    g.appendChild(svg("path", {
+      d: path, fill: "none", stroke: linkColor, "stroke-width": 2, "stroke-opacity": 0.7,
+      "stroke-dasharray": link.kind === "internet" ? "3,3" : "",
+    }));
+    // Label
+    const midY = (y1 + y2) / 2;
+    g.appendChild(svg("rect", {
+      x: cx + 8, y: midY - 10, width: 100, height: 20, rx: 4, ry: 4,
+      fill: colors.surface, stroke: linkColor, "stroke-width": 1,
+    }));
+    g.appendChild(svg("text", {
+      x: cx + 58, y: midY + 4, "text-anchor": "middle",
+      fill: linkColor, "font-size": "9", "font-family": "JetBrains Mono",
+    }, [`${link.kind}${link.bandwidth_gbps ? ` ${link.bandwidth_gbps}G` : ""}`]));
+    root_svg.appendChild(g);
+  }
+
   // Legend
   const legend = el("div", {
-    style: { fontSize: "10px", color: "var(--text3)", marginTop: "8px", display: "flex", gap: "16px", fontFamily: "JetBrains Mono" },
+    style: { fontSize: "10px", color: "var(--text3)", marginTop: "8px", display: "flex", gap: "12px", fontFamily: "JetBrains Mono", flexWrap: "wrap" },
   }, [
     el("span", {}, [`⚖ L4 LB`]),
-    el("span", {}, [`▣ Node (보라 = 클러스터 소속)`]),
+    el("span", {}, [`▣ Node`]),
     el("span", {}, [`💾 Storage`]),
-    el("span", { style: { color: "var(--accent)" } }, ["—— L4 → Worker"]),
-    el("span", { style: { color: "var(--green)" } }, ["- - Storage → Node"]),
+    el("span", {}, [`🛡 Network Device`]),
+    el("span", {}, [`🗄 External Service (점선)`]),
+    el("span", { style: { color: "var(--purple)" } }, ["⎈ Cluster boundary"]),
+    el("span", { style: { color: "var(--accent)" } }, ["—— L4→Worker"]),
+    el("span", { style: { color: "var(--green)" } }, ["- - Storage→Node"]),
+    el("span", { style: { color: "var(--purple)" } }, ["~~ Site Link"]),
   ]);
 
   root.appendChild(root_svg);
@@ -5836,6 +6882,54 @@ function openAddWorkload(clusterId) {
   openModal(root);
 }
 
+//============ Edit Namespace (resource_quota) ============
+function openEditNamespace(clusterId, name) {
+  const c = state.project.clusters.find(x => x.id === clusterId);
+  if (!c) return;
+  const ns = (c.namespaces || []).find(n => n.name === name);
+  if (!ns) return;
+  if (!ns.resource_quota) ns.resource_quota = {};
+  const rq = ns.resource_quota;
+  const root = el("div");
+  root.appendChild(el("h2", {}, [`Namespace: ${ns.name}`]));
+  root.appendChild(el("div", { class: "section-title" }, ["Resource Quota"]));
+
+  const cpuInput = el("input", { type: "number", min: "0", value: rq.cpu || "", placeholder: "(no limit)" });
+  const memInput = el("input", { type: "number", min: "0", value: rq.memory_gb || "", placeholder: "(no limit)" });
+  const gpuInput = el("input", { type: "number", min: "0", value: rq.gpu || "", placeholder: "(no limit)" });
+  const podsInput = el("input", { type: "number", min: "1", value: rq.max_pods || "", placeholder: "(no limit)" });
+
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [lbl("CPU (cores)", "ns.quota.cpu"), cpuInput]),
+    el("div", { class: "field" }, [lbl("Memory (GB)", "ns.quota.memory"), memInput]),
+  ]));
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [lbl("GPU count", "ns.quota.gpu"), gpuInput]),
+    el("div", { class: "field" }, [lbl("Max Pods", "ns.quota.pods"), podsInput]),
+  ]));
+
+  root.appendChild(el("div", { class: "modal-actions" }, [
+    el("button", { class: "btn-ghost", onclick: closeModal }, ["Cancel"]),
+    el("button", { class: "btn", onclick: () => {
+      const newRq = {};
+      if (cpuInput.value) newRq.cpu = parseFloat(cpuInput.value);
+      if (memInput.value) newRq.memory_gb = parseFloat(memInput.value);
+      if (gpuInput.value) newRq.gpu = parseInt(gpuInput.value);
+      if (podsInput.value) newRq.max_pods = parseInt(podsInput.value);
+      if (Object.keys(newRq).length) {
+        updateNamespaceField(clusterId, name, "resource_quota", newRq);
+      } else {
+        // Empty: delete the field
+        const updated = state.project.clusters.find(x => x.id === clusterId).namespaces.find(n => n.name === name);
+        if (updated) delete updated.resource_quota;
+        emit(); saveSoon();
+      }
+      closeModal();
+    } }, ["Save"]),
+  ]));
+  openModal(root);
+}
+
 //============ Add Namespace modal ============
 function openAddNamespace(clusterId) {
   const c = state.project.clusters.find(x => x.id === clusterId);
@@ -6084,6 +7178,171 @@ function openAddStorage(siteId) {
         capacity_tb: parseFloat(capInput.value) || 10,
         endpoint: epInput.value.trim(),
         csi_driver: csiInput.value.trim(),
+      });
+      closeModal();
+    } }, ["Add"]),
+  ]));
+  openModal(root);
+}
+
+//============ Add Network Device modal ============
+function openAddNetworkDevice(siteId) {
+  const s = state.project.sites.find(x => x.id === siteId);
+  if (!s) return;
+  const root = el("div");
+  root.appendChild(el("h2", {}, ["Add Network Device"]));
+  const nameInput = el("input", { value: `device-${(s.network_devices?.length || 0) + 1}` });
+  const kindSel = el("select", {}, ["switch", "router", "firewall", "waf", "cdn", "vpn", "dns", "ddos"].map(k =>
+    el("option", { value: k }, [k])));
+  const vendorInput = el("input", { placeholder: "Cisco / FortiGate / Cloudflare" });
+  const tputInput = el("input", { type: "number", min: "0", value: "10" });
+  const haInput = el("input", { type: "checkbox" });
+
+  // Auto vendor suggest by kind
+  const vendorMap = {
+    switch: "Cisco", router: "Cisco", firewall: "FortiGate",
+    waf: "Cloudflare", cdn: "Cloudflare", vpn: "Wireguard",
+    dns: "BIND/CoreDNS", ddos: "Cloudflare",
+  };
+  kindSel.addEventListener("change", () => {
+    if (!vendorInput.value && vendorMap[kindSel.value]) vendorInput.placeholder = vendorMap[kindSel.value];
+  });
+  kindSel.dispatchEvent(new Event("change"));
+
+  root.appendChild(el("div", { class: "field" }, [el("label", {}, ["Name"]), nameInput]));
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [lbl("Kind", "netdev.kind"), kindSel]),
+    el("div", { class: "field" }, [el("label", {}, ["Vendor"]), vendorInput]),
+  ]));
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [lbl("Throughput (Gbps)", "netdev.throughput"), tputInput]),
+    el("div", { class: "field" }, [
+      el("label", { style: { display: "flex", alignItems: "center", gap: "6px", marginTop: "20px", fontSize: "12px", textTransform: "none", letterSpacing: 0, color: "var(--text)" } }, [
+        haInput, "HA",
+      ]),
+    ]),
+  ]));
+
+  root.appendChild(el("div", { class: "modal-actions" }, [
+    el("button", { class: "btn-ghost", onclick: closeModal }, ["Cancel"]),
+    el("button", { class: "btn", onclick: () => {
+      addNetworkDevice(siteId, {
+        name: nameInput.value.trim() || "device",
+        kind: kindSel.value,
+        vendor: vendorInput.value.trim() || (vendorMap[kindSel.value] || ""),
+        throughput_gbps: parseFloat(tputInput.value) || 10,
+        ha: haInput.checked,
+      });
+      closeModal();
+    } }, ["Add"]),
+  ]));
+  openModal(root);
+}
+
+//============ Add External Service modal ============
+function openAddExternalService(siteId) {
+  const s = state.project.sites.find(x => x.id === siteId);
+  if (!s) return;
+  const root = el("div");
+  root.appendChild(el("h2", {}, ["Add External Service"]));
+  const nameInput = el("input", { value: `ext-${(s.external_services?.length || 0) + 1}` });
+  const kindSel = el("select", {}, [
+    ["database", "Database (RDS, Cloud SQL...)"],
+    ["cache", "Cache (ElastiCache, Memorystore...)"],
+    ["queue", "Queue (SQS, Pub/Sub, Kafka MSK)"],
+    ["registry", "Container Registry (ECR, Harbor)"],
+    ["backup", "Backup (S3, Velero target)"],
+    ["monitoring", "Monitoring (Datadog, NewRelic)"],
+    ["logging", "Logging (ELK, Splunk)"],
+    ["secret_store", "Secret Store (Vault, AWS Secrets)"],
+    ["identity", "Identity (Okta, Auth0, AD)"],
+    ["object_store", "Object Store (S3, GCS)"],
+    ["custom", "Custom"],
+  ].map(([v, l]) => el("option", { value: v }, [l])));
+  const engineInput = el("input", { placeholder: "postgres / redis / kafka / harbor" });
+  const vendorInput = el("input", { placeholder: "AWS RDS / Cloud SQL / managed by team" });
+  const endpointInput = el("input", { placeholder: "host.region.example.com:5432" });
+
+  // Auto suggest engine + endpoint by kind
+  const engineMap = {
+    database: "postgres", cache: "redis", queue: "kafka",
+    registry: "harbor", backup: "s3", monitoring: "prometheus",
+    logging: "elasticsearch", secret_store: "vault",
+    identity: "okta", object_store: "s3", custom: "",
+  };
+  kindSel.addEventListener("change", () => {
+    if (!engineInput.value && engineMap[kindSel.value]) engineInput.placeholder = engineMap[kindSel.value];
+  });
+
+  root.appendChild(el("div", { class: "field" }, [el("label", {}, ["Name"]), nameInput]));
+  root.appendChild(el("div", { class: "field" }, [lbl("Kind", "extsvc.kind"), kindSel]));
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [lbl("Engine", "extsvc.engine"), engineInput]),
+    el("div", { class: "field" }, [el("label", {}, ["Vendor"]), vendorInput]),
+  ]));
+  root.appendChild(el("div", { class: "field" }, [lbl("Endpoint", "extsvc.endpoint"), endpointInput]));
+
+  root.appendChild(el("div", { class: "modal-actions" }, [
+    el("button", { class: "btn-ghost", onclick: closeModal }, ["Cancel"]),
+    el("button", { class: "btn", onclick: () => {
+      addExternalService(siteId, {
+        name: nameInput.value.trim() || "ext-svc",
+        kind: kindSel.value,
+        engine: engineInput.value.trim() || engineMap[kindSel.value],
+        vendor: vendorInput.value.trim(),
+        endpoint: endpointInput.value.trim(),
+      });
+      closeModal();
+    } }, ["Add"]),
+  ]));
+  openModal(root);
+}
+
+//============ Add Site Link modal ============
+function openAddSiteLink() {
+  const sites = state.project?.sites || [];
+  if (sites.length < 2) {
+    alert("Site Link은 사이트 2개 이상에서 사용 가능");
+    return;
+  }
+  const root = el("div");
+  root.appendChild(el("h2", {}, ["Add Site Link"]));
+  const fromSel = el("select", {}, sites.map(s => el("option", { value: s.id }, [s.name])));
+  const toSel = el("select", {}, sites.map((s, i) =>
+    el("option", { value: s.id, selected: i === 1 ? "" : null }, [s.name])));
+  const kindSel = el("select", {}, [
+    ["vpn", "VPN (site-to-site)"],
+    ["direct_connect", "Direct Connect (AWS DX / Cloud Interconnect)"],
+    ["internet", "Internet"],
+    ["leased", "Leased Line (전용회선)"],
+    ["private_link", "PrivateLink / PSC"],
+  ].map(([v, l]) => el("option", { value: v }, [l])));
+  const bwInput = el("input", { type: "number", min: "0", step: "0.1", value: "1" });
+  const latInput = el("input", { type: "number", min: "0", value: "10" });
+
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [el("label", {}, ["From Site"]), fromSel]),
+    el("div", { class: "field" }, [el("label", {}, ["To Site"]), toSel]),
+  ]));
+  root.appendChild(el("div", { class: "field" }, [lbl("Kind", "sitelink.kind"), kindSel]));
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [lbl("Bandwidth (Gbps)", "sitelink.bandwidth"), bwInput]),
+    el("div", { class: "field" }, [lbl("Latency (ms)", "sitelink.latency"), latInput]),
+  ]));
+
+  root.appendChild(el("div", { class: "modal-actions" }, [
+    el("button", { class: "btn-ghost", onclick: closeModal }, ["Cancel"]),
+    el("button", { class: "btn", onclick: () => {
+      if (fromSel.value === toSel.value) {
+        alert("From과 To는 다른 사이트여야 합니다.");
+        return;
+      }
+      addSiteLink({
+        from_site_id: fromSel.value,
+        to_site_id: toSel.value,
+        kind: kindSel.value,
+        bandwidth_gbps: parseFloat(bwInput.value) || 1,
+        latency_ms: parseFloat(latInput.value) || 10,
       });
       closeModal();
     } }, ["Add"]),

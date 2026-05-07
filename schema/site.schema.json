@@ -83,6 +83,69 @@
         }
       }
     },
+    "network_devices": {
+      "type": "array",
+      "description": "네트워크 장비 — 스위치/라우터/방화벽/WAF/CDN/VPN/DNS/DDoS.",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "kind"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "name": { "type": "string" },
+          "kind": {
+            "enum": ["switch", "router", "firewall", "waf", "cdn", "vpn", "dns", "ddos"],
+            "description": "switch=L2/L3 스위치, router=라우터, firewall=방화벽, waf=L7 WAF, cdn=CDN, vpn=VPN 게이트웨이, dns=DNS 서버, ddos=DDoS 방어"
+          },
+          "vendor": { "type": "string" },
+          "model": { "type": "string" },
+          "ip": { "type": "string" },
+          "vip": { "type": "string" },
+          "throughput_gbps": { "type": "number" },
+          "ha": { "type": "boolean", "default": false },
+          "zones": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "방화벽 보안 zone (DMZ/internal/management 등)"
+          },
+          "notes": { "type": "string" }
+        }
+      }
+    },
+    "external_services": {
+      "type": "array",
+      "description": "외부 관리형 서비스 — RDS/ElastiCache/SQS/Container Registry 등 클러스터 밖에 있지만 워크로드가 사용하는 자원.",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "kind"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "name": { "type": "string" },
+          "kind": {
+            "enum": ["database", "cache", "queue", "registry", "backup", "monitoring", "logging", "secret_store", "identity", "object_store", "custom"],
+            "description": "관리형 서비스 종류"
+          },
+          "engine": {
+            "type": "string",
+            "description": "예: postgres, mysql, redis, kafka, harbor, vault"
+          },
+          "vendor": {
+            "type": "string",
+            "description": "예: AWS RDS, Cloud SQL, ElastiCache, Harbor, Vault, Velero"
+          },
+          "version": { "type": "string" },
+          "endpoint": { "type": "string" },
+          "capacity_gb": { "type": "number" },
+          "region": { "type": "string" },
+          "target_cluster_ids": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "notes": { "type": "string" }
+        }
+      }
+    },
     "storages": {
       "type": "array",
       "description": "외부 스토리지 시스템 (NAS/SAN/Ceph 등). 클러스터의 PVC가 이걸 사용.",

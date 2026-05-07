@@ -1,4 +1,4 @@
-# vk8s Schema (v0.5)
+# vk8s Schema (v0.6)
 
 vk8s 프로젝트의 데이터 모델 정의. JSON Schema 2020-12 기준.
 
@@ -72,6 +72,13 @@ Cluster 내 `namespaces[]`/`network_policies[]` 인라인. NetworkPolicy 별도 
 
 ### 8. Helm은 워크로드 단위
 Workload 1개 = chart 1개. Export 시 umbrella chart로 묶을지는 export 옵션.
+
+## v0.5 → v0.6 변경
+
+- **Site.network_devices[]**: 스위치/라우터/방화벽/WAF/CDN/VPN/DNS/DDoS — 단일 배열, kind로 구분
+- **Site.external_services[]**: 관리형 외부 서비스 — DB/Cache/Queue/Registry/Backup/Monitoring/Logging/SecretStore/Identity/ObjectStore
+- **Project.site_links[]**: 사이트 간 연결 (VPN / Direct Connect / Internet / Leased / PrivateLink)
+- **Node.purpose**: compute / bastion / storage / edge
 
 ## v0.4 → v0.5 변경
 

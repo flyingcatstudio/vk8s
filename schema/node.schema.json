@@ -34,6 +34,11 @@
       "type": "string",
       "description": "이 노드가 속한 Site의 id"
     },
+    "purpose": {
+      "enum": ["compute", "bastion", "storage", "edge"],
+      "default": "compute",
+      "description": "운영 목적. compute=일반 워크로드, bastion=SSH 점프 호스트, storage=SDS 전용 (Ceph 등), edge=엣지 노드"
+    },
     "cluster_roles": {
       "type": "array",
       "uniqueItems": true,
