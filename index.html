@@ -969,7 +969,6 @@
       <span class="count" data-sev="warn"><span class="icon">▲</span> <span id="cntWarn">0</span> warnings</span>
       <span class="count" data-sev="info"><span class="icon">ⓘ</span> <span id="cntInfo">0</span> info</span>
       <span class="spacer"></span>
-      <span style="font-size:10px;color:var(--text3);font-family:'JetBrains Mono'">validator coming in Phase 2</span>
       <button class="toggle" id="btnFindings">Findings ▾</button>
     </div>
     <div class="findings-list" id="findingsList" style="display:none"></div>
@@ -1246,6 +1245,80 @@ const HELP = {
     title: "Onprem GPU 장착",
     body: "Onprem 서버는 새시가 GPU 무장착 출하될 수 있고, 사용자가 별도로 장착합니다. 카탈로그가 호환 가능 GPU만 보여줍니다.",
     reco: "1U 새시는 보통 0–2장, 2U는 3–4장, 4U/6U는 8장까지. 호환 안 되는 조합은 자동 차단.",
+  },
+
+  // ───── 워크로드 ─────
+  "workload.category": {
+    cat: "워크로드",
+    title: "Category",
+    body: "서비스 종류. 분류는 시뮬레이션 휴리스틱과 권장값(SPOF 검사, 병목 룰, runtime 프리셋 추천)에 영향.",
+    reco: "API/WAS=Spring·Node 백엔드, Frontend=정적/SSR, DB·Cache·Queue=stateful, ML-*=GPU 워크로드.",
+  },
+  "workload.replicas": {
+    cat: "워크로드",
+    title: "Replicas",
+    body: "동시에 띄울 Pod 개수. CPU/Memory 합산 = (per-pod 요구) × replicas.",
+    reco: "API/Frontend는 가용성 위해 ≥2. DB는 보통 1 (외부 HA 사용 시) 또는 StatefulSet 클러스터.",
+  },
+  "workload.kind": {
+    cat: "워크로드",
+    title: "Workload Kind",
+    body: "k8s 리소스 타입. Deployment=stateless, StatefulSet=stable identity 필요(DB), DaemonSet=노드별 1개, Job=한 번 실행.",
+    reco: "Web/API는 Deployment, DB·Cache는 StatefulSet, 모니터링 에이전트는 DaemonSet.",
+  },
+  "workload.runtime_preset": {
+    cat: "워크로드",
+    title: "Runtime Preset",
+    body: "검증된 런타임 기본값을 한 번에 적용. Spring Boot 17, FastAPI, Postgres 16 등 13개 프로파일.",
+    reco: "분명한 게 있으면 선택. 없으면 비워두고 직접 입력.",
+  },
+  "resources.cpu": {
+    cat: "워크로드",
+    title: "CPU Request (cores)",
+    body: "Pod 1개당 보장 받을 CPU. k8s가 이 값을 기준으로 노드에 스케줄링.",
+    reco: "라이트 API: 0.1–0.5. 일반 백엔드: 0.5–2. DB/배치: 2–8. 추정 어려우면 일단 0.5로 두고 모니터링.",
+  },
+  "resources.memory": {
+    cat: "워크로드",
+    title: "Memory Request (GB)",
+    body: "Pod 1개당 보장 받을 메모리. JVM이면 heap + 메타스페이스 + 오버헤드 포함.",
+    reco: "JVM은 heap_gb의 1.5배. Node.js는 512MB–2GB. DB는 활성 데이터셋에 비례.",
+  },
+  "resources.gpu_count": {
+    cat: "워크로드",
+    title: "GPU per Pod",
+    body: "Pod 1개당 요구 GPU 개수. 0이면 GPU 없음.",
+    reco: "추론은 보통 1, 학습/큰 모델은 4-8. NVLink가 있는 노드에 스케줄됩니다.",
+  },
+  "resources.gpu_model": {
+    cat: "워크로드",
+    title: "GPU Model 제약",
+    body: "특정 GPU 모델만 허용. (any)면 클러스터에 있는 어느 GPU든 OK.",
+    reco: "특정 VRAM/성능 필요할 때만 지정 (예: 70B 모델은 H200 필요).",
+  },
+  "runtime.concurrency_model": {
+    cat: "워크로드",
+    title: "Concurrency Model",
+    body: "동시 처리 모델. thread-pool=Java/Tomcat, event-loop=Node/Nginx, goroutine=Go, process-pool=gunicorn, async-await=Python asyncio.",
+    reco: "preset이 자동 채움. 일반적으로 framework가 결정합니다.",
+  },
+  "runtime.max_threads": {
+    cat: "워크로드",
+    title: "Max Threads / Workers",
+    body: "동시에 처리 가능한 요청 수. Tomcat 기본 200, gunicorn 권장 (2×CPU)+1.",
+    reco: "Java 17 = 200. Java 21 가상 스레드 = 10000+. Node.js = 1 (싱글 이벤트 루프). Python gunicorn = (2×CPU)+1.",
+  },
+  "runtime.heap_gb": {
+    cat: "워크로드",
+    title: "JVM Heap (GB)",
+    body: "JVM의 -Xmx 값. memory request의 50–70% 권장 (메타스페이스/스택 여유분 필요).",
+    reco: "memory request가 4GB면 heap 2–3GB. heap > memory면 OOMKilled 보장.",
+  },
+  "runtime.max_connections": {
+    cat: "워크로드",
+    title: "DB Max Connections",
+    body: "DB가 동시에 받을 수 있는 클라이언트 연결. PostgreSQL 기본 100.",
+    reco: "들어오는 caller pool 합이 80%를 넘으면 PgBouncer 권장.",
   },
 };
 
@@ -1560,6 +1633,9 @@ function deleteEntity(kind, id) {
       if (n) n.cluster_role = "unassigned";
     }
     state.project.clusters = state.project.clusters.filter(x => x.id !== id);
+  } else if (kind === "workload") {
+    deleteWorkload(id);
+    return;
   }
   if (state.ui.selectedId === id) state.ui.selectedId = null;
   emit(); saveSoon();
@@ -1640,6 +1716,83 @@ function updateClusterField(id, path, value) {
   emit(); saveSoon();
 }
 
+//============ Workload actions ============
+function addWorkload(clusterId, seed) {
+  const c = state.project.clusters.find(x => x.id === clusterId);
+  if (!c) return;
+  if (!c.workloads) c.workloads = [];
+  const id = slug(seed.name) + "-" + uid();
+  const wl = {
+    id,
+    name: seed.name,
+    category: seed.category || "API",
+    namespace: seed.namespace || "default",
+    labels: seed.labels || { app: slug(seed.name) || id },
+    replicas: parseInt(seed.replicas) || 1,
+    kind: seed.kind || "Deployment",
+    resources: {
+      requests: {
+        cpu: parseFloat(seed.cpu) || 0.5,
+        memory_gb: parseFloat(seed.memory_gb) || 1,
+      },
+    },
+  };
+  if (seed.gpu_count && seed.gpu_count > 0) {
+    wl.resources.requests.gpu = { count: parseInt(seed.gpu_count) };
+    if (seed.gpu_model) wl.resources.requests.gpu.model = seed.gpu_model;
+  }
+  // Apply runtime preset if chosen
+  if (seed.runtime_preset && state.catalog.runtime[seed.runtime_preset]) {
+    const p = state.catalog.runtime[seed.runtime_preset];
+    wl.runtime = JSON.parse(JSON.stringify(p));
+    delete wl.runtime.notes;
+  }
+  c.workloads.push(wl);
+  selectEntity("workload", id);
+  emit(); saveSoon();
+  return wl;
+}
+
+function findWorkload(id) {
+  for (const c of state.project.clusters || []) {
+    const w = (c.workloads || []).find(x => x.id === id);
+    if (w) return { workload: w, cluster: c };
+  }
+  return null;
+}
+
+function deleteWorkload(id) {
+  for (const c of state.project.clusters || []) {
+    const idx = (c.workloads || []).findIndex(x => x.id === id);
+    if (idx >= 0) {
+      c.workloads.splice(idx, 1);
+      // remove this id from any depends_on entries
+      for (const w of c.workloads) {
+        if (Array.isArray(w.depends_on)) {
+          w.depends_on = w.depends_on.filter(d => d.target_workload_id !== id);
+        }
+      }
+      break;
+    }
+  }
+  if (state.ui.selectedId === id) state.ui.selectedId = null;
+  emit(); saveSoon();
+}
+
+function updateWorkloadField(id, path, value) {
+  const found = findWorkload(id);
+  if (!found) return;
+  const parts = path.split(".");
+  let obj = found.workload;
+  while (parts.length > 1) {
+    const p = parts.shift();
+    if (obj[p] == null) obj[p] = {};
+    obj = obj[p];
+  }
+  obj[parts[0]] = value;
+  emit(); saveSoon();
+}
+
 function selectEntity(kind, id) {
   state.ui.selectedKind = kind;
   state.ui.selectedId   = id;
@@ -1673,6 +1826,176 @@ function updateSiteField(id, path, value) {
   }
   obj[parts[0]] = value;
   emit(); saveSoon();
+}
+
+//============ Validator ============
+// Returns array of findings: { id, sev:'error'|'warn'|'info', msg, scope:{kind,id}, helpId? }
+function runValidator(project) {
+  if (!project) return [];
+  const findings = [];
+  const gpuModels = state.catalog.gpuModels;
+  const F = (id, sev, msg, scope, helpId) => findings.push({ id, sev, msg, scope, helpId });
+
+  // 1. Project: mode vs site kind
+  for (const s of project.sites || []) {
+    if (project.mode === "onprem" && s.kind !== "onprem")
+      F("MODE_SITE_KIND_CONFLICT", "error", `Site '${s.name}': onprem 모드인데 cloud Site`, { kind: "site", id: s.id });
+    if (project.mode === "cloud" && s.kind !== "cloud")
+      F("MODE_SITE_KIND_CONFLICT", "error", `Site '${s.name}': cloud 모드인데 onprem Site`, { kind: "site", id: s.id });
+  }
+
+  // 2. Node GPU compatibility (chassis vs installed)
+  for (const n of project.nodes || []) {
+    const chassis = n.spec?.gpu_chassis || {};
+    const gpus = n.spec?.gpu || [];
+    const total = gpus.reduce((a, g) => a + (g.count || 0), 0);
+    if (total > 0 && (chassis.max_count || 0) === 0) {
+      F("GPU_CHASSIS_NOT_SUPPORTED", "error", `${n.name}: 이 새시는 GPU 미지원`, { kind: "node", id: n.id });
+    }
+    if (total > (chassis.max_count || 0) && (chassis.max_count || 0) > 0) {
+      F("GPU_COUNT_EXCEEDS_CHASSIS", "error",
+        `${n.name}: GPU ${total}장 > 새시 max ${chassis.max_count}`, { kind: "node", id: n.id });
+    }
+    for (const g of gpus) {
+      if (g.form_factor && !(chassis.supported_form_factors || []).includes(g.form_factor)) {
+        F("GPU_FORM_FACTOR_MISMATCH", "error",
+          `${n.name}: ${g.model} 폼팩터(${g.form_factor}) 미지원`, { kind: "node", id: n.id });
+      }
+      if (g.model && (chassis.supported_models || []).length && !(chassis.supported_models || []).includes(g.model)) {
+        F("GPU_MODEL_NOT_IN_CHASSIS_LIST", "error",
+          `${n.name}: ${g.model}이 새시 목록에 없음`, { kind: "node", id: n.id });
+      }
+      if (g.nvlink_enabled && chassis.nvlink_topology === "none") {
+        F("NVLINK_ON_NONE_TOPOLOGY", "error",
+          `${n.name}: NVLink 미지원 새시인데 NVLink 활성`, { kind: "node", id: n.id });
+      }
+    }
+  }
+
+  // 3. Site capacity (onprem)
+  for (const s of project.sites || []) {
+    if (s.kind !== "onprem") continue;
+    const usage = siteUsage(s, project, gpuModels);
+    if (!usage) continue;
+    if (usage.u_max && usage.u_used > usage.u_max) {
+      F("SITE_RACK_UNITS_EXCEEDED", "error",
+        `${s.name}: ${usage.u_used}U 요구, ${usage.u_max}U 가용`, { kind: "site", id: s.id }, "site.rack_units");
+    }
+    if (usage.kw_max && usage.kw_used > usage.kw_max) {
+      F("SITE_POWER_EXCEEDED", "error",
+        `${s.name}: ${usage.kw_used.toFixed(1)}kW 요구, ${usage.kw_max}kW 예산`, { kind: "site", id: s.id }, "site.power_kw");
+    } else if (usage.kw_max && usage.kw_used / usage.kw_max >= 0.9) {
+      F("SITE_POWER_HIGH_UTILIZATION", "warn",
+        `${s.name}: 전력 ${(usage.kw_used / usage.kw_max * 100).toFixed(0)}% — 헤드룸 부족`, { kind: "site", id: s.id });
+    }
+  }
+
+  // 4. Cluster checks
+  for (const c of project.clusters || []) {
+    const nodes = (c.node_ids || []).map(id => project.nodes.find(n => n.id === id)).filter(Boolean);
+    if (!nodes.length) continue;
+    const cp = nodes.filter(n => n.cluster_role === "control-plane").length;
+    if (cp === 0) {
+      F("CLUSTER_NO_CONTROL_PLANE", "error",
+        `${c.name}: control plane 노드 없음`, { kind: "cluster", id: c.id });
+    }
+    if (c.ha_control_plane && cp > 0 && cp < 3) {
+      F("HA_CONTROL_PLANE_NOT_ENOUGH", "error",
+        `${c.name}: HA control plane은 ≥3 필요 (현재 ${cp})`, { kind: "cluster", id: c.id }, "cluster.ha_control_plane");
+    }
+    if (c.ha_control_plane && cp >= 3 && cp % 2 === 0) {
+      F("HA_CONTROL_PLANE_EVEN_NUMBER", "warn",
+        `${c.name}: control plane ${cp}개 (짝수). etcd 쿼럼은 홀수 권장`, { kind: "cluster", id: c.id });
+    }
+    // GPU node + no operator
+    const hasGpu = nodes.some(n => (n.spec?.gpu || []).length > 0 || (n.spec?.gpu_chassis?.max_count || 0) > 0);
+    if (hasGpu && !c.addons?.gpu_operator) {
+      F("GPU_NODE_NO_GPU_OPERATOR", "warn",
+        `${c.name}: GPU 노드 보유 — GPU Operator 권장`, { kind: "cluster", id: c.id }, "cluster.gpu_operator");
+    }
+    // Mixed environments
+    const sites = new Set(nodes.map(n => project.sites.find(s => s.id === n.site_id)?.kind).filter(Boolean));
+    if (sites.size > 1) {
+      F("CLUSTER_SPANS_ENVIRONMENTS", "warn",
+        `${c.name}: cloud+onprem 양쪽에 걸침`, { kind: "cluster", id: c.id });
+    }
+    // No CNI
+    if (!c.addons?.cni || c.addons.cni === "None") {
+      F("NO_CNI_SELECTED", "warn",
+        `${c.name}: CNI 미선택 — Pod 네트워킹 불가`, { kind: "cluster", id: c.id }, "cluster.cni");
+    }
+
+    // 5. Workload checks (per cluster)
+    const wls = c.workloads || [];
+    const totalCpu = nodes.filter(n => n.cluster_role !== "control-plane").reduce((a, n) => a + (n.spec?.vcpu || 0), 0);
+    const totalMem = nodes.filter(n => n.cluster_role !== "control-plane").reduce((a, n) => a + (n.spec?.memory_gb || 0), 0);
+    const wlCpu = wls.reduce((a, w) => a + (w.resources?.requests?.cpu || 0) * (w.replicas || 1), 0);
+    const wlMem = wls.reduce((a, w) => a + (w.resources?.requests?.memory_gb || 0) * (w.replicas || 1), 0);
+    if (wls.length && totalCpu > 0 && wlCpu > totalCpu) {
+      F("WORKLOAD_CPU_NOT_SCHEDULABLE", "error",
+        `${c.name}: 워크로드 CPU ${wlCpu.toFixed(1)}c > 가용 ${totalCpu}c`, { kind: "cluster", id: c.id });
+    }
+    if (wls.length && totalMem > 0 && wlMem > totalMem) {
+      F("WORKLOAD_MEM_NOT_SCHEDULABLE", "error",
+        `${c.name}: 워크로드 RAM ${wlMem.toFixed(0)}GB > 가용 ${totalMem}GB`, { kind: "cluster", id: c.id });
+    }
+
+    // GPU workload but no GPU node
+    for (const w of wls) {
+      const gReq = w.resources?.requests?.gpu;
+      if (!gReq) continue;
+      const totalNeeded = (gReq.count || 0) * (w.replicas || 1);
+      const totalAvail = nodes.reduce((a, n) =>
+        a + (n.spec?.gpu || []).reduce((aa, g) => aa + (g.count || 0), 0), 0);
+      if (totalNeeded > 0 && totalAvail === 0) {
+        F("WORKLOAD_GPU_NO_NODE", "error",
+          `${w.name}: GPU 요구하나 클러스터에 GPU 없음`, { kind: "workload", id: w.id });
+      }
+      if (totalNeeded > totalAvail && totalAvail > 0) {
+        F("WORKLOAD_GPU_INSUFFICIENT", "error",
+          `${w.name}: GPU ${totalNeeded}장 요구, ${totalAvail}장 가용`, { kind: "workload", id: w.id });
+      }
+      if (gReq.model) {
+        const have = nodes.some(n => (n.spec?.gpu || []).some(g => g.model === gReq.model));
+        if (!have) {
+          F("WORKLOAD_GPU_MODEL_NOT_AVAILABLE", "error",
+            `${w.name}: ${gReq.model} 요구, 클러스터에 없음`, { kind: "workload", id: w.id });
+        }
+      }
+    }
+
+    // Workload-level rules
+    for (const w of wls) {
+      // SPOF
+      if ((w.replicas || 1) === 1 && ["API", "WAS", "DB", "Cache", "Queue"].includes(w.category)) {
+        F("SPOF_RISK", "warn",
+          `${w.name}: replicas=1, ${w.category} (SPOF 위험)`, { kind: "workload", id: w.id });
+      }
+      // JVM heap > memory request → OOM 보장
+      const heap = w.runtime?.concurrency?.heap_gb;
+      const mem = w.resources?.requests?.memory_gb;
+      if (heap && mem && heap > mem) {
+        F("JVM_HEAP_GT_REQUEST", "error",
+          `${w.name}: heap ${heap}GB > memory ${mem}GB → OOMKilled 보장`, { kind: "workload", id: w.id }, "runtime.heap_gb");
+      } else if (heap && mem && heap < mem * 0.5) {
+        F("JVM_HEAP_TOO_SMALL", "warn",
+          `${w.name}: heap ${heap}GB가 memory ${mem}GB의 절반 미만`, { kind: "workload", id: w.id }, "runtime.heap_gb");
+      }
+    }
+
+    // Node not in any cluster but has cluster_role (shouldn't normally happen)
+  }
+
+  // 6. Node integrity
+  for (const n of project.nodes || []) {
+    const inCluster = (project.clusters || []).filter(c => (c.node_ids || []).includes(n.id));
+    if (inCluster.length > 1) {
+      F("NODE_IN_MULTIPLE_CLUSTERS", "error",
+        `${n.name}: ${inCluster.length}개 클러스터에 속함`, { kind: "node", id: n.id });
+    }
+  }
+
+  return findings;
 }
 
 //============ Compatibility check (subset for Add Node preview) ============
@@ -1826,7 +2149,8 @@ function renderTree() {
     clustersSec.appendChild(el("div", { class: "empty-hint" }, ["클러스터를 추가하세요."]));
   }
   for (const c of clusters) {
-    const meta = `${(c.node_ids || []).length} nodes`;
+    const wlCount = (c.workloads || []).length;
+    const meta = `${(c.node_ids || []).length}n / ${wlCount}w`;
     clustersSec.appendChild(el("div", {
       class: "tree-item" + (state.ui.selectedKind === "cluster" && state.ui.selectedId === c.id ? " selected" : ""),
       onclick: () => selectEntity("cluster", c.id),
@@ -1835,6 +2159,16 @@ function renderTree() {
       el("span", { class: "label" }, [c.name]),
       el("span", { class: "meta" }, [meta]),
     ]));
+    for (const w of (c.workloads || [])) {
+      clustersSec.appendChild(el("div", {
+        class: "tree-item child" + (state.ui.selectedKind === "workload" && state.ui.selectedId === w.id ? " selected" : ""),
+        onclick: () => selectEntity("workload", w.id),
+      }, [
+        el("span", { class: "icon" }, ["◇"]),
+        el("span", { class: "label" }, [w.name]),
+        el("span", { class: "meta" }, [w.category]),
+      ]));
+    }
   }
   root.appendChild(clustersSec);
 
@@ -1860,6 +2194,7 @@ function renderInspector() {
   if (k === "site") renderSiteInspector(root, id);
   else if (k === "node") renderNodeInspector(root, id);
   else if (k === "cluster") renderClusterInspector(root, id);
+  else if (k === "workload") renderWorkloadInspector(root, id);
 }
 
 function renderSiteInspector(root, id) {
@@ -2235,6 +2570,34 @@ function renderClusterInspector(root, id) {
     ]));
   }
 
+  // Workloads
+  const workloads = c.workloads || [];
+  root.appendChild(el("div", { class: "section-title" }, [`Workloads (${workloads.length})`]));
+  if (workloads.length === 0) {
+    root.appendChild(el("div", { class: "empty-hint" }, ["워크로드가 없습니다."]));
+  } else {
+    const list = el("div", { class: "row-list" });
+    for (const w of workloads) {
+      const reqs = w.resources?.requests || {};
+      const totalCpu = (reqs.cpu || 0) * (w.replicas || 1);
+      const totalMem = (reqs.memory_gb || 0) * (w.replicas || 1);
+      list.appendChild(el("div", { class: "row" }, [
+        el("span", { class: "icon" }, ["◇"]),
+        el("span", { class: "name", style: { cursor: "pointer" }, onclick: () => selectEntity("workload", w.id) }, [w.name]),
+        el("span", { style: { fontSize: "10px", color: "var(--text3)", fontFamily: "JetBrains Mono" } }, [
+          `×${w.replicas} ${totalCpu}c ${totalMem}G`,
+        ]),
+        el("button", { class: "x", title: "remove", onclick: () => { if (confirm(`'${w.name}' 삭제?`)) deleteWorkload(w.id); } }, ["✕"]),
+      ]));
+    }
+    root.appendChild(list);
+  }
+  root.appendChild(el("button", {
+    class: "add-btn",
+    style: { marginTop: "8px", width: "100%" },
+    onclick: () => openAddWorkload(c.id),
+  }, ["＋ Add Workload"]));
+
   // Findings preview (basic checks)
   const cpCount = assignedNodes.filter(n => n.cluster_role === "control-plane").length;
   const issues = [];
@@ -2255,6 +2618,187 @@ function renderClusterInspector(root, id) {
       list.appendChild(el("div", { class: cls }, [`${i.sev === "err" ? "⊗" : "▲"} ${i.msg}`]));
     }
     root.appendChild(list);
+  }
+}
+
+function renderWorkloadInspector(root, id) {
+  const found = findWorkload(id);
+  if (!found) return;
+  const { workload: w, cluster } = found;
+  const totalCpu = (w.resources?.requests?.cpu || 0) * (w.replicas || 1);
+  const totalMem = (w.resources?.requests?.memory_gb || 0) * (w.replicas || 1);
+  const gpuReq = w.resources?.requests?.gpu;
+
+  root.appendChild(el("div", { class: "insp-header" }, [
+    el("span", { class: "kind" }, ["Workload"]),
+    el("span", { class: "name" }, [w.name]),
+    el("button", {
+      class: "delete", title: "Delete workload",
+      onclick: () => { if (confirm(`'${w.name}' 삭제?`)) deleteWorkload(id); },
+    }, ["🗑"]),
+  ]));
+
+  // Tabs
+  if (!state.ui.workloadTab) state.ui.workloadTab = "basic";
+  const tabs = ["basic", "resources", "runtime"];
+  const tabBar = el("div", {
+    style: { display: "flex", gap: "2px", borderBottom: "1px solid var(--border)", marginBottom: "12px" },
+  }, tabs.map(t =>
+    el("button", {
+      class: "view-tab" + (state.ui.workloadTab === t ? " active" : ""),
+      style: { padding: "6px 12px", fontSize: "11px" },
+      onclick: () => { state.ui.workloadTab = t; emit(); },
+    }, [t.charAt(0).toUpperCase() + t.slice(1)])
+  ));
+  root.appendChild(tabBar);
+
+  if (state.ui.workloadTab === "basic") {
+    root.appendChild(el("div", { class: "field" }, [
+      el("label", {}, ["Name"]),
+      el("input", { value: w.name, oninput: e => updateWorkloadField(id, "name", e.target.value) }),
+    ]));
+    root.appendChild(el("div", { class: "field-row" }, [
+      el("div", { class: "field" }, [
+        lbl("Category", "workload.category"),
+        el("select", { onchange: e => updateWorkloadField(id, "category", e.target.value) },
+          ["Frontend","API","WAS","DB","Cache","Queue","ML-Inference","ML-Training","Video","Batch","Other"].map(v =>
+            el("option", { value: v, selected: v === w.category ? "" : null }, [v]))),
+      ]),
+      el("div", { class: "field" }, [
+        lbl("Kind", "workload.kind"),
+        el("select", { onchange: e => updateWorkloadField(id, "kind", e.target.value) },
+          ["Deployment","StatefulSet","DaemonSet","Job","CronJob"].map(v =>
+            el("option", { value: v, selected: v === (w.kind || "Deployment") ? "" : null }, [v]))),
+      ]),
+    ]));
+    root.appendChild(el("div", { class: "field-row" }, [
+      el("div", { class: "field" }, [
+        lbl("Replicas", "workload.replicas"),
+        el("input", { type: "number", min: "1", value: w.replicas || 1,
+                      oninput: e => updateWorkloadField(id, "replicas", parseInt(e.target.value) || 1) }),
+      ]),
+      el("div", { class: "field" }, [
+        el("label", {}, ["Namespace"]),
+        el("input", { value: w.namespace || "default",
+                      oninput: e => updateWorkloadField(id, "namespace", e.target.value) }),
+      ]),
+    ]));
+    root.appendChild(el("div", { class: "field" }, [
+      el("label", {}, ["Cluster"]),
+      el("div", { class: "field-readonly" }, [cluster.name]),
+    ]));
+  }
+  else if (state.ui.workloadTab === "resources") {
+    const reqs = w.resources?.requests || {};
+    root.appendChild(el("div", { class: "section-title" }, ["Per-pod requests"]));
+    root.appendChild(el("div", { class: "field-row" }, [
+      el("div", { class: "field" }, [
+        lbl("CPU (cores)", "resources.cpu"),
+        el("input", { type: "number", min: "0", step: "0.1", value: reqs.cpu || 0,
+                      oninput: e => updateWorkloadField(id, "resources.requests.cpu", parseFloat(e.target.value) || 0) }),
+      ]),
+      el("div", { class: "field" }, [
+        lbl("Memory (GB)", "resources.memory"),
+        el("input", { type: "number", min: "0", step: "0.5", value: reqs.memory_gb || 0,
+                      oninput: e => updateWorkloadField(id, "resources.requests.memory_gb", parseFloat(e.target.value) || 0) }),
+      ]),
+    ]));
+
+    // GPU section
+    root.appendChild(el("div", { class: "section-title" }, ["GPU (선택)"]));
+    const gpuModels = state.catalog.gpuModels;
+    const gpuReq = reqs.gpu || {};
+    root.appendChild(el("div", { class: "field-row" }, [
+      el("div", { class: "field" }, [
+        lbl("GPU count", "resources.gpu_count"),
+        el("input", { type: "number", min: "0", value: gpuReq.count || 0,
+                      oninput: e => {
+                        const cnt = parseInt(e.target.value) || 0;
+                        if (cnt > 0) updateWorkloadField(id, "resources.requests.gpu", { ...gpuReq, count: cnt });
+                        else updateWorkloadField(id, "resources.requests.gpu", undefined);
+                      }
+        }),
+      ]),
+      el("div", { class: "field" }, [
+        lbl("GPU model (선택)", "resources.gpu_model"),
+        el("select", { onchange: e => {
+          const model = e.target.value || undefined;
+          if (gpuReq.count) updateWorkloadField(id, "resources.requests.gpu", { ...gpuReq, model });
+        }}, [
+          el("option", { value: "" }, ["(any)"]),
+          ...Object.keys(gpuModels).map(k =>
+            el("option", { value: k, selected: gpuReq.model === k ? "" : null }, [k])),
+        ]),
+      ]),
+    ]));
+
+    root.appendChild(el("div", { class: "section-title" }, ["Cluster total"]));
+    root.appendChild(el("div", { class: "compat-result" }, [
+      el("div", {}, [`${totalCpu} vCPU · ${totalMem} GB RAM · ${gpuReq.count ? `${gpuReq.count * (w.replicas || 1)} GPUs` : "no GPU"}`]),
+      el("div", { style: { color: "var(--text2)" } }, [`(per pod × ${w.replicas} replicas)`]),
+    ]));
+  }
+  else if (state.ui.workloadTab === "runtime") {
+    const r = w.runtime || {};
+    const presets = state.catalog.runtime || {};
+    root.appendChild(el("div", { class: "field" }, [
+      lbl("Apply preset", "workload.runtime_preset"),
+      el("select", {
+        onchange: e => {
+          const k = e.target.value;
+          if (!k) return;
+          const p = presets[k];
+          if (!p) return;
+          const newRt = JSON.parse(JSON.stringify(p));
+          delete newRt.notes;
+          updateWorkloadField(id, "runtime", newRt);
+        }}, [
+          el("option", { value: "" }, ["(preset 선택…)"]),
+          ...Object.keys(presets).map(k =>
+            el("option", { value: k }, [`${k} — ${presets[k].framework || presets[k].language}`])),
+        ]),
+    ]));
+
+    root.appendChild(el("div", { class: "field-row" }, [
+      el("div", { class: "field" }, [
+        el("label", {}, ["Language"]),
+        el("input", { value: r.language || "", oninput: e => updateWorkloadField(id, "runtime.language", e.target.value) }),
+      ]),
+      el("div", { class: "field" }, [
+        el("label", {}, ["Framework"]),
+        el("input", { value: r.framework || "", oninput: e => updateWorkloadField(id, "runtime.framework", e.target.value) }),
+      ]),
+    ]));
+
+    const conc = r.concurrency || {};
+    root.appendChild(el("div", { class: "field-row" }, [
+      el("div", { class: "field" }, [
+        lbl("Concurrency model", "runtime.concurrency_model"),
+        el("select", { onchange: e => updateWorkloadField(id, "runtime.concurrency.model", e.target.value || undefined) }, [
+          el("option", { value: "" }, ["(none)"]),
+          ...["thread-pool", "event-loop", "goroutine", "process-pool", "async-await"].map(v =>
+            el("option", { value: v, selected: v === conc.model ? "" : null }, [v])),
+        ]),
+      ]),
+      el("div", { class: "field" }, [
+        lbl("Max threads / workers", "runtime.max_threads"),
+        el("input", { type: "number", min: "1", value: conc.max_threads || conc.workers || "",
+                      oninput: e => updateWorkloadField(id, "runtime.concurrency." + (conc.model === "process-pool" ? "workers" : "max_threads"), parseInt(e.target.value) || undefined) }),
+      ]),
+    ]));
+
+    root.appendChild(el("div", { class: "field-row" }, [
+      el("div", { class: "field" }, [
+        lbl("Heap (GB)", "runtime.heap_gb"),
+        el("input", { type: "number", min: "0", step: "0.5", value: conc.heap_gb || "",
+                      oninput: e => updateWorkloadField(id, "runtime.concurrency.heap_gb", parseFloat(e.target.value) || undefined) }),
+      ]),
+      el("div", { class: "field" }, [
+        lbl("DB max_connections", "runtime.max_connections"),
+        el("input", { type: "number", min: "1", value: r.max_connections || "",
+                      oninput: e => updateWorkloadField(id, "runtime.max_connections", parseInt(e.target.value) || undefined) }),
+      ]),
+    ]));
   }
 }
 
@@ -2321,6 +2865,18 @@ function renderTopology() {
           el("div", { class: "head" }, ["Note"]),
           el("div", { class: "lead" }, [`${unassigned}개 노드가 클러스터에 할당되지 않음. 클러스터를 선택해 추가하세요.`]),
         ]),
+      ]));
+    }
+    const totalWl = (p.clusters || []).reduce((a, c) => a + (c.workloads?.length || 0), 0);
+    if (totalWl === 0) {
+      const firstC = p.clusters[0];
+      root.appendChild(el("div", { class: "next-hint" }, [
+        el("span", { class: "icon" }, ["③"]),
+        el("div", { class: "body" }, [
+          el("div", { class: "head" }, ["Next step"]),
+          el("div", { class: "lead" }, [`클러스터가 준비됐습니다. 이제 워크로드(서비스)를 추가하세요.`]),
+        ]),
+        el("button", { class: "btn", onclick: () => openAddWorkload(firstC.id) }, ["＋ Add Workload"]),
       ]));
     }
   }
@@ -2402,12 +2958,61 @@ function renderViewBody() {
   ]));
 }
 
+function renderFindings() {
+  const findings = state.project ? runValidator(state.project) : [];
+  state.ui.findings = findings;
+
+  const counts = { error: 0, warn: 0, info: 0 };
+  for (const f of findings) counts[f.sev] = (counts[f.sev] || 0) + 1;
+  $("#cntErr").textContent = String(counts.error);
+  $("#cntWarn").textContent = String(counts.warn);
+  $("#cntInfo").textContent = String(counts.info);
+
+  // Hide the "validator coming in Phase 2" placeholder (we're in Phase 2 now)
+  const placeholder = document.querySelector(".findings-summary span[style*='Phase 2']");
+  if (placeholder) placeholder.style.display = "none";
+
+  // Render expanded list if visible
+  const list = $("#findingsList");
+  if (list.style.display !== "none") {
+    list.innerHTML = "";
+    if (!findings.length) {
+      list.appendChild(el("div", { style: { padding: "12px 16px", color: "var(--text2)", fontSize: "12px", textAlign: "center" } }, ["✓ 모든 검증 통과"]));
+    } else {
+      // Sort: error → warn → info
+      const sevOrder = { error: 0, warn: 1, info: 2 };
+      const sorted = [...findings].sort((a, b) => sevOrder[a.sev] - sevOrder[b.sev]);
+      for (const f of sorted) {
+        const icon = f.sev === "error" ? "⊗" : f.sev === "warn" ? "▲" : "ⓘ";
+        const color = f.sev === "error" ? "var(--red)" : f.sev === "warn" ? "var(--yellow)" : "var(--accent)";
+        const row = el("div", {
+          class: "finding-row",
+          onclick: () => {
+            if (f.scope) selectEntity(f.scope.kind, f.scope.id);
+          },
+        }, [
+          el("span", { class: "id", style: { color } }, [icon]),
+          el("span", { class: "id" }, [f.id]),
+          el("span", { class: "msg" }, [f.msg]),
+        ]);
+        if (f.helpId && HELP[f.helpId]) {
+          const ic = helpIcon(f.helpId);
+          ic.addEventListener("click", e => e.stopPropagation());
+          row.appendChild(ic);
+        }
+        list.appendChild(row);
+      }
+    }
+  }
+}
+
 function renderAll() {
   renderTopbar();
   renderViewTabs();
   renderTree();
   renderInspector();
   renderViewBody();
+  renderFindings();
 }
 
 //============ Modal helpers ============
@@ -2693,6 +3298,83 @@ function openAddCluster() {
   openModal(root);
 }
 
+//============ Add Workload modal ============
+function openAddWorkload(clusterId) {
+  const c = (state.project.clusters || []).find(x => x.id === clusterId);
+  if (!c) return;
+
+  const root = el("div");
+  root.appendChild(el("h2", {}, ["Add Workload"]));
+  root.appendChild(el("div", { style: { color: "var(--text2)", fontSize: "12px", marginBottom: "12px" } }, [
+    `Cluster: `, el("strong", {}, [c.name]),
+  ]));
+
+  const nameInput = el("input", { value: `service-${(c.workloads?.length || 0) + 1}` });
+  const catSel = el("select", {}, ["API","Frontend","WAS","DB","Cache","Queue","ML-Inference","ML-Training","Video","Batch","Other"].map(v => el("option", { value: v }, [v])));
+  const replicasInput = el("input", { type: "number", min: "1", value: "2" });
+  const cpuInput = el("input", { type: "number", min: "0", step: "0.1", value: "0.5" });
+  const memInput = el("input", { type: "number", min: "0", step: "0.5", value: "1" });
+  const gpuCountInput = el("input", { type: "number", min: "0", value: "0" });
+
+  // Runtime preset
+  const presets = state.catalog.runtime || {};
+  const presetSel = el("select", {}, [
+    el("option", { value: "" }, ["(none)"]),
+    ...Object.keys(presets).map(k =>
+      el("option", { value: k }, [`${k} — ${presets[k].framework || presets[k].language}`])),
+  ]);
+
+  root.appendChild(el("div", { class: "field" }, [el("label", {}, ["Name"]), nameInput]));
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [lbl("Category", "workload.category"), catSel]),
+    el("div", { class: "field" }, [lbl("Replicas", "workload.replicas"), replicasInput]),
+  ]));
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [lbl("CPU per pod", "resources.cpu"), cpuInput]),
+    el("div", { class: "field" }, [lbl("Memory (GB) per pod", "resources.memory"), memInput]),
+  ]));
+  root.appendChild(el("div", { class: "field" }, [
+    lbl("GPU count per pod (선택)", "resources.gpu_count"), gpuCountInput,
+  ]));
+  root.appendChild(el("div", { class: "field" }, [
+    lbl("Runtime preset (선택)", "workload.runtime_preset"), presetSel,
+  ]));
+
+  // Auto-suggest preset based on category
+  catSel.addEventListener("change", () => {
+    const map = {
+      "API": "spring-boot-17",
+      "WAS": "spring-boot-17",
+      "Frontend": "node-fastify-20",
+      "DB": "postgres-16",
+      "Cache": "redis-7",
+      "Queue": "kafka-3.7",
+    };
+    const suggest = map[catSel.value];
+    if (suggest && presets[suggest]) presetSel.value = suggest;
+  });
+  catSel.dispatchEvent(new Event("change"));
+
+  const actions = el("div", { class: "modal-actions" }, [
+    el("button", { class: "btn-ghost", onclick: closeModal }, ["Cancel"]),
+    el("button", { class: "btn", onclick: () => {
+      addWorkload(clusterId, {
+        name: nameInput.value.trim() || "service",
+        category: catSel.value,
+        replicas: parseInt(replicasInput.value) || 1,
+        cpu: parseFloat(cpuInput.value),
+        memory_gb: parseFloat(memInput.value),
+        gpu_count: parseInt(gpuCountInput.value) || 0,
+        runtime_preset: presetSel.value || undefined,
+      });
+      closeModal();
+    } }, ["Add Workload"]),
+  ]);
+  root.appendChild(actions);
+
+  openModal(root);
+}
+
 //============ Splash ============
 function renderSplash() {
   const splash = $("#splash");
@@ -2761,6 +3443,7 @@ function bindFindings() {
     list.style.display = open ? "none" : "block";
     btn.textContent = open ? "Findings ▾" : "Findings ▴";
     document.getElementById("app").dataset.findingsExpanded = String(!open);
+    renderFindings();
   });
 }
 
