@@ -1034,7 +1034,7 @@ const CATALOG_FILES  = [
 ];
 const VIEWS = [
   { id: "topology",  name: "Topology",   ready: true  },
-  { id: "capacity",  name: "Capacity",   ready: false },
+  { id: "capacity",  name: "Capacity",   ready: true  },
   { id: "depgraph",  name: "Dependency", ready: false },
   { id: "namespace", name: "Namespace",  ready: false },
   { id: "bottleneck",name: "Bottleneck", ready: false },
@@ -1252,6 +1252,12 @@ const HELP = {
     title: "PSU Power Budget",
     body: "노드의 PSU 정격(W). 노드 총 전력 = base + Σ(GPU TDP × count) + 디스크. PSU를 넘으면 부팅 자체가 안 되거나 셧다운.",
     reco: "추천: 사용률 < 80%. PSU 90% 도달 시 경고, 100% 초과 시 차단. PSU 부족하면 더 큰 새시(예: XE9680=10800W)나 적은 GPU 선택.",
+  },
+  "view.capacity": {
+    cat: "기타",
+    title: "Capacity View — 스케줄링 시뮬레이션",
+    body: "각 워커 노드의 실제 활용도를 보여줍니다. 워크로드의 모든 replica를 first-fit 알고리즘으로 노드에 배치 후, 노드별 CPU/Mem/GPU/VRAM/PSU 점유율을 계산.",
+    reco: "어떤 노드가 가장 빡빡한지, 어떤 pod이 안 들어가는지 한눈에 파악. anti-affinity / nodeSelector는 현재 미반영(다음 버전).",
   },
 
   // ───── 워크로드 ─────
@@ -3224,11 +3230,249 @@ function renderTopology() {
   }
 }
 
+//============ Scheduling simulation (first-fit) ============
+function simulateScheduling(project) {
+  const gpuModels = state.catalog.gpuModels;
+  // Per-node remaining capacity (worker nodes only)
+  const remaining = new Map();
+  for (const n of project.nodes || []) {
+    if (!(n.cluster_roles || []).includes("worker")) continue;
+    const gpus = n.spec?.gpu || [];
+    const totalGpu = gpus.reduce((a, g) => a + (g.count || 0), 0);
+    const totalVram = gpus.reduce((a, g) => a + (g.count || 0) * (gpuModels[g.model]?.vram_gb || 0), 0);
+    const byModel = new Map();
+    for (const g of gpus) byModel.set(g.model, (byModel.get(g.model) || 0) + (g.count || 0));
+    remaining.set(n.id, {
+      cpu: n.spec?.vcpu || 0,
+      mem: n.spec?.memory_gb || 0,
+      gpu: totalGpu,
+      vram: totalVram,
+      gpuByModel: byModel,
+    });
+  }
+
+  const placements = new Map();   // nodeId → array of { workloadId, workloadName, replicaIdx, cpuReq, memReq, gpuReq, gpuModel }
+  const unscheduled = [];
+
+  for (const c of project.clusters || []) {
+    const workers = (c.node_ids || [])
+      .map(id => project.nodes.find(n => n.id === id))
+      .filter(n => n && (n.cluster_roles || []).includes("worker"));
+    for (const w of c.workloads || []) {
+      const reqs = w.resources?.requests || {};
+      const cpuReq = reqs.cpu || 0;
+      const memReq = reqs.memory_gb || 0;
+      const gpuReq = reqs.gpu?.count || 0;
+      const gpuModel = reqs.gpu?.model;
+      const vramReq = (reqs.gpu?.vram_gb || 0) * gpuReq;
+      for (let i = 0; i < (w.replicas || 1); i++) {
+        let placedNode = null;
+        for (const n of workers) {
+          const r = remaining.get(n.id);
+          if (!r) continue;
+          if (r.cpu < cpuReq || r.mem < memReq || r.gpu < gpuReq || r.vram < vramReq) continue;
+          if (gpuModel && (r.gpuByModel.get(gpuModel) || 0) < gpuReq) continue;
+          // Place
+          r.cpu -= cpuReq; r.mem -= memReq; r.gpu -= gpuReq; r.vram -= vramReq;
+          if (gpuModel && gpuReq > 0) r.gpuByModel.set(gpuModel, r.gpuByModel.get(gpuModel) - gpuReq);
+          placedNode = n.id;
+          break;
+        }
+        if (placedNode) {
+          if (!placements.has(placedNode)) placements.set(placedNode, []);
+          placements.get(placedNode).push({
+            workloadId: w.id, workloadName: w.name, replicaIdx: i,
+            cpuReq, memReq, gpuReq, gpuModel,
+          });
+        } else {
+          unscheduled.push({
+            workloadId: w.id, workloadName: w.name, replicaIdx: i,
+            clusterId: c.id, clusterName: c.name,
+            reqs: { cpu: cpuReq, mem: memReq, gpu: gpuReq, gpuModel },
+          });
+        }
+      }
+    }
+  }
+  return { placements, unscheduled };
+}
+
+//============ Render: Capacity view ============
+function renderCapacity() {
+  const root = $("#viewBody");
+  root.innerHTML = "";
+  const p = state.project;
+  if (!p) return;
+  const clusters = p.clusters || [];
+  if (!clusters.length) {
+    root.appendChild(el("div", { class: "view-empty" }, [
+      el("div", { class: "big" }, ["⌘"]),
+      el("h2", {}, ["Capacity 뷰"]),
+      el("p", {}, ["클러스터에 노드와 워크로드가 있어야 의미 있는 결과가 나옵니다."]),
+    ]));
+    return;
+  }
+  const gpuModels = state.catalog.gpuModels;
+  const sim = simulateScheduling(p);
+  const totalPods = clusters.reduce((a, c) => a + (c.workloads || []).reduce((aa, w) => aa + (w.replicas || 1), 0), 0);
+  const placedPods = totalPods - sim.unscheduled.length;
+
+  // Top summary
+  const summary = el("div", { class: "next-hint" }, [
+    el("span", { class: "icon" }, ["⎈"]),
+    el("div", { class: "body" }, [
+      el("div", { class: "head" }, [
+        "Scheduling simulation (first-fit) ", helpIcon("view.capacity"),
+      ]),
+      el("div", { class: "lead" }, [
+        `${placedPods}/${totalPods} pods placed`,
+        sim.unscheduled.length
+          ? el("span", { style: { color: "var(--red)", marginLeft: "10px" } }, [`⊗ ${sim.unscheduled.length} unschedulable`])
+          : el("span", { style: { color: "var(--green)", marginLeft: "10px" } }, ["✓ all placed"]),
+      ]),
+    ]),
+  ]);
+  root.appendChild(summary);
+
+  for (const c of clusters) {
+    root.appendChild(renderCapacityCluster(c, sim, p, gpuModels));
+  }
+  if (sim.unscheduled.length) {
+    root.appendChild(renderUnscheduled(sim.unscheduled));
+  }
+}
+
+function renderCapacityCluster(c, sim, project, gpuModels) {
+  const card = el("div", { class: "topo-site" });
+  const allNodes = (c.node_ids || []).map(id => project.nodes.find(n => n.id === id)).filter(Boolean);
+  const workers = allNodes.filter(n => (n.cluster_roles || []).includes("worker"));
+  const cpOnly = allNodes.filter(n => (n.cluster_roles || []).length > 0 && !(n.cluster_roles || []).includes("worker"));
+
+  card.appendChild(el("div", { class: "topo-site-header" }, [
+    el("span", { class: "name" }, [c.name]),
+    el("span", {
+      class: "kind",
+      style: { background: "rgba(167,139,250,.15)", color: "var(--purple)" },
+    }, ["cluster"]),
+    el("span", { class: "region" }, [
+      `${workers.length} worker · ${cpOnly.length} cp-only · ${(c.workloads || []).length} workloads`,
+    ]),
+  ]));
+
+  if (!workers.length) {
+    card.appendChild(el("div", { class: "topo-empty-site" }, ["worker 노드 없음 — 워크로드 스케줄 불가"]));
+    return card;
+  }
+
+  const list = el("div", { style: { display: "flex", flexDirection: "column", gap: "12px" } });
+  for (const n of workers) list.appendChild(renderCapacityNode(n, sim, gpuModels));
+  card.appendChild(list);
+  return card;
+}
+
+function renderCapacityNode(n, sim, gpuModels) {
+  const placed = sim.placements.get(n.id) || [];
+  const usedCpu = placed.reduce((a, p) => a + p.cpuReq, 0);
+  const usedMem = placed.reduce((a, p) => a + p.memReq, 0);
+  const usedGpu = placed.reduce((a, p) => a + p.gpuReq, 0);
+  const usedVram = placed.reduce((a, p) =>
+    a + (p.gpuModel ? (gpuModels[p.gpuModel]?.vram_gb || 0) * p.gpuReq : 0), 0);
+
+  const totCpu = n.spec?.vcpu || 0;
+  const totMem = n.spec?.memory_gb || 0;
+  const gpus = n.spec?.gpu || [];
+  const totGpu = gpus.reduce((a, g) => a + (g.count || 0), 0);
+  const totVram = gpus.reduce((a, g) => a + (g.count || 0) * (gpuModels[g.model]?.vram_gb || 0), 0);
+  const psuMax = n.spec?.power?.psu_max_w || 0;
+  const power = computeNodePowerW(n, gpuModels);
+  const roleStr = (n.cluster_roles || []).map(r => r === "control-plane" ? "cp" : r).join("+") || "no-role";
+
+  const card = el("div", {
+    class: "topo-node",
+    style: { cursor: "pointer" },
+    onclick: () => selectEntity("node", n.id),
+  });
+  card.appendChild(el("div", { class: "node-name" }, [n.name]));
+  card.appendChild(el("div", { class: "node-model" }, [
+    `${n.brand} · ${n.model} · ${n.spec?.form_factor || ""} · ${roleStr}`,
+  ]));
+
+  const bars = el("div", {
+    style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 16px", marginTop: "10px" },
+  });
+  bars.appendChild(makeBarLine("CPU", `${usedCpu.toFixed(1)}/${totCpu}c`, totCpu > 0 ? usedCpu / totCpu * 100 : 0));
+  bars.appendChild(makeBarLine("Memory", `${usedMem.toFixed(0)}/${totMem} GB`, totMem > 0 ? usedMem / totMem * 100 : 0));
+  if (totGpu > 0) {
+    bars.appendChild(makeBarLine("GPU", `${usedGpu}/${totGpu}`, totGpu > 0 ? usedGpu / totGpu * 100 : 0));
+    if (totVram > 0) bars.appendChild(makeBarLine("VRAM", `${usedVram}/${totVram} GB`, usedVram / totVram * 100));
+  }
+  if (n.source === "onprem" && psuMax > 0) {
+    bars.appendChild(makeBarLine("PSU", `${power}/${psuMax} W`, power / psuMax * 100));
+  }
+  card.appendChild(bars);
+
+  if (placed.length) {
+    const podBox = el("div", {
+      style: { marginTop: "10px", padding: "8px 10px", background: "var(--bg)", borderRadius: "5px" },
+    });
+    podBox.appendChild(el("div", {
+      style: { fontSize: "10px", color: "var(--text2)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "6px", fontWeight: 600 },
+    }, [`${placed.length} pods placed`]));
+    // Group by workload
+    const byWl = new Map();
+    for (const p of placed) {
+      const e = byWl.get(p.workloadId) || { name: p.workloadName, count: 0, cpu: 0, mem: 0, gpu: 0 };
+      e.count += 1; e.cpu += p.cpuReq; e.mem += p.memReq; e.gpu += p.gpuReq;
+      byWl.set(p.workloadId, e);
+    }
+    for (const [wlId, info] of byWl) {
+      const row = el("div", {
+        style: { fontSize: "11px", padding: "3px 0", display: "flex", gap: "8px", cursor: "pointer", color: "var(--text2)" },
+        onclick: e => { e.stopPropagation(); selectEntity("workload", wlId); },
+      }, [
+        el("span", {}, [`◇ ${info.name} × ${info.count}`]),
+        el("span", { style: { color: "var(--text3)", marginLeft: "auto", fontFamily: "JetBrains Mono", fontSize: "10px" } }, [
+          `${info.cpu.toFixed(1)}c · ${info.mem.toFixed(0)}GB${info.gpu ? ` · ${info.gpu} GPU` : ""}`,
+        ]),
+      ]);
+      podBox.appendChild(row);
+    }
+    card.appendChild(podBox);
+  } else {
+    card.appendChild(el("div", {
+      style: { marginTop: "10px", color: "var(--text3)", fontSize: "11px", fontStyle: "italic", textAlign: "center", padding: "6px" },
+    }, ["할당된 pod 없음"]));
+  }
+
+  return card;
+}
+
+function renderUnscheduled(list) {
+  const card = el("div", {
+    style: { background: "rgba(248,113,113,.08)", border: "1px solid var(--red)", borderRadius: "8px", padding: "14px 16px", marginTop: "16px" },
+  });
+  card.appendChild(el("div", {
+    style: { fontSize: "12px", color: "var(--red)", marginBottom: "8px", fontWeight: 600 },
+  }, [`⊗ ${list.length} pods unschedulable`]));
+  for (const u of list) {
+    const reqs = `${u.reqs.cpu}c · ${u.reqs.mem}GB${u.reqs.gpu ? ` · ${u.reqs.gpu}× ${u.reqs.gpuModel || "GPU"}` : ""}`;
+    card.appendChild(el("div", {
+      style: { fontSize: "11px", color: "var(--text)", padding: "3px 0", cursor: "pointer", display: "flex", gap: "8px" },
+      onclick: () => selectEntity("workload", u.workloadId),
+    }, [
+      el("span", {}, [`◇ ${u.workloadName} replica #${u.replicaIdx + 1} (${u.clusterName})`]),
+      el("span", { style: { color: "var(--text3)", marginLeft: "auto", fontFamily: "JetBrains Mono", fontSize: "10px" } }, [reqs]),
+    ]));
+  }
+  return card;
+}
+
 //============ Render: dispatch ============
 function renderViewBody() {
   if (!state.project) { renderTopology(); return; }
   const v = state.ui.view;
   if (v === "topology") return renderTopology();
+  if (v === "capacity") return renderCapacity();
   // placeholder for other views
   $("#viewBody").innerHTML = "";
   $("#viewBody").appendChild(el("div", { class: "view-empty" }, [
