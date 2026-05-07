@@ -2506,7 +2506,11 @@ function renderSiteInspector(root, id) {
     }, ["🗑"]),
   ]));
 
-  const nameField = el("input", { value: s.name, oninput: e => updateSiteField(id, "name", e.target.value) });
+  const nameField = el("input", {
+    "data-focus-key": `site.${id}.name`,
+    value: s.name,
+    oninput: e => updateSiteField(id, "name", e.target.value),
+  });
   root.appendChild(el("div", { class: "field" }, [el("label", {}, ["Name"]), nameField]));
 
   root.appendChild(el("div", { class: "field" }, [
@@ -2518,11 +2522,19 @@ function renderSiteInspector(root, id) {
     root.appendChild(el("div", { class: "field-row" }, [
       el("div", { class: "field" }, [
         el("label", {}, ["Provider"]),
-        el("input", { value: s.cloud_provider || "", oninput: e => updateSiteField(id, "cloud_provider", e.target.value) }),
+        el("input", {
+          "data-focus-key": `site.${id}.cloud_provider`,
+          value: s.cloud_provider || "",
+          oninput: e => updateSiteField(id, "cloud_provider", e.target.value),
+        }),
       ]),
       el("div", { class: "field" }, [
         el("label", {}, ["Region"]),
-        el("input", { value: s.region || "", oninput: e => updateSiteField(id, "region", e.target.value) }),
+        el("input", {
+          "data-focus-key": `site.${id}.region`,
+          value: s.region || "",
+          oninput: e => updateSiteField(id, "region", e.target.value),
+        }),
       ]),
     ]));
   }
@@ -2532,19 +2544,28 @@ function renderSiteInspector(root, id) {
     root.appendChild(el("div", { class: "field-row" }, [
       el("div", { class: "field" }, [
         lbl("Rack Units (U)", "site.rack_units"),
-        el("input", { type: "number", min: "0", value: s.capacity?.rack_units || 0,
-                      oninput: e => updateSiteField(id, "capacity.rack_units", parseInt(e.target.value) || 0) }),
+        el("input", {
+          "data-focus-key": `site.${id}.rack_units`,
+          type: "number", min: "0", value: s.capacity?.rack_units || 0,
+          oninput: e => updateSiteField(id, "capacity.rack_units", parseInt(e.target.value) || 0),
+        }),
       ]),
       el("div", { class: "field" }, [
         lbl("Power (kW)", "site.power_kw"),
-        el("input", { type: "number", min: "0", step: "0.5", value: s.capacity?.power_kw || 0,
-                      oninput: e => updateSiteField(id, "capacity.power_kw", parseFloat(e.target.value) || 0) }),
+        el("input", {
+          "data-focus-key": `site.${id}.power_kw`,
+          type: "number", min: "0", step: "0.5", value: s.capacity?.power_kw || 0,
+          oninput: e => updateSiteField(id, "capacity.power_kw", parseFloat(e.target.value) || 0),
+        }),
       ]),
     ]));
     root.appendChild(el("div", { class: "field" }, [
       lbl("Cooling (kW, optional)", "site.cooling_kw"),
-      el("input", { type: "number", min: "0", step: "0.5", value: s.capacity?.cooling_kw || "",
-                    oninput: e => updateSiteField(id, "capacity.cooling_kw", parseFloat(e.target.value) || undefined) }),
+      el("input", {
+        "data-focus-key": `site.${id}.cooling_kw`,
+        type: "number", min: "0", step: "0.5", value: s.capacity?.cooling_kw || "",
+        oninput: e => updateSiteField(id, "capacity.cooling_kw", parseFloat(e.target.value) || undefined),
+      }),
     ]));
 
     const usage = siteUsage(s, state.project, state.catalog.gpuModels);
@@ -2608,7 +2629,11 @@ function renderNodeInspector(root, id) {
 
   root.appendChild(el("div", { class: "field" }, [
     el("label", {}, ["Name"]),
-    el("input", { value: n.name, oninput: e => updateNodeField(id, "name", e.target.value) }),
+    el("input", {
+      "data-focus-key": `node.${id}.name`,
+      value: n.name,
+      oninput: e => updateNodeField(id, "name", e.target.value),
+    }),
   ]));
 
   root.appendChild(el("div", { class: "field-row" }, [
@@ -2823,17 +2848,29 @@ function renderClusterInspector(root, id) {
 
   root.appendChild(el("div", { class: "field" }, [
     el("label", {}, ["Name"]),
-    el("input", { value: c.name, oninput: e => updateClusterField(id, "name", e.target.value) }),
+    el("input", {
+      "data-focus-key": `cluster.${id}.name`,
+      value: c.name,
+      oninput: e => updateClusterField(id, "name", e.target.value),
+    }),
   ]));
 
   root.appendChild(el("div", { class: "field-row" }, [
     el("div", { class: "field" }, [
       lbl("k8s version", "cluster.k8s_version"),
-      el("input", { value: c.k8s_version || "", placeholder: "1.30", oninput: e => updateClusterField(id, "k8s_version", e.target.value) }),
+      el("input", {
+        "data-focus-key": `cluster.${id}.k8s_version`,
+        value: c.k8s_version || "", placeholder: "1.30",
+        oninput: e => updateClusterField(id, "k8s_version", e.target.value),
+      }),
     ]),
     el("div", { class: "field" }, [
       lbl("Environment tag", "cluster.environment_tag"),
-      el("input", { value: c.environment_tag || "", placeholder: "prod", oninput: e => updateClusterField(id, "environment_tag", e.target.value) }),
+      el("input", {
+        "data-focus-key": `cluster.${id}.env_tag`,
+        value: c.environment_tag || "", placeholder: "prod",
+        oninput: e => updateClusterField(id, "environment_tag", e.target.value),
+      }),
     ]),
   ]));
 
@@ -3111,7 +3148,11 @@ function renderWorkloadInspector(root, id) {
   if (state.ui.workloadTab === "basic") {
     root.appendChild(el("div", { class: "field" }, [
       el("label", {}, ["Name"]),
-      el("input", { value: w.name, oninput: e => updateWorkloadField(id, "name", e.target.value) }),
+      el("input", {
+        "data-focus-key": `workload.${id}.name`,
+        value: w.name,
+        oninput: e => updateWorkloadField(id, "name", e.target.value),
+      }),
     ]));
     root.appendChild(el("div", { class: "field-row" }, [
       el("div", { class: "field" }, [
@@ -3135,12 +3176,16 @@ function renderWorkloadInspector(root, id) {
     root.appendChild(el("div", { class: "field-row" }, [
       el("div", { class: "field" }, [
         lbl("Replicas", "workload.replicas"),
-        el("input", { type: "number", min: "1", value: w.replicas || 1,
-                      oninput: e => updateWorkloadField(id, "replicas", parseInt(e.target.value) || 1) }),
+        el("input", {
+          "data-focus-key": `workload.${id}.replicas`,
+          type: "number", min: "1", value: w.replicas || 1,
+          oninput: e => updateWorkloadField(id, "replicas", parseInt(e.target.value) || 1),
+        }),
       ]),
       el("div", { class: "field" }, [
         lbl("Namespace", "namespace.name"),
         el("select", {
+          "data-focus-key": `workload.${id}.namespace`,
           onchange: e => updateWorkloadField(id, "namespace", e.target.value),
         }, cnsNames.map(n => el("option", { value: n, selected: n === currentNs ? "" : null }, [n]))),
       ]),
@@ -3156,13 +3201,19 @@ function renderWorkloadInspector(root, id) {
     root.appendChild(el("div", { class: "field-row" }, [
       el("div", { class: "field" }, [
         lbl("CPU (cores)", "resources.cpu"),
-        el("input", { type: "number", min: "0", step: "0.1", value: reqs.cpu || 0,
-                      oninput: e => updateWorkloadField(id, "resources.requests.cpu", parseFloat(e.target.value) || 0) }),
+        el("input", {
+          "data-focus-key": `workload.${id}.cpu`,
+          type: "number", min: "0", step: "0.1", value: reqs.cpu || 0,
+          oninput: e => updateWorkloadField(id, "resources.requests.cpu", parseFloat(e.target.value) || 0),
+        }),
       ]),
       el("div", { class: "field" }, [
         lbl("Memory (GB)", "resources.memory"),
-        el("input", { type: "number", min: "0", step: "0.5", value: reqs.memory_gb || 0,
-                      oninput: e => updateWorkloadField(id, "resources.requests.memory_gb", parseFloat(e.target.value) || 0) }),
+        el("input", {
+          "data-focus-key": `workload.${id}.memory`,
+          type: "number", min: "0", step: "0.5", value: reqs.memory_gb || 0,
+          oninput: e => updateWorkloadField(id, "resources.requests.memory_gb", parseFloat(e.target.value) || 0),
+        }),
       ]),
     ]));
 
@@ -3173,12 +3224,14 @@ function renderWorkloadInspector(root, id) {
     root.appendChild(el("div", { class: "field-row" }, [
       el("div", { class: "field" }, [
         lbl("GPU count", "resources.gpu_count"),
-        el("input", { type: "number", min: "0", value: gpuReq.count || 0,
-                      oninput: e => {
-                        const cnt = parseInt(e.target.value) || 0;
-                        if (cnt > 0) updateWorkloadField(id, "resources.requests.gpu", { ...gpuReq, count: cnt });
-                        else updateWorkloadField(id, "resources.requests.gpu", undefined);
-                      }
+        el("input", {
+          "data-focus-key": `workload.${id}.gpu_count`,
+          type: "number", min: "0", value: gpuReq.count || 0,
+          oninput: e => {
+            const cnt = parseInt(e.target.value) || 0;
+            if (cnt > 0) updateWorkloadField(id, "resources.requests.gpu", { ...gpuReq, count: cnt });
+            else updateWorkloadField(id, "resources.requests.gpu", undefined);
+          },
         }),
       ]),
       el("div", { class: "field" }, [
@@ -3224,11 +3277,19 @@ function renderWorkloadInspector(root, id) {
     root.appendChild(el("div", { class: "field-row" }, [
       el("div", { class: "field" }, [
         el("label", {}, ["Language"]),
-        el("input", { value: r.language || "", oninput: e => updateWorkloadField(id, "runtime.language", e.target.value) }),
+        el("input", {
+          "data-focus-key": `workload.${id}.runtime.language`,
+          value: r.language || "",
+          oninput: e => updateWorkloadField(id, "runtime.language", e.target.value),
+        }),
       ]),
       el("div", { class: "field" }, [
         el("label", {}, ["Framework"]),
-        el("input", { value: r.framework || "", oninput: e => updateWorkloadField(id, "runtime.framework", e.target.value) }),
+        el("input", {
+          "data-focus-key": `workload.${id}.runtime.framework`,
+          value: r.framework || "",
+          oninput: e => updateWorkloadField(id, "runtime.framework", e.target.value),
+        }),
       ]),
     ]));
 
@@ -3244,21 +3305,30 @@ function renderWorkloadInspector(root, id) {
       ]),
       el("div", { class: "field" }, [
         lbl("Max threads / workers", "runtime.max_threads"),
-        el("input", { type: "number", min: "1", value: conc.max_threads || conc.workers || "",
-                      oninput: e => updateWorkloadField(id, "runtime.concurrency." + (conc.model === "process-pool" ? "workers" : "max_threads"), parseInt(e.target.value) || undefined) }),
+        el("input", {
+          "data-focus-key": `workload.${id}.runtime.threads`,
+          type: "number", min: "1", value: conc.max_threads || conc.workers || "",
+          oninput: e => updateWorkloadField(id, "runtime.concurrency." + (conc.model === "process-pool" ? "workers" : "max_threads"), parseInt(e.target.value) || undefined),
+        }),
       ]),
     ]));
 
     root.appendChild(el("div", { class: "field-row" }, [
       el("div", { class: "field" }, [
         lbl("Heap (GB)", "runtime.heap_gb"),
-        el("input", { type: "number", min: "0", step: "0.5", value: conc.heap_gb || "",
-                      oninput: e => updateWorkloadField(id, "runtime.concurrency.heap_gb", parseFloat(e.target.value) || undefined) }),
+        el("input", {
+          "data-focus-key": `workload.${id}.runtime.heap_gb`,
+          type: "number", min: "0", step: "0.5", value: conc.heap_gb || "",
+          oninput: e => updateWorkloadField(id, "runtime.concurrency.heap_gb", parseFloat(e.target.value) || undefined),
+        }),
       ]),
       el("div", { class: "field" }, [
         lbl("DB max_connections", "runtime.max_connections"),
-        el("input", { type: "number", min: "1", value: r.max_connections || "",
-                      oninput: e => updateWorkloadField(id, "runtime.max_connections", parseInt(e.target.value) || undefined) }),
+        el("input", {
+          "data-focus-key": `workload.${id}.runtime.max_connections`,
+          type: "number", min: "1", value: r.max_connections || "",
+          oninput: e => updateWorkloadField(id, "runtime.max_connections", parseInt(e.target.value) || undefined),
+        }),
       ]),
     ]));
   }
@@ -3282,6 +3352,7 @@ function renderGpuRowEditable(n, idx, supportedModels, gpuModels) {
   );
 
   const countInput = el("input", {
+    "data-focus-key": `node.${n.id}.gpu.${idx}.count`,
     type: "number", min: "1", max: String(myMax), value: g.count,
     style: { padding: "5px 6px", background: "var(--surface3)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: "4px", fontSize: "12px", width: "60px", textAlign: "center" },
     oninput: e => {
@@ -3894,13 +3965,41 @@ function renderFindings() {
   }
 }
 
+// Save/restore focus across full re-renders so typing in inputs
+// doesn't lose focus on every keystroke. Inputs that need preservation
+// must carry a stable data-focus-key attribute.
+function captureFocus() {
+  const elFocused = document.activeElement;
+  if (!elFocused || elFocused === document.body) return null;
+  const key = elFocused.getAttribute && elFocused.getAttribute("data-focus-key");
+  if (!key) return null;
+  const sel = (elFocused.selectionStart != null)
+    ? { start: elFocused.selectionStart, end: elFocused.selectionEnd, dir: elFocused.selectionDirection }
+    : null;
+  return { key, sel };
+}
+function restoreFocus(saved) {
+  if (!saved) return;
+  let target;
+  try {
+    target = document.querySelector(`[data-focus-key="${CSS.escape(saved.key)}"]`);
+  } catch (e) { return; }
+  if (!target) return;
+  target.focus();
+  if (saved.sel && typeof target.setSelectionRange === "function") {
+    try { target.setSelectionRange(saved.sel.start, saved.sel.end, saved.sel.dir || "none"); } catch (e) {}
+  }
+}
+
 function renderAll() {
+  const focus = captureFocus();
   renderTopbar();
   renderViewTabs();
   renderTree();
   renderInspector();
   renderViewBody();
   renderFindings();
+  restoreFocus(focus);
 }
 
 //============ Modal helpers ============
