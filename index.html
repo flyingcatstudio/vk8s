@@ -1045,7 +1045,10 @@ const VIEWS = [
 const state = {
   catalog: { entries: [], gpuModels: {}, runtime: {}, loaded: false },
   project: null,
-  ui: { selectedKind: null, selectedId: null, view: "topology", topologyMode: "grid" },
+  ui: {
+    selectedKind: null, selectedId: null, view: "topology", topologyMode: "grid",
+    topologyLayers: { compute: true, network: false, services: false, ingress: false, sites: true },
+  },
 };
 
 const listeners = new Set();
@@ -5381,7 +5384,7 @@ function renderTopology() {
   // Mode toolbar
   const mode = state.ui.topologyMode || "grid";
   const toolbar = el("div", {
-    style: { display: "flex", gap: "6px", marginBottom: "16px", alignItems: "center" },
+    style: { display: "flex", gap: "6px", marginBottom: "10px", alignItems: "center", flexWrap: "wrap" },
   }, [
     el("span", { style: { fontSize: "11px", color: "var(--text2)", marginRight: "4px" } }, ["View:"]),
     el("button", {
@@ -5396,10 +5399,54 @@ function renderTopology() {
     }, ["⛬ Diagram"]),
     el("span", { style: { flex: 1 } }, []),
     el("span", { style: { fontSize: "10px", color: "var(--text3)", fontStyle: "italic" } }, [
-      mode === "diagram" ? "L4 → 클러스터 노드 → Storage 흐름" : "사이트별 카드 + 노드 그리드",
+      mode === "diagram" ? "여러 연결 레이어를 켜고 끌 수 있습니다" : "사이트별 카드 + 노드 그리드",
     ]),
   ]);
   root.appendChild(toolbar);
+
+  // Layer toggles (Diagram only)
+  if (mode === "diagram") {
+    if (!state.ui.topologyLayers) {
+      state.ui.topologyLayers = { compute: true, network: false, services: false, ingress: false, sites: true };
+    }
+    const layers = state.ui.topologyLayers;
+    const layerInfo = [
+      { key: "compute",  label: "Compute",  desc: "L4→Worker · Storage→Node", color: "var(--accent)" },
+      { key: "network",  label: "Network",  desc: "Firewall→L4 · Switch↔Node", color: "var(--orange)" },
+      { key: "services", label: "Services", desc: "External Service → Cluster", color: "var(--purple)" },
+      { key: "ingress",  label: "Ingress",  desc: "외부 호스트 → 클러스터", color: "var(--green)" },
+      { key: "sites",    label: "Sites",    desc: "Site Link 연결", color: "var(--accent)" },
+    ];
+    const layersBar = el("div", {
+      style: { display: "flex", gap: "8px", marginBottom: "16px", alignItems: "center", flexWrap: "wrap" },
+    }, [
+      el("span", { style: { fontSize: "11px", color: "var(--text2)" } }, ["Show:"]),
+      ...layerInfo.map(l => {
+        const active = !!layers[l.key];
+        return el("label", {
+          title: l.desc,
+          style: {
+            display: "inline-flex", alignItems: "center", gap: "5px",
+            padding: "4px 10px", borderRadius: "5px", margin: 0,
+            background: active ? "var(--accent-glow)" : "var(--surface2)",
+            border: "1px solid " + (active ? l.color : "var(--border)"),
+            color: active ? l.color : "var(--text2)",
+            cursor: "pointer", fontSize: "11px",
+            textTransform: "none", letterSpacing: 0,
+          },
+        }, [
+          el("input", {
+            type: "checkbox",
+            style: { width: "12px", height: "12px", margin: 0 },
+            checked: active ? "" : null,
+            onchange: e => { layers[l.key] = e.target.checked; emit(); },
+          }),
+          l.label,
+        ]);
+      }),
+    ]);
+    root.appendChild(layersBar);
+  }
 
   if (mode === "diagram") return renderTopologyDiagram(root, p);
   return renderTopologyGrid(root, p);
@@ -5796,7 +5843,25 @@ function renderTopologyDiagram(root, p) {
     }, [it.item.kind]));
   }
 
-  // STEP 1.5: Cluster boundary boxes (faint colored rect around nodes belonging to same cluster)
+  // SVG defs (arrowhead markers)
+  const defs = svg("defs", {}, []);
+  const mkMarker = (id, color) => svg("marker", {
+    id, viewBox: "0 0 10 10", refX: 8, refY: 5,
+    markerWidth: 6, markerHeight: 6, orient: "auto-start-reverse",
+  }, [
+    svg("path", { d: "M 0 0 L 10 5 L 0 10 z", fill: color }),
+  ]);
+  defs.appendChild(mkMarker("arrow-accent", colors.accent));
+  defs.appendChild(mkMarker("arrow-green", colors.green));
+  defs.appendChild(mkMarker("arrow-purple", colors.purple));
+  defs.appendChild(mkMarker("arrow-orange", colors.orange));
+  root_svg.appendChild(defs);
+
+  // Read layer toggles
+  const layers = state.ui.topologyLayers || { compute: true, network: false, services: false, ingress: false, sites: true };
+
+  // Compute cluster bounds (for ingress/services connections)
+  const clusterBounds = new Map();
   const clusterColors = ["#a78bfa", "#34d399", "#fbbf24", "#f87171", "#4d9cff"];
   const clusterIdxByKey = new Map();
   let cidx = 0;
@@ -5805,24 +5870,34 @@ function renderTopologyDiagram(root, p) {
     for (const [cid, b] of it.bounds) {
       let i = clusterIdxByKey.get(cid);
       if (i == null) { i = cidx++; clusterIdxByKey.set(cid, i); }
-      const c = b.cluster;
-      const color = clusterColors[i % clusterColors.length];
       const PAD = 8;
-      root_svg.appendChild(svg("rect", {
+      clusterBounds.set(cid, {
         x: b.minX - PAD, y: b.minY - PAD,
-        width: (b.maxX - b.minX) + PAD * 2, height: (b.maxY - b.minY) + PAD * 2,
-        rx: 8, ry: 8,
-        fill: color, "fill-opacity": 0.05,
-        stroke: color, "stroke-opacity": 0.5, "stroke-width": 1, "stroke-dasharray": "5,3",
-      }));
-      root_svg.appendChild(svg("text", {
-        x: b.minX - PAD + 6, y: b.minY - PAD - 4,
-        fill: color, "font-size": "10", "font-family": "JetBrains Mono", "font-weight": "600",
-      }, [`⎈ ${c.name}`]));
+        w: (b.maxX - b.minX) + PAD * 2,
+        h: (b.maxY - b.minY) + PAD * 2,
+        cluster: b.cluster,
+        color: clusterColors[i % clusterColors.length],
+      });
     }
   }
 
+  // STEP 1.5: Cluster boundary boxes
+  for (const [cid, cb] of clusterBounds) {
+    root_svg.appendChild(svg("rect", {
+      x: cb.x, y: cb.y, width: cb.w, height: cb.h,
+      rx: 8, ry: 8,
+      fill: cb.color, "fill-opacity": 0.05,
+      stroke: cb.color, "stroke-opacity": 0.5, "stroke-width": 1, "stroke-dasharray": "5,3",
+    }));
+    root_svg.appendChild(svg("text", {
+      x: cb.x + 6, y: cb.y - 4,
+      fill: cb.color, "font-size": "10", "font-family": "JetBrains Mono", "font-weight": "600",
+    }, [`⎈ ${cb.cluster.name}`]));
+  }
+
   // STEP 2: Draw connection lines (above site rects, below inner boxes)
+  // ── Compute layer ──
+  if (layers.compute) {
   // L4 → worker nodes
   for (const it of placed) {
     if (it.kind !== "l4") continue;
@@ -5890,6 +5965,123 @@ function renderTopologyDiagram(root, p) {
         stroke: colors.green, "stroke-width": 2, "stroke-opacity": 0.7,
         "stroke-dasharray": "5,3",
       }));
+    }
+  }
+  } // end compute layer
+
+  // ── Network layer: Firewall→L4, Switch→Nodes, Router→L4 ──
+  if (layers.network) {
+    const ownerSiteOfDevice = (devId) =>
+      placed.find(x => x.kind === "site" && (x.item.network_devices || []).some(d => d.id === devId));
+    for (const it of placed) {
+      if (it.kind !== "netdev") continue;
+      const owner = ownerSiteOfDevice(it.item.id);
+      if (!owner) continue;
+      const ownerSiteId = owner.item.id;
+      // Find L4s in same site
+      const l4sInSite = placed.filter(x =>
+        x.kind === "l4" && (owner.item.l4_balancers || []).some(l => l.id === x.item.id));
+      const nodesInSite = placed.filter(x => x.kind === "node" && x.item.site_id === ownerSiteId);
+
+      if (it.item.kind === "firewall" || it.item.kind === "waf" || it.item.kind === "ddos" || it.item.kind === "router") {
+        // Perimeter device → connect to all L4s in same site
+        for (const l4 of l4sInSite) {
+          root_svg.appendChild(svg("line", {
+            x1: it.x + it.w / 2, y1: it.y + it.h,
+            x2: l4.x + l4.w / 2, y2: l4.y,
+            stroke: colors.orange, "stroke-width": 2, "stroke-opacity": 0.7,
+            "marker-end": "url(#arrow-orange)",
+          }));
+        }
+      } else if (it.item.kind === "switch") {
+        // Switch → all nodes in same site (uplink, dotted)
+        for (const np of nodesInSite) {
+          root_svg.appendChild(svg("line", {
+            x1: it.x + it.w / 2, y1: it.y + it.h,
+            x2: np.x + np.w / 2, y2: np.y,
+            stroke: colors.text3, "stroke-width": 1, "stroke-opacity": 0.4,
+            "stroke-dasharray": "1,3",
+          }));
+        }
+      } else if (it.item.kind === "vpn" || it.item.kind === "cdn" || it.item.kind === "dns") {
+        // Edge devices: just connect to first L4 (or skip)
+        if (l4sInSite[0]) {
+          root_svg.appendChild(svg("line", {
+            x1: it.x + it.w / 2, y1: it.y + it.h,
+            x2: l4sInSite[0].x + l4sInSite[0].w / 2, y2: l4sInSite[0].y,
+            stroke: colors.orange, "stroke-width": 1.5, "stroke-opacity": 0.4,
+            "stroke-dasharray": "3,3",
+          }));
+        }
+      }
+    }
+  }
+
+  // ── Services layer: External Service → Cluster ──
+  if (layers.services) {
+    for (const it of placed) {
+      if (it.kind !== "extsvc") continue;
+      const targets = it.item.target_cluster_ids || [];
+      // Fallback: same-site clusters
+      let resolved = targets;
+      if (!resolved.length) {
+        const owner = placed.find(x =>
+          x.kind === "site" && (x.item.external_services || []).some(s => s.id === it.item.id));
+        if (owner) {
+          const ownerSiteId = owner.item.id;
+          // Clusters where any node is in this site
+          const clusterIds = new Set();
+          for (const c of (p.clusters || [])) {
+            if ((c.node_ids || []).some(nid => {
+              const n = p.nodes.find(x => x.id === nid);
+              return n?.site_id === ownerSiteId;
+            })) clusterIds.add(c.id);
+          }
+          resolved = Array.from(clusterIds);
+        }
+      }
+      for (const cid of resolved) {
+        const cb = clusterBounds.get(cid);
+        if (!cb) continue;
+        // Line from extsvc top to cluster boundary bottom (extsvc is below cluster)
+        const exX = it.x + it.w / 2;
+        const cbX = cb.x + cb.w / 2;
+        root_svg.appendChild(svg("line", {
+          x1: exX, y1: it.y,
+          x2: cbX, y2: cb.y + cb.h,
+          stroke: colors.purple, "stroke-width": 1.5, "stroke-opacity": 0.6,
+          "stroke-dasharray": "5,4",
+          "marker-end": "url(#arrow-purple)",
+        }));
+      }
+    }
+  }
+
+  // ── Ingress layer: external host → cluster ──
+  if (layers.ingress) {
+    for (const c of (p.clusters || [])) {
+      const cb = clusterBounds.get(c.id);
+      if (!cb) continue;
+      const rules = c.ingress_rules || [];
+      for (let i = 0; i < rules.length; i++) {
+        const r = rules[i];
+        const arrowX = cb.x + 30 + i * 110;
+        // Don't go past cluster width
+        const ax = Math.min(arrowX, cb.x + cb.w - 30);
+        const arrowYStart = cb.y - 26;
+        const arrowYEnd = cb.y - 1;
+        const lineColor = r.tls ? colors.green : colors.accent;
+        root_svg.appendChild(svg("text", {
+          x: ax, y: arrowYStart - 4, fill: lineColor,
+          "font-size": "9", "font-family": "JetBrains Mono", "font-weight": "600",
+        }, [`${r.tls ? "🔒" : "🌐"} ${r.host}`]));
+        root_svg.appendChild(svg("line", {
+          x1: ax, y1: arrowYStart,
+          x2: ax, y2: arrowYEnd,
+          stroke: lineColor, "stroke-width": 1.5, "stroke-opacity": 0.8,
+          "marker-end": r.tls ? "url(#arrow-green)" : "url(#arrow-accent)",
+        }));
+      }
     }
   }
 
@@ -6000,6 +6192,7 @@ function renderTopologyDiagram(root, p) {
   }
 
   // STEP 4: Site links (project-level, between sites)
+  if (layers.sites) {
   for (const link of (p.site_links || [])) {
     const fromSite = placed.find(x => x.kind === "site" && x.item.id === link.from_site_id);
     const toSite = placed.find(x => x.kind === "site" && x.item.id === link.to_site_id);
@@ -6030,6 +6223,7 @@ function renderTopologyDiagram(root, p) {
     }, [`${link.kind}${link.bandwidth_gbps ? ` ${link.bandwidth_gbps}G` : ""}`]));
     root_svg.appendChild(g);
   }
+  } // end sites layer
 
   // Legend
   const legend = el("div", {
