@@ -7841,11 +7841,18 @@ function analyzeBottlenecks(p) {
       dbPoolDemand.set(d.target_workload_id, (dbPoolDemand.get(d.target_workload_id) || 0) + v);
     }
   }
+  // Severity helpers
+  const sevFromUtil = (u, blockAt = 1.0, warnAt = 0.8) =>
+    u > blockAt ? "block" : u > warnAt ? "warn" : "ok";
+  const fmtPct = u => `${Math.round(u * 100)}%`;
+  const round1 = v => Math.round(v * 10) / 10;
+
   return items.map(({ w, c }) => {
     const tp = w.traffic_profile || {};
     const rt = w.runtime || {};
     const replicas = w.replicas || 1;
     const issues = [];
+    const breakdowns = [];  // per-rule diagnostic
     let computeUtil = null, computeCap = null, computeInFlight = null;
     let latencyUsed = null, latencyBudget = null;
     const poolEntries = [];
@@ -7853,26 +7860,62 @@ function analyzeBottlenecks(p) {
     // Rule 1 — Compute capacity (Little's Law)
     if (tp.target_rps && tp.avg_request_ms) {
       computeInFlight = (tp.target_rps / 1000) * tp.avg_request_ms;
-      let perRep;
-      const m = rt.concurrency?.model;
-      if (m === "thread-pool") perRep = rt.concurrency.max_threads || 200;
-      else if (m === "event-loop") perRep = rt.concurrency.max_threads || 1000;
-      else if (m === "process") perRep = rt.concurrency.max_threads || 50;
-      else perRep = rt.concurrency?.max_threads || 100;
+      let perRep, perRepNote;
+      const cm = rt.concurrency?.model;
+      if (cm === "thread-pool") {
+        perRep = rt.concurrency.max_threads || 200;
+        perRepNote = rt.concurrency.max_threads ? "max_threads" : "default 200 (thread-pool)";
+      } else if (cm === "event-loop") {
+        perRep = rt.concurrency?.max_threads || 1000;
+        perRepNote = rt.concurrency?.max_threads ? "max_threads" : "default 1000 (event-loop)";
+      } else if (cm === "process") {
+        perRep = rt.concurrency?.max_threads || 50;
+        perRepNote = rt.concurrency?.max_threads ? "max_threads" : "default 50 (process)";
+      } else {
+        perRep = rt.concurrency?.max_threads || 100;
+        perRepNote = rt.concurrency?.max_threads ? "max_threads" : "default 100 (model 미설정)";
+      }
       computeCap = perRep * replicas;
       computeUtil = computeInFlight / computeCap;
+      const sev = sevFromUtil(computeUtil, 1.0, 0.8);
+      breakdowns.push({
+        rule: "Compute capacity (Little's Law)",
+        status: sev,
+        sources: [
+          { label: "target_rps",         value: tp.target_rps,           path: "traffic_profile.target_rps",   unit: "req/s" },
+          { label: "avg_request_ms",     value: tp.avg_request_ms,       path: "traffic_profile.avg_request_ms", unit: "ms" },
+          { label: "concurrency.model",  value: cm || "(미설정)",         path: "runtime.concurrency.model" },
+          { label: "per-replica capacity", value: perRep,                path: "runtime.concurrency.max_threads", unit: "threads", note: perRepNote },
+          { label: "replicas",           value: replicas,                path: "workload.replicas" },
+        ],
+        formulas: [
+          `in_flight = (target_rps / 1000) × avg_request_ms = (${tp.target_rps}/1000) × ${tp.avg_request_ms} = ${round1(computeInFlight)}`,
+          `capacity  = per_replica × replicas = ${perRep} × ${replicas} = ${computeCap}`,
+          `util      = in_flight / capacity = ${round1(computeInFlight)} / ${computeCap} = ${fmtPct(computeUtil)}`,
+        ],
+        threshold: "BLOCK > 100% · WARN > 80%",
+        verdict: `${fmtPct(computeUtil)} → ${sev.toUpperCase()}`,
+      });
       if (computeUtil > 1.0) {
-        issues.push({
-          sev: "block",
-          msg: `Compute saturated: ${Math.round(computeInFlight)} in-flight / ${computeCap} cap (${Math.round(computeUtil * 100)}%)`,
-          fix: `replicas 또는 max_threads 증가, avg_request_ms 단축`,
-        });
+        issues.push({ sev: "block",
+          msg: `Compute saturated: ${Math.round(computeInFlight)} in-flight / ${computeCap} cap (${fmtPct(computeUtil)})`,
+          fix: `replicas 또는 max_threads 증가, avg_request_ms 단축` });
       } else if (computeUtil > 0.8) {
-        issues.push({
-          sev: "warn",
-          msg: `Near compute capacity: ${Math.round(computeUtil * 100)}% util (${Math.round(computeInFlight)}/${computeCap})`,
-        });
+        issues.push({ sev: "warn",
+          msg: `Near compute capacity: ${fmtPct(computeUtil)} util (${Math.round(computeInFlight)}/${computeCap})` });
       }
+    } else {
+      breakdowns.push({
+        rule: "Compute capacity (Little's Law)",
+        status: "nodata",
+        sources: [
+          { label: "target_rps",     value: tp.target_rps     ?? "(미설정)", path: "traffic_profile.target_rps" },
+          { label: "avg_request_ms", value: tp.avg_request_ms ?? "(미설정)", path: "traffic_profile.avg_request_ms" },
+        ],
+        formulas: ["in_flight 계산을 위해 target_rps + avg_request_ms 가 모두 필요"],
+        threshold: "—",
+        verdict: "no-data — 분석 생략",
+      });
     }
 
     // Rule 2 & 3 — Per-downstream
@@ -7890,43 +7933,91 @@ function analyzeBottlenecks(p) {
         const avail = rt.connection_pool_per_replica * replicas;
         const u = avail ? need / avail : 0;
         poolEntries.push({
-          target: target.w.name, need: Math.round(need * 10) / 10,
+          target: target.w.name, need: round1(need),
           avail, util: u, rpsToTarget: Math.round(rpsToTarget),
         });
+        const sev = sevFromUtil(u, 1.0, 0.8);
+        breakdowns.push({
+          rule: `Caller pool → ${target.w.name}`,
+          status: sev,
+          sources: [
+            { label: "caller target_rps",      value: callerRps,       path: "traffic_profile.target_rps", unit: "req/s" },
+            { label: "depends_on.fanout_pct",  value: d.fanout_pct ?? 100, path: `depends_on[${d.target_workload_id}].fanout_pct`, unit: "%" },
+            { label: "depends_on.calls_per_request", value: cpr,       path: `depends_on[${d.target_workload_id}].calls_per_request` },
+            { label: "depends_on.avg_call_ms", value: d.avg_call_ms,   path: `depends_on[${d.target_workload_id}].avg_call_ms`, unit: "ms" },
+            { label: "connection_pool_per_replica", value: rt.connection_pool_per_replica, path: "runtime.connection_pool_per_replica" },
+            { label: "replicas",                value: replicas,        path: "workload.replicas" },
+          ],
+          formulas: [
+            `rps_to_target = caller_rps × fanout × cpr = ${callerRps} × ${fanout} × ${cpr} = ${Math.round(rpsToTarget)}`,
+            `need = (rps_to_target / 1000) × avg_call_ms = (${Math.round(rpsToTarget)}/1000) × ${d.avg_call_ms} = ${round1(need)}`,
+            `avail = pool × replicas = ${rt.connection_pool_per_replica} × ${replicas} = ${avail}`,
+            `util = need / avail = ${round1(need)} / ${avail} = ${fmtPct(u)}`,
+          ],
+          threshold: "BLOCK > 100% · WARN > 80%",
+          verdict: `${fmtPct(u)} → ${sev.toUpperCase()}`,
+        });
         if (u > 1.0) {
-          issues.push({
-            sev: "block",
-            msg: `Pool→${target.w.name}: ${Math.round(need)} conn 필요 / ${avail} 보유 (${Math.round(u * 100)}%)`,
-            fix: `connection_pool_per_replica 또는 replicas 증가`,
-          });
+          issues.push({ sev: "block",
+            msg: `Pool→${target.w.name}: ${Math.round(need)} conn 필요 / ${avail} 보유 (${fmtPct(u)})`,
+            fix: `connection_pool_per_replica 또는 replicas 증가` });
         } else if (u > 0.8) {
-          issues.push({
-            sev: "warn",
-            msg: `Pool→${target.w.name}: ${Math.round(u * 100)}% util`,
-          });
+          issues.push({ sev: "warn", msg: `Pool→${target.w.name}: ${fmtPct(u)} util` });
         }
       }
 
       // Rule 3 — Downstream target RPS overload
       const targetTp = target.w.traffic_profile || {};
-      if (targetTp.target_rps && rpsToTarget > targetTp.target_rps) {
-        issues.push({
-          sev: "block",
-          msg: `${target.w.name} RPS overload: ${Math.round(rpsToTarget)} req/s > ${targetTp.target_rps}`,
-          fix: `${target.w.name} replicas 증가 또는 fanout/calls_per_request 줄이기`,
+      if (targetTp.target_rps && callerRps) {
+        const overload = rpsToTarget > targetTp.target_rps;
+        const u = rpsToTarget / targetTp.target_rps;
+        breakdowns.push({
+          rule: `Downstream RPS → ${target.w.name}`,
+          status: overload ? "block" : (u > 0.8 ? "warn" : "ok"),
+          sources: [
+            { label: "caller target_rps",      value: callerRps,         path: "traffic_profile.target_rps", unit: "req/s" },
+            { label: "fanout × cpr",           value: `${fanout} × ${cpr}`, path: `depends_on[${d.target_workload_id}]` },
+            { label: `${target.w.name}.target_rps`, value: targetTp.target_rps, path: `target.traffic_profile.target_rps`, unit: "req/s" },
+          ],
+          formulas: [
+            `rps_to_target = ${callerRps} × ${fanout} × ${cpr} = ${Math.round(rpsToTarget)}`,
+            `target_capacity = ${targetTp.target_rps}`,
+            `util = ${Math.round(rpsToTarget)} / ${targetTp.target_rps} = ${fmtPct(u)}`,
+          ],
+          threshold: "BLOCK > 100% · WARN > 80%",
+          verdict: `${fmtPct(u)} → ${overload ? "BLOCK" : (u > 0.8 ? "WARN" : "OK")}`,
         });
+        if (overload) {
+          issues.push({ sev: "block",
+            msg: `${target.w.name} RPS overload: ${Math.round(rpsToTarget)} req/s > ${targetTp.target_rps}`,
+            fix: `${target.w.name} replicas 증가 또는 fanout/calls_per_request 줄이기` });
+        }
       }
     }
 
     // Rule 4 — DB max_connections oversubscription (this workload as TARGET)
     if (rt.max_connections) {
       const inbound = dbPoolDemand.get(w.id) || 0;
+      const u = rt.max_connections ? inbound / rt.max_connections : 0;
+      const sev = inbound > rt.max_connections ? "warn" : (u > 0.8 ? "warn" : "ok");
+      breakdowns.push({
+        rule: `Inbound conn budget (as DB target)`,
+        status: sev,
+        sources: [
+          { label: "max_connections",   value: rt.max_connections, path: "runtime.max_connections" },
+          { label: "Σ caller pool",     value: inbound,            path: "Σ caller.pool × replicas" },
+        ],
+        formulas: [
+          `inbound = Σ over callers (pool × replicas) = ${inbound}`,
+          `util = inbound / max_connections = ${inbound} / ${rt.max_connections} = ${fmtPct(u)}`,
+        ],
+        threshold: "WARN > 100% (oversubscription)",
+        verdict: `${fmtPct(u)} → ${sev.toUpperCase()}`,
+      });
       if (inbound > rt.max_connections) {
-        issues.push({
-          sev: "warn",
+        issues.push({ sev: "warn",
           msg: `Connection oversubscription: callers may open ${inbound} > max ${rt.max_connections}`,
-          fix: `${w.name} max_connections 증가 또는 caller pool 축소`,
-        });
+          fix: `${w.name} max_connections 증가 또는 caller pool 축소` });
       }
     }
 
@@ -7934,23 +8025,40 @@ function analyzeBottlenecks(p) {
     if (tp.avg_request_ms || (w.depends_on && w.depends_on.length)) {
       const own = tp.avg_request_ms || 0;
       let down = 0;
+      const downTerms = [];
       for (const d of (w.depends_on || [])) {
-        down += (d.avg_call_ms || 0) * (d.calls_per_request || 1);
+        const cpr = d.calls_per_request || 1;
+        const ms = d.avg_call_ms || 0;
+        down += ms * cpr;
+        if (ms) downTerms.push(`${ms}×${cpr}`);
       }
       latencyUsed = own + down;
       latencyBudget = tp.client_timeout_ms || 3000;
       const r = latencyUsed / latencyBudget;
+      const sev = r > 1.0 ? "block" : (r > 0.7 ? "warn" : "ok");
+      breakdowns.push({
+        rule: "Latency budget",
+        status: sev,
+        sources: [
+          { label: "avg_request_ms (own)",  value: own,                  path: "traffic_profile.avg_request_ms", unit: "ms" },
+          { label: "Σ downstream call_ms",  value: down,                 path: "Σ depends_on[i].avg_call_ms × calls_per_request", unit: "ms" },
+          { label: "client_timeout_ms",     value: latencyBudget,        path: "traffic_profile.client_timeout_ms", unit: "ms",
+            note: tp.client_timeout_ms ? null : "default 3000ms (미설정)" },
+        ],
+        formulas: [
+          `used = own + Σ(call_ms × cpr) = ${own} + (${downTerms.join(" + ") || 0}) = ${latencyUsed}ms`,
+          `util = used / budget = ${latencyUsed} / ${latencyBudget} = ${fmtPct(r)}`,
+        ],
+        threshold: "BLOCK > 100% · WARN > 70%",
+        verdict: `${fmtPct(r)} → ${sev.toUpperCase()}`,
+      });
       if (r > 1.0 && latencyUsed > 0) {
-        issues.push({
-          sev: "block",
+        issues.push({ sev: "block",
           msg: `Latency budget exceeded: ${latencyUsed}ms / ${latencyBudget}ms`,
-          fix: `downstream 호출 수/시간 줄이거나 client_timeout 늘리기`,
-        });
+          fix: `downstream 호출 수/시간 줄이거나 client_timeout 늘리기` });
       } else if (r > 0.7 && latencyUsed > 0) {
-        issues.push({
-          sev: "warn",
-          msg: `Tight latency: ${latencyUsed}ms / ${latencyBudget}ms (${Math.round(r * 100)}%)`,
-        });
+        issues.push({ sev: "warn",
+          msg: `Tight latency: ${latencyUsed}ms / ${latencyBudget}ms (${fmtPct(r)})` });
       }
     }
 
@@ -7959,7 +8067,7 @@ function analyzeBottlenecks(p) {
                    : (computeUtil != null || latencyUsed != null || poolEntries.length) ? "ok"
                    : "nodata";
     return {
-      w, c, issues, severity,
+      w, c, issues, severity, breakdowns,
       computeUtil, computeCap, computeInFlight,
       latencyUsed, latencyBudget,
       poolEntries,
@@ -8142,6 +8250,83 @@ function renderBottleneck() {
         ]));
       }
       card.appendChild(ul);
+    }
+
+    // Per-rule breakdowns (expandable). Stops click bubbling so toggle
+    // doesn't navigate to workload.
+    if (r.breakdowns?.length) {
+      const det = document.createElement("details");
+      Object.assign(det.style, {
+        borderTop: "1px solid var(--border)", marginTop: "4px", paddingTop: "6px",
+      });
+      det.addEventListener("click", e => e.stopPropagation());
+      const sum = document.createElement("summary");
+      Object.assign(sum.style, {
+        fontSize: "11px", color: "var(--text2)", cursor: "pointer",
+        userSelect: "none", padding: "2px 0",
+      });
+      sum.textContent = `근거 보기 (${r.breakdowns.length} rules)`;
+      det.appendChild(sum);
+
+      const sevDot = { block: "#e74c3c", warn: "#f39c12", ok: "#27ae60", nodata: "#5d6d7e" };
+      for (const b of r.breakdowns) {
+        const block = el("div", {
+          style: {
+            marginTop: "8px", padding: "8px", borderRadius: "4px",
+            background: "var(--surface)", border: "1px solid var(--border)",
+            fontSize: "10.5px", lineHeight: "1.55", fontFamily: "JetBrains Mono",
+          },
+        });
+        // Rule header
+        block.appendChild(el("div", {
+          style: { display: "flex", alignItems: "center", gap: "6px", marginBottom: "4px" },
+        }, [
+          el("span", {
+            style: { width: "8px", height: "8px", borderRadius: "50%",
+                     background: sevDot[b.status] || "#5d6d7e", display: "inline-block" },
+          }),
+          el("strong", { style: { color: "var(--text)", fontFamily: "Pretendard, sans-serif" } }, [b.rule]),
+          el("span", { style: { color: "var(--text3)", marginLeft: "auto", fontSize: "10px" } }, [b.verdict]),
+        ]));
+        // Sources
+        if (b.sources?.length) {
+          const srcWrap = el("div", { style: { color: "var(--text2)", marginBottom: "4px" } });
+          srcWrap.appendChild(el("div", { style: { color: "var(--text3)", fontSize: "9.5px",
+                                                    textTransform: "uppercase", letterSpacing: "0.5px",
+                                                    marginBottom: "2px" } }, ["Sources"]));
+          for (const s of b.sources) {
+            srcWrap.appendChild(el("div", {}, [
+              el("span", { style: { color: "var(--text3)" } }, [`${s.path} `]),
+              el("span", { style: { color: "var(--text)" } }, [
+                `= ${s.value}${s.unit ? " " + s.unit : ""}`,
+              ]),
+              s.note ? el("span", { style: { color: "var(--text3)", fontStyle: "italic" } },
+                [` (${s.note})`]) : null,
+            ]));
+          }
+          block.appendChild(srcWrap);
+        }
+        // Formulas
+        if (b.formulas?.length) {
+          const fWrap = el("div", { style: { color: "var(--text2)", marginBottom: "4px" } });
+          fWrap.appendChild(el("div", { style: { color: "var(--text3)", fontSize: "9.5px",
+                                                  textTransform: "uppercase", letterSpacing: "0.5px",
+                                                  marginBottom: "2px" } }, ["Formula"]));
+          for (const f of b.formulas) {
+            fWrap.appendChild(el("div", { style: { color: "var(--text)" } }, [f]));
+          }
+          block.appendChild(fWrap);
+        }
+        // Threshold
+        if (b.threshold) {
+          block.appendChild(el("div", { style: { color: "var(--text3)" } }, [
+            el("span", { style: { color: "var(--text3)", fontSize: "9.5px", textTransform: "uppercase", letterSpacing: "0.5px", marginRight: "4px" } }, ["Threshold"]),
+            b.threshold,
+          ]));
+        }
+        det.appendChild(block);
+      }
+      card.appendChild(det);
     }
 
     grid.appendChild(card);
