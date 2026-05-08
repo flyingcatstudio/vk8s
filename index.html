@@ -1055,6 +1055,7 @@ const state = {
   ui: {
     selectedKind: null, selectedId: null, view: "topology", topologyMode: "grid",
     topologyLayers: { compute: true, network: false, services: false, ingress: false, sites: true },
+    archGroupByZone: true,
   },
 };
 
@@ -6927,26 +6928,77 @@ function renderArchitecture() {
   const isStateful = w => w.kind === "StatefulSet" || ["DB", "Cache", "Queue"].includes(w.category);
   const isPlatform = w => platformNs.has(w.namespace || "default");
 
-  // Pre-compute L4 → workload routing (via cluster.ingress_rules.paths).
+  // ---- Zone derivation ----
+  // Zone = node.labels["topology.kubernetes.io/zone"] || node.site_id
+  // Site → zone map: a site's zone = first node-in-site's zone (sites typically host one zone)
+  const zoneOfNode = (n) => n?.labels?.["topology.kubernetes.io/zone"] || n?.site_id || null;
+  const siteZone = new Map();
+  for (const s of (p.sites || [])) {
+    let z = null;
+    for (const nid of (s.node_ids || [])) {
+      const n = (p.nodes || []).find(x => x.id === nid);
+      if (n) { z = zoneOfNode(n); if (z) break; }
+    }
+    if (!z) z = s.id;  // fallback so L4/ext/storage in node-less sites still get a zone
+    siteZone.set(s.id, z);
+  }
+  // Find which site an L4 / ext / storage belongs to
+  const siteOfL4 = new Map();
+  const siteOfExt = new Map();
+  const siteOfStorage = new Map();
+  for (const s of (p.sites || [])) {
+    for (const lb of (s.l4_balancers || [])) siteOfL4.set(lb.id, s.id);
+    for (const ex of (s.external_services || [])) siteOfExt.set(ex.id, s.id);
+    for (const st of (s.storages || [])) siteOfStorage.set(st.id, s.id);
+  }
+  // Per-cluster zone map: cluster.id → ordered Array<zone>
+  const clusterZones = new Map();
+  for (const c of p.clusters) {
+    const seen = new Set();
+    const ordered = [];
+    for (const nid of (c.node_ids || [])) {
+      const n = (p.nodes || []).find(x => x.id === nid);
+      const z = zoneOfNode(n);
+      if (z && !seen.has(z)) { seen.add(z); ordered.push(z); }
+    }
+    clusterZones.set(c.id, ordered);
+  }
+  const groupByZone = state.ui.archGroupByZone !== false;
+
+  // ---- Pre-compute L4 → workload routing (via cluster.ingress_rules.paths) ----
   // Only "compute" (non-platform, non-stateful) workloads become L4 children.
-  // childWorkloadIds: set of workload IDs that should NOT appear as siblings
-  // (they're rendered under their L4 instead).
-  const l4Children = new Map();   // l4.id → array of { kind:"workload", item, cluster }
+  // childWorkloadIds: set of workload IDs that should NOT appear as siblings.
+  // In zone-split mode, each L4's children show this zone's replica share;
+  // and we drop the cross-L4 dedup so multi-L4 HA shows web in every zone.
+  const l4Children = new Map();
   const childWorkloadIds = new Set();
   for (const s of p.sites || []) {
     for (const lb of (s.l4_balancers || [])) {
       const children = [];
-      const targets = lb.target_cluster_ids || [];
-      for (const cid of targets) {
+      const seenInThisL4 = new Set();
+      const lbZone = siteZone.get(s.id);
+      for (const cid of (lb.target_cluster_ids || [])) {
         const c = p.clusters.find(x => x.id === cid);
         if (!c) continue;
+        const cZones = clusterZones.get(c.id) || [];
+        const splitC = groupByZone && cZones.length >= 2;
         for (const r of (c.ingress_rules || [])) {
           for (const path of (r.paths || [])) {
             const w = (c.workloads || []).find(x => x.id === path.workload_id);
             if (!w) continue;
             if (isPlatform(w) || isStateful(w)) continue;
-            if (childWorkloadIds.has(w.id)) continue;
-            children.push({ kind: "workload", item: w, cluster: c });
+            if (seenInThisL4.has(w.id)) continue;
+            // Non-split mode: keep cross-L4 dedup so a workload only shows once.
+            if (!splitC && childWorkloadIds.has(w.id)) continue;
+            seenInThisL4.add(w.id);
+            const entry = { kind: "workload", item: w, cluster: c };
+            if (splitC && lbZone && cZones.includes(lbZone)) {
+              const zi = cZones.indexOf(lbZone);
+              const N = cZones.length;
+              const rr = w.replicas || 1;
+              entry.zoneReplicas = Math.floor(rr / N) + (zi < rr % N ? 1 : 0);
+            }
+            children.push(entry);
             childWorkloadIds.add(w.id);
           }
         }
@@ -6955,35 +7007,70 @@ function renderArchitecture() {
     }
   }
 
-  // Build groups
-  const envRows = new Map(); // env_tag → array of items
+  // ---- Build groups ----
+  // Row key: `${tag}` or `${tag}|${zone}` (when split by zone)
+  const envRows = new Map(); // rowKey → { tag, zone, items[] }
   const mgmtRow = [];
   const dbRow = [];
 
+  const ensureRow = (tag, zone) => {
+    const key = zone ? `${tag}|${zone}` : tag;
+    if (!envRows.has(key)) envRows.set(key, { tag, zone, items: [] });
+    return envRows.get(key);
+  };
+
   for (const c of p.clusters) {
     const tag = c.environment_tag || c.name;
-    if (!envRows.has(tag)) envRows.set(tag, []);
-    // Add L4 LB(s) targeting this cluster as the first items of the row
+    const zones = clusterZones.get(c.id) || [];
+    const splitThisCluster = groupByZone && zones.length >= 2;
+    const targetZones = splitThisCluster ? zones : [null]; // null = single unsplit row
+
+    for (const z of targetZones) ensureRow(tag, z);
+
+    // L4 LBs targeting this cluster
     for (const s of p.sites || []) {
       for (const lb of (s.l4_balancers || [])) {
-        if ((lb.target_cluster_ids || []).includes(c.id)) {
-          envRows.get(tag).push({ kind: "l4", item: lb });
+        if (!(lb.target_cluster_ids || []).includes(c.id)) continue;
+        if (splitThisCluster) {
+          const lbZone = siteZone.get(s.id);
+          // L4 belongs to this zone's row if zone matches; else if no match, attach to first zone
+          const z = zones.includes(lbZone) ? lbZone : zones[0];
+          ensureRow(tag, z).items.push({ kind: "l4", item: lb });
+        } else {
+          ensureRow(tag, null).items.push({ kind: "l4", item: lb });
         }
       }
     }
+
+    // Workloads
     for (const w of (c.workloads || [])) {
-      if (childWorkloadIds.has(w.id)) continue; // pulled into L4 sub-tree
+      if (childWorkloadIds.has(w.id)) continue;
       if (isPlatform(w)) {
         mgmtRow.push({ kind: "workload", item: w, cluster: c });
-      } else if (isStateful(w)) {
+        continue;
+      }
+      if (isStateful(w)) {
         dbRow.push({ kind: "workload", item: w, cluster: c });
+        continue;
+      }
+      if (splitThisCluster) {
+        // Distribute replicas across zones (ceil for first few, floor for rest)
+        const N = zones.length;
+        const r = w.replicas || 1;
+        for (let zi = 0; zi < N; zi++) {
+          const perZone = Math.floor(r / N) + (zi < r % N ? 1 : 0);
+          if (perZone <= 0) continue;
+          ensureRow(tag, zones[zi]).items.push({
+            kind: "workload", item: w, cluster: c, zoneReplicas: perZone,
+          });
+        }
       } else {
-        envRows.get(tag).push({ kind: "workload", item: w, cluster: c });
+        ensureRow(tag, null).items.push({ kind: "workload", item: w, cluster: c });
       }
     }
   }
 
-  // External services + storages → DB row
+  // External services + storages → DB row (shared across zones — stays unsplit)
   for (const s of p.sites || []) {
     for (const ex of (s.external_services || [])) {
       if (["database", "cache", "queue", "object_store", "backup"].includes(ex.kind)) {
@@ -6995,38 +7082,59 @@ function renderArchitecture() {
     }
   }
 
-  // Final row order
+  // ---- Final row order ----
   const rows = [];
-  for (const [tag, items] of envRows) {
-    if (items.length) rows.push({ label: `(${tag})`, items, tag });
+  // Sort env rows: same tag's zones together in zone order, then by tag
+  const sortedKeys = [...envRows.keys()].sort((a, b) => {
+    const A = envRows.get(a), B = envRows.get(b);
+    if (A.tag !== B.tag) return A.tag.localeCompare(B.tag);
+    return (A.zone || "").localeCompare(B.zone || "");
+  });
+  for (const key of sortedKeys) {
+    const r = envRows.get(key);
+    if (!r.items.length) continue;
+    const label = r.zone ? `(${r.tag} · ${r.zone})` : `(${r.tag})`;
+    rows.push({ label, items: r.items, tag: key, zone: r.zone, envTag: r.tag });
   }
   if (mgmtRow.length) rows.push({ label: "(관리/Mgmt)", items: mgmtRow, tag: "_mgmt" });
   if (dbRow.length) rows.push({ label: "(DB/Storage)", items: dbRow, tag: "_db" });
 
-  // Map row.tag → array of real switch entities (network_devices[kind=switch]).
-  // For env rows: ALL switches from sites that host this cluster's nodes.
-  // For mgmt/db rows: all switches in all sites (these are logical groupings).
+  // ---- Switches per row ----
+  // Split rows: only switches from sites whose zone matches this row's zone.
+  // Unsplit env rows: all switches from sites that host this cluster's nodes.
+  // Mgmt/db: all switches.
   const rowSwitches = new Map();
-  for (const c of p.clusters) {
-    const tag = c.environment_tag || c.name;
-    const sitesUsed = new Set();
-    for (const nid of (c.node_ids || [])) {
-      const n = p.nodes.find(x => x.id === nid);
-      if (n) sitesUsed.add(n.site_id);
-    }
-    const switches = rowSwitches.get(tag) || [];
-    const seen = new Set(switches.map(s => s.id));
-    for (const sid of sitesUsed) {
-      const s = (p.sites || []).find(x => x.id === sid);
-      if (!s) continue;
-      for (const d of (s.network_devices || [])) {
-        if (d.kind === "switch" && !seen.has(d.id)) {
-          switches.push(d);
-          seen.add(d.id);
+  for (const r of rows) {
+    if (r.tag === "_mgmt" || r.tag === "_db") continue;
+    const switches = [];
+    const seen = new Set();
+    if (r.zone) {
+      // zone-specific: switches from sites whose zone matches
+      for (const s of (p.sites || [])) {
+        if (siteZone.get(s.id) !== r.zone) continue;
+        for (const d of (s.network_devices || [])) {
+          if (d.kind === "switch" && !seen.has(d.id)) { switches.push(d); seen.add(d.id); }
+        }
+      }
+    } else {
+      // unsplit: walk this env's clusters' sites
+      for (const c of p.clusters) {
+        if ((c.environment_tag || c.name) !== r.envTag) continue;
+        const sitesUsed = new Set();
+        for (const nid of (c.node_ids || [])) {
+          const n = (p.nodes || []).find(x => x.id === nid);
+          if (n) sitesUsed.add(n.site_id);
+        }
+        for (const sid of sitesUsed) {
+          const s = (p.sites || []).find(x => x.id === sid);
+          if (!s) continue;
+          for (const d of (s.network_devices || [])) {
+            if (d.kind === "switch" && !seen.has(d.id)) { switches.push(d); seen.add(d.id); }
+          }
         }
       }
     }
-    if (switches.length) rowSwitches.set(tag, switches);
+    if (switches.length) rowSwitches.set(r.tag, switches);
   }
   // mgmt/db: all switches across all sites
   const allSwitches = [];
@@ -7034,8 +7142,7 @@ function renderArchitecture() {
   for (const s of (p.sites || [])) {
     for (const d of (s.network_devices || [])) {
       if (d.kind === "switch" && !allSeen.has(d.id)) {
-        allSwitches.push(d);
-        allSeen.add(d.id);
+        allSwitches.push(d); allSeen.add(d.id);
       }
     }
   }
@@ -7140,7 +7247,9 @@ function renderArchitecture() {
       label = "L4"; sub = `(${(item.item.vendor || item.item.kind).toLowerCase()})`;
       onclick = () => selectEntity("l4", item.item.id);
     } else if (item.kind === "workload") {
-      label = item.item.name; sub = item.item.replicas > 1 ? `×${item.item.replicas}` : "";
+      label = item.item.name;
+      const r = item.zoneReplicas != null ? item.zoneReplicas : item.item.replicas;
+      sub = r > 1 ? `×${r}` : "";
       onclick = () => selectEntity("workload", item.item.id);
     } else if (item.kind === "extsvc") {
       label = item.item.name; sub = item.item.engine || item.item.kind;
@@ -7334,13 +7443,35 @@ function renderArchitecture() {
 
   // Wrapper with section header
   const wrap = el("div", {});
+  const zoneToggle = el("input", {
+    type: "checkbox",
+    checked: state.ui.archGroupByZone !== false,
+    onchange: e => {
+      state.ui.archGroupByZone = !!e.target.checked;
+      emit(); saveSoon();
+    },
+    style: { marginRight: "4px", verticalAlign: "middle" },
+  });
+  // Detect any multi-zone cluster to know whether toggle has any effect
+  const anyMultiZone = [...clusterZones.values()].some(zs => zs.length >= 2);
   wrap.appendChild(el("div", {
-    style: { display: "flex", alignItems: "baseline", gap: "12px", marginBottom: "10px" },
+    style: { display: "flex", alignItems: "center", gap: "12px", marginBottom: "10px", flexWrap: "wrap" },
   }, [
     el("h2", { style: { fontSize: "16px", fontWeight: 600, margin: 0 } }, ["인프라 아키텍처 — 네트워크 관점"]),
     el("span", { style: { fontSize: "11px", color: "var(--text3)", fontStyle: "italic" } }, [
       "switch 버스 + 환경별 그룹 (prod/dev/관리/DB·Storage)",
     ]),
+    el("label", {
+      style: {
+        fontSize: "11px", color: anyMultiZone ? "var(--text2)" : "var(--text3)",
+        display: "inline-flex", alignItems: "center", gap: "2px",
+        marginLeft: "auto", cursor: anyMultiZone ? "pointer" : "default",
+        opacity: anyMultiZone ? 1 : 0.5,
+      },
+      title: anyMultiZone
+        ? "Zone (topology.kubernetes.io/zone 또는 site_id)별로 행을 분리합니다. L4·Switch·Storage가 zone별로 묶입니다."
+        : "Zone이 2개 이상인 클러스터가 있을 때만 효과가 있습니다.",
+    }, [zoneToggle, "Group by zone"]),
   ]));
   wrap.appendChild(root_svg);
 
