@@ -6927,8 +6927,36 @@ function renderArchitecture() {
   const isStateful = w => w.kind === "StatefulSet" || ["DB", "Cache", "Queue"].includes(w.category);
   const isPlatform = w => platformNs.has(w.namespace || "default");
 
+  // Pre-compute L4 → workload routing (via cluster.ingress_rules.paths).
+  // Only "compute" (non-platform, non-stateful) workloads become L4 children.
+  // childWorkloadIds: set of workload IDs that should NOT appear as siblings
+  // (they're rendered under their L4 instead).
+  const l4Children = new Map();   // l4.id → array of { kind:"workload", item, cluster }
+  const childWorkloadIds = new Set();
+  for (const s of p.sites || []) {
+    for (const lb of (s.l4_balancers || [])) {
+      const children = [];
+      const targets = lb.target_cluster_ids || [];
+      for (const cid of targets) {
+        const c = p.clusters.find(x => x.id === cid);
+        if (!c) continue;
+        for (const r of (c.ingress_rules || [])) {
+          for (const path of (r.paths || [])) {
+            const w = (c.workloads || []).find(x => x.id === path.workload_id);
+            if (!w) continue;
+            if (isPlatform(w) || isStateful(w)) continue;
+            if (childWorkloadIds.has(w.id)) continue;
+            children.push({ kind: "workload", item: w, cluster: c });
+            childWorkloadIds.add(w.id);
+          }
+        }
+      }
+      if (children.length) l4Children.set(lb.id, children);
+    }
+  }
+
   // Build groups
-  const envRows = new Map(); // env_tag → array of { workload, cluster, l4, isL4 }
+  const envRows = new Map(); // env_tag → array of items
   const mgmtRow = [];
   const dbRow = [];
 
@@ -6944,6 +6972,7 @@ function renderArchitecture() {
       }
     }
     for (const w of (c.workloads || [])) {
+      if (childWorkloadIds.has(w.id)) continue; // pulled into L4 sub-tree
       if (isPlatform(w)) {
         mgmtRow.push({ kind: "workload", item: w, cluster: c });
       } else if (isStateful(w)) {
@@ -6983,14 +7012,37 @@ function renderArchitecture() {
 
   // Layout constants
   const SWITCH_W = 110, SWITCH_H = 36;
-  const ROW_GAP = 32, BOX_W = 100, BOX_H = 56, BOX_GAP = 12;
+  const ROW_GAP = 32, BOX_W = 100, BOX_H = 56, BOX_GAP = 12, SUB_GAP = 8;
   const PAD_LEFT = 20, PAD_RIGHT = 30, PAD_TOP = 20;
-  const STUB_LEN = 36;            // 스위치 라인에서 박스 위까지 vertical 길이
-  const ROW_HEIGHT = SWITCH_H + 30 + STUB_LEN + BOX_H + ROW_GAP;
+  const STUB_LEN = 36;
+  const SUB_DROP = 18;            // L4 박스 하단부터 sub-line까지 vertical
+  const SUB_TO_CHILD = 12;        // sub-line부터 child 박스 위까지 vertical
 
-  const maxItems = Math.max(...rows.map(r => r.items.length), 1);
-  const totalW = PAD_LEFT + SWITCH_W + 30 + maxItems * BOX_W + (maxItems - 1) * BOX_GAP + PAD_RIGHT;
-  const totalH = PAD_TOP + rows.length * ROW_HEIGHT + 20;
+  // Per-row item footprint (L4 with children may be wider than BOX_W)
+  const itemFootprint = it => {
+    if (it.kind === "l4") {
+      const ch = l4Children.get(it.item.id) || [];
+      if (ch.length) return Math.max(BOX_W, ch.length * BOX_W + (ch.length - 1) * SUB_GAP);
+    }
+    return BOX_W;
+  };
+  const rowWidth = r => {
+    if (!r.items.length) return BOX_W;
+    let w = 0;
+    for (const it of r.items) w += itemFootprint(it) + BOX_GAP;
+    return w - BOX_GAP;
+  };
+  const rowHeight = r => {
+    const hasSubs = r.items.some(it => it.kind === "l4" && (l4Children.get(it.item.id) || []).length > 0);
+    return SWITCH_H + 30 + STUB_LEN + BOX_H + (hasSubs ? SUB_DROP + SUB_TO_CHILD + BOX_H + 8 : 0) + ROW_GAP;
+  };
+
+  const totalW = PAD_LEFT + SWITCH_W + 30 + Math.max(...rows.map(rowWidth), 0) + PAD_RIGHT;
+  // Sequential row tops + total height
+  const rowTops = [];
+  let cursorY = PAD_TOP;
+  for (const r of rows) { rowTops.push(cursorY); cursorY += rowHeight(r); }
+  const totalH = cursorY + 20;
 
   // Color mapping by item kind / workload category (matches Korean infra diagram style)
   const colorOf = (item) => {
@@ -7030,17 +7082,55 @@ function renderArchitecture() {
     style: "background:var(--bg);border:1px solid var(--border);border-radius:8px;",
   });
 
+  // Helper: draw a box with label/sub at given position
+  const drawBox = (item, x, y) => {
+    const cx = x + BOX_W / 2;
+    const col = colorOf(item);
+    let label, sub, onclick;
+    if (item.kind === "l4") {
+      label = "L4"; sub = `(${(item.item.vendor || item.item.kind).toLowerCase()})`;
+      onclick = () => selectEntity("l4", item.item.id);
+    } else if (item.kind === "workload") {
+      label = item.item.name; sub = item.item.replicas > 1 ? `×${item.item.replicas}` : "";
+      onclick = () => selectEntity("workload", item.item.id);
+    } else if (item.kind === "extsvc") {
+      label = item.item.name; sub = item.item.engine || item.item.kind;
+      onclick = () => selectEntity("extsvc", item.item.id);
+    } else if (item.kind === "storage") {
+      label = item.item.name; sub = item.item.kind;
+      onclick = () => selectEntity("storage", item.item.id);
+    }
+    const g = svg("g", { style: "cursor:pointer", onclick });
+    g.appendChild(svg("rect", {
+      x, y, width: BOX_W, height: BOX_H, rx: 4, ry: 4,
+      fill: col.fill, stroke: col.stroke, "stroke-width": 1.5,
+    }));
+    const lbl = label.length > 14 ? label.slice(0, 13) + "…" : label;
+    g.appendChild(svg("text", {
+      x: cx, y: y + (sub ? BOX_H / 2 - 2 : BOX_H / 2 + 5),
+      "text-anchor": "middle", fill: "#fff",
+      "font-size": "12", "font-weight": "600", "font-family": "Pretendard, sans-serif",
+    }, [lbl]));
+    if (sub) {
+      g.appendChild(svg("text", {
+        x: cx, y: y + BOX_H / 2 + 14,
+        "text-anchor": "middle", fill: "rgba(255,255,255,0.8)",
+        "font-size": "11", "font-family": "JetBrains Mono",
+      }, [sub.length > 16 ? sub.slice(0, 15) + "…" : sub]));
+    }
+    root_svg.appendChild(g);
+  };
+
   // Vertical spine (left edge connecting all switches)
   const spineX = PAD_LEFT + SWITCH_W / 2;
   root_svg.appendChild(svg("line", {
-    x1: spineX, y1: PAD_TOP + SWITCH_H / 2,
-    x2: spineX, y2: PAD_TOP + (rows.length - 1) * ROW_HEIGHT + SWITCH_H / 2,
+    x1: spineX, y1: rowTops[0] + SWITCH_H / 2,
+    x2: spineX, y2: rowTops[rowTops.length - 1] + SWITCH_H / 2,
     stroke: "#34495e", "stroke-width": 2,
   }));
 
   rows.forEach((row, rowIdx) => {
-    const rowTopY = PAD_TOP + rowIdx * ROW_HEIGHT;
-    const switchY = rowTopY;
+    const switchY = rowTops[rowIdx];
     const lineY = switchY + SWITCH_H / 2;
     const boxY = lineY + STUB_LEN;
 
@@ -7070,61 +7160,53 @@ function renderArchitecture() {
       stroke: "#34495e", "stroke-width": 1.5,
     }));
 
-    // Component boxes
+    // Component boxes (with optional L4 sub-trees)
     let bx = PAD_LEFT + SWITCH_W + 30;
     for (const item of row.items) {
-      const col = colorOf(item);
-      let label, sub, onclick;
+      const subs = item.kind === "l4" ? (l4Children.get(item.item.id) || []) : [];
+      const footprint = itemFootprint(item);
+      const cx = bx + footprint / 2;
+      const itemX = cx - BOX_W / 2;
 
-      if (item.kind === "l4") {
-        label = "L4";
-        sub = `(${(item.item.vendor || item.item.kind).toLowerCase()})`;
-        onclick = () => selectEntity("l4", item.item.id);
-      } else if (item.kind === "workload") {
-        const w = item.item;
-        label = w.name;
-        sub = w.replicas > 1 ? `×${w.replicas}` : "";
-        onclick = () => selectEntity("workload", w.id);
-      } else if (item.kind === "extsvc") {
-        label = item.item.name;
-        sub = item.item.engine || item.item.kind;
-        onclick = () => selectEntity("extsvc", item.item.id);
-      } else if (item.kind === "storage") {
-        label = item.item.name;
-        sub = item.item.kind;
-        onclick = () => selectEntity("storage", item.item.id);
-      }
-
-      // Vertical connector from bus line to box top
-      const cx = bx + BOX_W / 2;
+      // Vertical connector from bus line down to box top
       root_svg.appendChild(svg("line", {
         x1: cx, y1: lineY, x2: cx, y2: boxY,
         stroke: "#34495e", "stroke-width": 1,
       }));
 
-      // Box
-      const g = svg("g", { style: "cursor:pointer", onclick });
-      g.appendChild(svg("rect", {
-        x: bx, y: boxY, width: BOX_W, height: BOX_H, rx: 4, ry: 4,
-        fill: col.fill, stroke: col.stroke, "stroke-width": 1.5,
-      }));
-      // Truncate long labels
-      const lbl = label.length > 14 ? label.slice(0, 13) + "…" : label;
-      g.appendChild(svg("text", {
-        x: cx, y: boxY + (sub ? BOX_H / 2 - 2 : BOX_H / 2 + 5),
-        "text-anchor": "middle", fill: "#fff",
-        "font-size": "12", "font-weight": "600", "font-family": "Pretendard, sans-serif",
-      }, [lbl]));
-      if (sub) {
-        g.appendChild(svg("text", {
-          x: cx, y: boxY + BOX_H / 2 + 14,
-          "text-anchor": "middle", fill: "rgba(255,255,255,0.8)",
-          "font-size": "11", "font-family": "JetBrains Mono",
-        }, [sub.length > 16 ? sub.slice(0, 15) + "…" : sub]));
-      }
-      root_svg.appendChild(g);
+      drawBox(item, itemX, boxY);
 
-      bx += BOX_W + BOX_GAP;
+      if (subs.length) {
+        const subsW = subs.length * BOX_W + (subs.length - 1) * SUB_GAP;
+        const subY = boxY + BOX_H + SUB_DROP;
+        const childY = subY + SUB_TO_CHILD;
+        const childStartX = cx - subsW / 2;
+
+        // L4 bottom → sub line vertical
+        root_svg.appendChild(svg("line", {
+          x1: cx, y1: boxY + BOX_H, x2: cx, y2: subY,
+          stroke: "#34495e", "stroke-width": 1,
+        }));
+        // Horizontal connector spanning children (only if 2+)
+        if (subs.length > 1) {
+          root_svg.appendChild(svg("line", {
+            x1: childStartX + BOX_W / 2, y1: subY,
+            x2: childStartX + subsW - BOX_W / 2, y2: subY,
+            stroke: "#34495e", "stroke-width": 1,
+          }));
+        }
+        // Each child: vertical drop + box
+        for (let i = 0; i < subs.length; i++) {
+          const ccx = childStartX + i * (BOX_W + SUB_GAP) + BOX_W / 2;
+          root_svg.appendChild(svg("line", {
+            x1: ccx, y1: subY, x2: ccx, y2: childY,
+            stroke: "#34495e", "stroke-width": 1,
+          }));
+          drawBox(subs[i], ccx - BOX_W / 2, childY);
+        }
+      }
+
+      bx += footprint + BOX_GAP;
     }
   });
 
