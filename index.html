@@ -1042,7 +1042,7 @@ const VIEWS = [
   { id: "topology",    name: "Topology",     ready: true  },
   { id: "architecture",name: "Architecture", ready: true  },
   { id: "capacity",    name: "Capacity",     ready: true  },
-  { id: "depgraph",    name: "Dependency",   ready: false },
+  { id: "depgraph",    name: "Dependency",   ready: true  },
   { id: "namespace",   name: "Namespace",    ready: true  },
   { id: "bottleneck",  name: "Bottleneck",   ready: false },
   { id: "export",      name: "Export",       ready: false },
@@ -1275,6 +1275,12 @@ const HELP = {
     title: "Capacity View — 스케줄링 시뮬레이션",
     body: "각 워커 노드의 실제 활용도를 보여줍니다. 워크로드의 모든 replica를 first-fit 알고리즘으로 노드에 배치 후, 노드별 CPU/Mem/GPU/VRAM/PSU 점유율을 계산.",
     reco: "어떤 노드가 가장 빡빡한지, 어떤 pod이 안 들어가는지 한눈에 파악. anti-affinity / nodeSelector는 현재 미반영(다음 버전).",
+  },
+  "view.dependency": {
+    cat: "기타",
+    title: "Dependency Graph — 호출 그래프",
+    body: "워크로드의 depends_on을 좌→우 layered DAG로 시각화. 진입점(아무도 호출 안 하는 노드)이 가장 왼쪽, 싱크(DB·Cache 등 leaf)가 가장 오른쪽. 화살표 방향 = caller→callee. 점선은 cycle (back edge).",
+    reco: "긴 horizontal chain은 호출 깊이를 의미 — p99 latency 누적 위험. 한 노드로 들어오는 fan-in이 많으면 그 노드가 SPoF. 사이클이 있으면 데드락·재시도 폭주 가능성.",
   },
 
   // ───── Namespace / NetworkPolicy ─────
@@ -7491,6 +7497,317 @@ function renderArchitecture() {
   root.appendChild(wrap);
 }
 
+//============ Render: Dependency graph ============
+function renderDependency() {
+  const root = $("#viewBody");
+  root.innerHTML = "";
+  const p = state.project;
+  if (!p) return;
+
+  // Collect all workloads across clusters (with cluster ref for context)
+  const items = [];
+  const byId = new Map();
+  for (const c of p.clusters || []) {
+    for (const w of (c.workloads || [])) {
+      items.push({ w, c });
+      byId.set(w.id, { w, c });
+    }
+  }
+
+  if (!items.length) {
+    root.appendChild(el("div", { class: "view-empty" }, [
+      el("div", { class: "big" }, ["⊟"]),
+      el("h2", {}, ["Dependency Graph"]),
+      el("p", {}, ["워크로드가 있어야 표시됩니다."]),
+    ]));
+    return;
+  }
+
+  // Build edges and adjacency. Drop edges to unknown targets (silent).
+  const edges = [];     // { from, to, protocol, port, avg_call_ms, fanout_pct, calls_per_request }
+  const out = new Map();
+  const inDeg = new Map();
+  for (const { w } of items) {
+    out.set(w.id, []);
+    inDeg.set(w.id, 0);
+  }
+  for (const { w } of items) {
+    for (const d of (w.depends_on || [])) {
+      const tgt = d.target_workload_id;
+      if (!byId.has(tgt)) continue;
+      edges.push({
+        from: w.id, to: tgt,
+        protocol: d.protocol || "", port: d.port,
+        avg_call_ms: d.avg_call_ms,
+        fanout_pct: d.fanout_pct, calls_per_request: d.calls_per_request,
+      });
+      out.get(w.id).push(tgt);
+      inDeg.set(tgt, (inDeg.get(tgt) || 0) + 1);
+    }
+  }
+
+  if (!edges.length) {
+    root.appendChild(el("div", { class: "view-empty" }, [
+      el("div", { class: "big" }, ["⊘"]),
+      el("h2", {}, ["No dependencies"]),
+      el("p", {}, [
+        "워크로드 ", String(items.length), "개 중 depends_on 관계가 없습니다. ",
+        "워크로드 inspector → Dependencies 섹션에서 추가하세요.",
+      ]),
+    ]));
+    return;
+  }
+
+  // ---- Layered layout (Kahn-style longest-path from sources) ----
+  // Sources = in-degree 0. Layer 0 = leftmost. Cycle nodes go to maxLayer.
+  const layer = new Map();
+  const remaining = new Map(inDeg);
+  const queue = [];
+  for (const { w } of items) {
+    if (remaining.get(w.id) === 0) { layer.set(w.id, 0); queue.push(w.id); }
+  }
+  while (queue.length) {
+    const n = queue.shift();
+    const ln = layer.get(n);
+    for (const c of (out.get(n) || [])) {
+      const lc = layer.has(c) ? Math.max(layer.get(c), ln + 1) : ln + 1;
+      layer.set(c, lc);
+      const r = remaining.get(c) - 1;
+      remaining.set(c, r);
+      if (r === 0) queue.push(c);
+    }
+  }
+  // Cycle survivors: nodes that never hit in-degree 0
+  let maxLayer = 0;
+  for (const v of layer.values()) maxLayer = Math.max(maxLayer, v);
+  const cycleNodes = new Set();
+  for (const { w } of items) {
+    if (!layer.has(w.id)) {
+      layer.set(w.id, maxLayer + 1);
+      cycleNodes.add(w.id);
+    }
+  }
+  if (cycleNodes.size) maxLayer += 1;
+
+  // Identify back edges (target's layer ≤ source's layer)
+  const backEdges = new Set();
+  for (let i = 0; i < edges.length; i++) {
+    const e = edges[i];
+    if (layer.get(e.to) <= layer.get(e.from)) backEdges.add(i);
+  }
+
+  // Group nodes per layer
+  const layerNodes = [];
+  for (let l = 0; l <= maxLayer; l++) layerNodes.push([]);
+  for (const { w } of items) layerNodes[layer.get(w.id)].push(w.id);
+  // Sort within layer alphabetically for determinism
+  for (const arr of layerNodes) arr.sort((a, b) => a.localeCompare(b));
+
+  // ---- Layout constants ----
+  const BOX_W = 140, BOX_H = 50;
+  const COL_W = BOX_W + 80;   // horizontal spacing per layer
+  const ROW_H = BOX_H + 22;   // vertical spacing within a layer
+  const PAD = 24;
+
+  const maxRows = Math.max(...layerNodes.map(a => a.length), 1);
+  const totalW = PAD * 2 + (maxLayer + 1) * COL_W - 80; // last layer doesn't need full COL_W spacing
+  const totalH = PAD * 2 + maxRows * ROW_H + 20;
+
+  // Per-node position
+  const pos = new Map();  // wid → { cx, cy }
+  layerNodes.forEach((nodes, l) => {
+    const rows = nodes.length;
+    const startY = PAD + (maxRows - rows) * ROW_H / 2 + BOX_H / 2;  // vertically centered
+    nodes.forEach((wid, idx) => {
+      const cx = PAD + l * COL_W + BOX_W / 2;
+      const cy = startY + idx * ROW_H;
+      pos.set(wid, { cx, cy });
+    });
+  });
+
+  // ---- Color by category (mirror architecture view) ----
+  const platformNs = new Set(["kube-system", "ingress-nginx", "cert-manager",
+    "monitoring", "logging", "velero", "external-secrets", "argocd", "istio-system"]);
+  const colorOf = (w) => {
+    if (platformNs.has(w.namespace || "default")) return { fill: "#5d6d7e", stroke: "#7f8c8d" };
+    const map = {
+      Frontend: { fill: "#7d3c98", stroke: "#9b59b6" },
+      API:      { fill: "#1e6091", stroke: "#2980b9" },
+      WAS:      { fill: "#1e6091", stroke: "#2980b9" },
+      "ML-Inference": { fill: "#922b21", stroke: "#c0392b" },
+      "ML-Training":  { fill: "#922b21", stroke: "#c0392b" },
+      Video:    { fill: "#943126", stroke: "#cd5c5c" },
+      DB:       { fill: "#1f618d", stroke: "#3498db" },
+      Cache:    { fill: "#1f618d", stroke: "#3498db" },
+      Queue:    { fill: "#117a65", stroke: "#1abc9c" },
+      Batch:    { fill: "#1e8449", stroke: "#27ae60" },
+    };
+    return map[w.category] || { fill: "#5d6d7e", stroke: "#7f8c8d" };
+  };
+
+  // ---- SVG ----
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = (tag, attrs = {}, children = []) => {
+    const node = document.createElementNS(NS, tag);
+    for (const [k, v] of Object.entries(attrs)) {
+      if (k.startsWith("on") && typeof v === "function") node.addEventListener(k.slice(2).toLowerCase(), v);
+      else if (v != null) node.setAttribute(k, v);
+    }
+    for (const c of [].concat(children)) {
+      if (c == null) continue;
+      node.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+    }
+    return node;
+  };
+
+  const root_svg = svg("svg", {
+    width: "100%",
+    viewBox: `0 0 ${totalW} ${totalH}`,
+    style: "background:var(--bg);border:1px solid var(--border);border-radius:8px;",
+  });
+
+  // Arrow markers
+  const defs = svg("defs");
+  defs.appendChild(svg("marker", {
+    id: "arr", viewBox: "0 0 10 10", refX: 9, refY: 5,
+    markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse",
+  }, [svg("path", { d: "M0,0 L10,5 L0,10 z", fill: "#7f8c8d" })]));
+  defs.appendChild(svg("marker", {
+    id: "arr-back", viewBox: "0 0 10 10", refX: 9, refY: 5,
+    markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse",
+  }, [svg("path", { d: "M0,0 L10,5 L0,10 z", fill: "#e67e22" })]));
+  root_svg.appendChild(defs);
+
+  // ---- Edges (drawn first so nodes overlap) ----
+  edges.forEach((e, idx) => {
+    const a = pos.get(e.from), b = pos.get(e.to);
+    if (!a || !b) return;
+    const back = backEdges.has(idx);
+    const x1 = a.cx + BOX_W / 2;
+    const y1 = a.cy;
+    const x2 = b.cx - BOX_W / 2;
+    const y2 = b.cy;
+    // For back edges, route around (curve more), else gentle bezier
+    const dx = Math.max(40, (x2 - x1) / 2);
+    const c1x = x1 + dx, c1y = y1;
+    const c2x = x2 - dx, c2y = y2;
+    const path = back
+      ? `M${a.cx + BOX_W / 2},${y1} C${a.cx + BOX_W},${y1 - 30} ${b.cx - BOX_W},${y2 - 30} ${b.cx - BOX_W / 2},${y2}`
+      : `M${x1},${y1} C${c1x},${c1y} ${c2x},${c2y} ${x2},${y2}`;
+    root_svg.appendChild(svg("path", {
+      d: path, fill: "none",
+      stroke: back ? "#e67e22" : "#7f8c8d",
+      "stroke-width": 1.4,
+      "stroke-dasharray": back ? "4 3" : "",
+      "marker-end": back ? "url(#arr-back)" : "url(#arr)",
+    }));
+    // Edge label (protocol + ms) — small, mid-arc
+    const labelParts = [];
+    if (e.protocol) labelParts.push(e.protocol);
+    if (e.avg_call_ms != null) labelParts.push(`${e.avg_call_ms}ms`);
+    if (labelParts.length) {
+      const mx = (x1 + x2) / 2;
+      const my = (y1 + y2) / 2 - (back ? 28 : 8);
+      root_svg.appendChild(svg("text", {
+        x: mx, y: my, "text-anchor": "middle",
+        fill: back ? "#e67e22" : "var(--text3)",
+        "font-size": "9", "font-family": "JetBrains Mono",
+      }, [labelParts.join(" / ")]));
+    }
+  });
+
+  // ---- Nodes ----
+  for (const { w } of items) {
+    const np = pos.get(w.id);
+    if (!np) continue;
+    const col = colorOf(w);
+    const x = np.cx - BOX_W / 2, y = np.cy - BOX_H / 2;
+    const g = svg("g", {
+      style: "cursor:pointer",
+      onclick: () => selectEntity("workload", w.id),
+    });
+    g.appendChild(svg("rect", {
+      x, y, width: BOX_W, height: BOX_H, rx: 6, ry: 6,
+      fill: col.fill, stroke: col.stroke, "stroke-width": 1.5,
+    }));
+    const lbl = w.name.length > 18 ? w.name.slice(0, 17) + "…" : w.name;
+    g.appendChild(svg("text", {
+      x: np.cx, y: y + 18, "text-anchor": "middle",
+      fill: "#fff", "font-size": "12", "font-weight": "600",
+      "font-family": "Pretendard, sans-serif",
+    }, [lbl]));
+    const sub = [w.category || "", w.replicas > 1 ? `×${w.replicas}` : ""].filter(Boolean).join(" ");
+    if (sub) {
+      g.appendChild(svg("text", {
+        x: np.cx, y: y + 33, "text-anchor": "middle",
+        fill: "rgba(255,255,255,0.85)", "font-size": "10",
+        "font-family": "JetBrains Mono",
+      }, [sub]));
+    }
+    if (w.namespace) {
+      g.appendChild(svg("text", {
+        x: np.cx, y: y + 45, "text-anchor": "middle",
+        fill: "rgba(255,255,255,0.6)", "font-size": "9",
+        "font-family": "JetBrains Mono",
+      }, [`ns:${w.namespace}`]));
+    }
+    root_svg.appendChild(g);
+  }
+
+  // Layer column labels (top)
+  for (let l = 0; l <= maxLayer; l++) {
+    if (!layerNodes[l].length) continue;
+    const x = PAD + l * COL_W + BOX_W / 2;
+    const isFirst = l === 0;
+    const isLast = l === maxLayer && !cycleNodes.size;
+    const isCycle = cycleNodes.size && l === maxLayer;
+    const lbl = isCycle ? "cycle"
+              : isFirst ? "entry"
+              : isLast ? "sink"
+              : `L${l}`;
+    root_svg.appendChild(svg("text", {
+      x, y: PAD - 6, "text-anchor": "middle",
+      fill: "var(--text3)", "font-size": "10",
+      "font-family": "JetBrains Mono", "font-style": "italic",
+    }, [lbl]));
+  }
+
+  // ---- Wrap ----
+  const wrap = el("div", {});
+  const fanIn = new Map();
+  for (const e of edges) fanIn.set(e.to, (fanIn.get(e.to) || 0) + 1);
+  let topFanIn = "";
+  if (fanIn.size) {
+    const [tid, tn] = [...fanIn.entries()].sort((a, b) => b[1] - a[1])[0];
+    const wname = byId.get(tid)?.w?.name || tid;
+    topFanIn = `fan-in 최다: ${wname} (${tn})`;
+  }
+  wrap.appendChild(el("div", {
+    style: { display: "flex", alignItems: "baseline", gap: "12px", marginBottom: "10px", flexWrap: "wrap" },
+  }, [
+    el("h2", { style: { fontSize: "16px", fontWeight: 600, margin: 0 } }, [
+      "Dependency Graph", helpIcon("view.dependency"),
+    ]),
+    el("span", { style: { fontSize: "11px", color: "var(--text3)", fontStyle: "italic" } }, [
+      `${items.length} workloads · ${edges.length} edges · 깊이 ${maxLayer + 1}` +
+      (cycleNodes.size ? ` · ⚠ cycle ${cycleNodes.size}` : ""),
+    ]),
+    topFanIn ? el("span", { style: { fontSize: "11px", color: "var(--text3)" } }, [topFanIn]) : null,
+  ]));
+  wrap.appendChild(root_svg);
+
+  // Legend
+  wrap.appendChild(el("div", {
+    style: { fontSize: "11px", color: "var(--text2)", marginTop: "10px", display: "flex", gap: "10px", flexWrap: "wrap" },
+  }, [
+    el("span", {}, ["←caller"]),
+    el("span", { style: { color: "var(--text3)" } }, ["→callee  (left = entry, right = sink)"]),
+    el("span", { style: { marginLeft: "12px", color: "#e67e22" } }, ["⤺ back edge (cycle)"]),
+  ]));
+
+  root.appendChild(wrap);
+}
+
 //============ Render: dispatch ============
 function renderViewBody() {
   if (!state.project) { renderTopology(); return; }
@@ -7498,6 +7815,7 @@ function renderViewBody() {
   if (v === "topology") return renderTopology();
   if (v === "architecture") return renderArchitecture();
   if (v === "capacity") return renderCapacity();
+  if (v === "depgraph") return renderDependency();
   if (v === "namespace") return renderNamespace();
   // placeholder for other views
   $("#viewBody").innerHTML = "";
