@@ -6998,10 +6998,39 @@ function renderArchitecture() {
   // Final row order
   const rows = [];
   for (const [tag, items] of envRows) {
-    if (items.length) rows.push({ label: `(${tag})`, items });
+    if (items.length) rows.push({ label: `(${tag})`, items, tag });
   }
-  if (mgmtRow.length) rows.push({ label: "(관리/Mgmt)", items: mgmtRow });
-  if (dbRow.length) rows.push({ label: "(DB/Storage)", items: dbRow });
+  if (mgmtRow.length) rows.push({ label: "(관리/Mgmt)", items: mgmtRow, tag: "_mgmt" });
+  if (dbRow.length) rows.push({ label: "(DB/Storage)", items: dbRow, tag: "_db" });
+
+  // Map row.tag → real switch entity (network_devices[kind=switch]).
+  // For env rows: pick a switch from any site that hosts a node of a cluster
+  // with that env_tag. For mgmt/db rows: any switch in any site (logical).
+  const rowSwitches = new Map();
+  for (const c of p.clusters) {
+    const tag = c.environment_tag || c.name;
+    if (rowSwitches.has(tag)) continue;
+    const sitesUsed = new Set();
+    for (const nid of (c.node_ids || [])) {
+      const n = p.nodes.find(x => x.id === nid);
+      if (n) sitesUsed.add(n.site_id);
+    }
+    for (const sid of sitesUsed) {
+      const s = (p.sites || []).find(x => x.id === sid);
+      if (!s) continue;
+      const sw = (s.network_devices || []).find(d => d.kind === "switch");
+      if (sw) { rowSwitches.set(tag, sw); break; }
+    }
+  }
+  let anySwitch = null;
+  for (const s of (p.sites || [])) {
+    const sw = (s.network_devices || []).find(d => d.kind === "switch");
+    if (sw) { anySwitch = sw; break; }
+  }
+  if (anySwitch) {
+    if (!rowSwitches.has("_mgmt")) rowSwitches.set("_mgmt", anySwitch);
+    if (!rowSwitches.has("_db")) rowSwitches.set("_db", anySwitch);
+  }
 
   if (!rows.length) {
     root.appendChild(el("div", { class: "view-empty" }, [
@@ -7134,16 +7163,25 @@ function renderArchitecture() {
     const lineY = switchY + SWITCH_H / 2;
     const boxY = lineY + STUB_LEN;
 
-    // Switch box
-    root_svg.appendChild(svg("rect", {
+    // Switch box — bind to real network_devices[kind=switch] if available
+    const realSwitch = rowSwitches.get(row.tag);
+    const swAttrs = realSwitch
+      ? { style: "cursor:pointer", onclick: () => selectEntity("netdev", realSwitch.id) }
+      : {};
+    const swG = svg("g", swAttrs);
+    swG.appendChild(svg("rect", {
       x: PAD_LEFT, y: switchY, width: SWITCH_W, height: SWITCH_H,
-      rx: 3, ry: 3, fill: "#1e3a5f", stroke: "#34495e", "stroke-width": 1.5,
+      rx: 3, ry: 3,
+      fill: "#1e3a5f",
+      stroke: realSwitch ? "#4d9cff" : "#34495e",
+      "stroke-width": realSwitch ? 2 : 1.5,
     }));
-    root_svg.appendChild(svg("text", {
+    swG.appendChild(svg("text", {
       x: PAD_LEFT + SWITCH_W / 2, y: switchY + SWITCH_H / 2 + 5,
       "text-anchor": "middle", fill: "#fff",
       "font-size": "13", "font-weight": "600", "font-family": "Pretendard, sans-serif",
     }, ["switch"]));
+    root_svg.appendChild(swG);
 
     // Row label below switch (italic)
     root_svg.appendChild(svg("text", {
@@ -7151,6 +7189,16 @@ function renderArchitecture() {
       "text-anchor": "middle", fill: "var(--text2)",
       "font-size": "12", "font-style": "italic", "font-family": "Pretendard, sans-serif",
     }, [row.label]));
+
+    // Sub-label: real switch device name + vendor
+    if (realSwitch) {
+      const subLine = realSwitch.name + (realSwitch.vendor ? ` · ${realSwitch.vendor}` : "");
+      root_svg.appendChild(svg("text", {
+        x: PAD_LEFT + SWITCH_W / 2, y: switchY + SWITCH_H + 32,
+        "text-anchor": "middle", fill: "var(--text3)",
+        "font-size": "10", "font-family": "JetBrains Mono",
+      }, [subLine]));
+    }
 
     // Horizontal switch bus line
     const lineEndX = totalW - PAD_RIGHT;
