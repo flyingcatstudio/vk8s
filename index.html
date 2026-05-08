@@ -1039,12 +1039,13 @@ const CATALOG_FILES  = [
   "data/catalog/onprem/supermicro.json",
 ];
 const VIEWS = [
-  { id: "topology",  name: "Topology",   ready: true  },
-  { id: "capacity",  name: "Capacity",   ready: true  },
-  { id: "depgraph",  name: "Dependency", ready: false },
-  { id: "namespace", name: "Namespace",  ready: true  },
-  { id: "bottleneck",name: "Bottleneck", ready: false },
-  { id: "export",    name: "Export",     ready: false },
+  { id: "topology",    name: "Topology",     ready: true  },
+  { id: "architecture",name: "Architecture", ready: true  },
+  { id: "capacity",    name: "Capacity",     ready: true  },
+  { id: "depgraph",    name: "Dependency",   ready: false },
+  { id: "namespace",   name: "Namespace",    ready: true  },
+  { id: "bottleneck",  name: "Bottleneck",   ready: false },
+  { id: "export",      name: "Export",       ready: false },
 ];
 
 //============ State ============
@@ -6892,11 +6893,275 @@ function renderNamespaceCluster(c) {
   return card;
 }
 
+//============ Render: Architecture (switch-bus diagram, Korean style) ============
+function renderArchitecture() {
+  const root = $("#viewBody");
+  root.innerHTML = "";
+  const p = state.project;
+  if (!p?.clusters?.length) {
+    root.appendChild(el("div", { class: "view-empty" }, [
+      el("div", { class: "big" }, ["⊟"]),
+      el("h2", {}, ["Network Architecture"]),
+      el("p", {}, ["클러스터·워크로드가 있어야 표시됩니다."]),
+    ]));
+    return;
+  }
+
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = (tag, attrs = {}, children = []) => {
+    const node = document.createElementNS(NS, tag);
+    for (const [k, v] of Object.entries(attrs)) {
+      if (k.startsWith("on") && typeof v === "function") node.addEventListener(k.slice(2).toLowerCase(), v);
+      else if (v != null) node.setAttribute(k, v);
+    }
+    for (const c of [].concat(children)) {
+      if (c == null) continue;
+      node.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+    }
+    return node;
+  };
+
+  // Classification
+  const platformNs = new Set(["kube-system", "ingress-nginx", "cert-manager",
+    "monitoring", "logging", "velero", "external-secrets", "argocd", "istio-system"]);
+  const isStateful = w => w.kind === "StatefulSet" || ["DB", "Cache", "Queue"].includes(w.category);
+  const isPlatform = w => platformNs.has(w.namespace || "default");
+
+  // Build groups
+  const envRows = new Map(); // env_tag → array of { workload, cluster, l4, isL4 }
+  const mgmtRow = [];
+  const dbRow = [];
+
+  for (const c of p.clusters) {
+    const tag = c.environment_tag || c.name;
+    if (!envRows.has(tag)) envRows.set(tag, []);
+    // Add L4 LB(s) targeting this cluster as the first items of the row
+    for (const s of p.sites || []) {
+      for (const lb of (s.l4_balancers || [])) {
+        if ((lb.target_cluster_ids || []).includes(c.id)) {
+          envRows.get(tag).push({ kind: "l4", item: lb });
+        }
+      }
+    }
+    for (const w of (c.workloads || [])) {
+      if (isPlatform(w)) {
+        mgmtRow.push({ kind: "workload", item: w, cluster: c });
+      } else if (isStateful(w)) {
+        dbRow.push({ kind: "workload", item: w, cluster: c });
+      } else {
+        envRows.get(tag).push({ kind: "workload", item: w, cluster: c });
+      }
+    }
+  }
+
+  // External services + storages → DB row
+  for (const s of p.sites || []) {
+    for (const ex of (s.external_services || [])) {
+      if (["database", "cache", "queue", "object_store", "backup"].includes(ex.kind)) {
+        dbRow.push({ kind: "extsvc", item: ex });
+      }
+    }
+    for (const st of (s.storages || [])) {
+      dbRow.push({ kind: "storage", item: st });
+    }
+  }
+
+  // Final row order
+  const rows = [];
+  for (const [tag, items] of envRows) {
+    if (items.length) rows.push({ label: `(${tag})`, items });
+  }
+  if (mgmtRow.length) rows.push({ label: "(관리/Mgmt)", items: mgmtRow });
+  if (dbRow.length) rows.push({ label: "(DB/Storage)", items: dbRow });
+
+  if (!rows.length) {
+    root.appendChild(el("div", { class: "view-empty" }, [
+      el("h2", {}, ["워크로드가 없습니다"]),
+    ]));
+    return;
+  }
+
+  // Layout constants
+  const SWITCH_W = 110, SWITCH_H = 36;
+  const ROW_GAP = 32, BOX_W = 100, BOX_H = 56, BOX_GAP = 12;
+  const PAD_LEFT = 20, PAD_RIGHT = 30, PAD_TOP = 20;
+  const STUB_LEN = 36;            // 스위치 라인에서 박스 위까지 vertical 길이
+  const ROW_HEIGHT = SWITCH_H + 30 + STUB_LEN + BOX_H + ROW_GAP;
+
+  const maxItems = Math.max(...rows.map(r => r.items.length), 1);
+  const totalW = PAD_LEFT + SWITCH_W + 30 + maxItems * BOX_W + (maxItems - 1) * BOX_GAP + PAD_RIGHT;
+  const totalH = PAD_TOP + rows.length * ROW_HEIGHT + 20;
+
+  // Color mapping by item kind / workload category (matches Korean infra diagram style)
+  const colorOf = (item) => {
+    if (item.kind === "l4") return { fill: "#1e3a5f", stroke: "#34495e" };
+    if (item.kind === "extsvc") {
+      const c = { database: "#1f618d", cache: "#1f618d", queue: "#117a65",
+                  object_store: "#1e8449", backup: "#5d6d7e",
+                  monitoring: "#5d6d7e", logging: "#5d6d7e",
+                  secret_store: "#7d6608", identity: "#5d6d7e" };
+      return { fill: c[item.item.kind] || "#5d6d7e", stroke: "#34495e" };
+    }
+    if (item.kind === "storage") {
+      return { fill: "#1e8449", stroke: "#27ae60" };
+    }
+    // workload by category
+    const cat = item.item.category;
+    const map = {
+      Frontend:      { fill: "#7d3c98", stroke: "#9b59b6" },  // purple (web)
+      API:           { fill: "#1e6091", stroke: "#2980b9" },  // teal blue (was/agt)
+      WAS:           { fill: "#1e6091", stroke: "#2980b9" },
+      "ML-Inference":{ fill: "#922b21", stroke: "#c0392b" },  // red
+      "ML-Training": { fill: "#922b21", stroke: "#c0392b" },
+      Video:         { fill: "#943126", stroke: "#cd5c5c" },
+      DB:            { fill: "#1f618d", stroke: "#3498db" },
+      Cache:         { fill: "#1f618d", stroke: "#3498db" },
+      Queue:         { fill: "#117a65", stroke: "#1abc9c" },
+      Batch:         { fill: "#1e8449", stroke: "#27ae60" },  // green agent
+      Other:         { fill: "#5d6d7e", stroke: "#7f8c8d" },
+      Frontend:      { fill: "#7d3c98", stroke: "#9b59b6" },
+    };
+    return map[cat] || { fill: "#5d6d7e", stroke: "#7f8c8d" };
+  };
+
+  const root_svg = svg("svg", {
+    width: "100%",
+    viewBox: `0 0 ${totalW} ${totalH}`,
+    style: "background:var(--bg);border:1px solid var(--border);border-radius:8px;",
+  });
+
+  // Vertical spine (left edge connecting all switches)
+  const spineX = PAD_LEFT + SWITCH_W / 2;
+  root_svg.appendChild(svg("line", {
+    x1: spineX, y1: PAD_TOP + SWITCH_H / 2,
+    x2: spineX, y2: PAD_TOP + (rows.length - 1) * ROW_HEIGHT + SWITCH_H / 2,
+    stroke: "#34495e", "stroke-width": 2,
+  }));
+
+  rows.forEach((row, rowIdx) => {
+    const rowTopY = PAD_TOP + rowIdx * ROW_HEIGHT;
+    const switchY = rowTopY;
+    const lineY = switchY + SWITCH_H / 2;
+    const boxY = lineY + STUB_LEN;
+
+    // Switch box
+    root_svg.appendChild(svg("rect", {
+      x: PAD_LEFT, y: switchY, width: SWITCH_W, height: SWITCH_H,
+      rx: 3, ry: 3, fill: "#1e3a5f", stroke: "#34495e", "stroke-width": 1.5,
+    }));
+    root_svg.appendChild(svg("text", {
+      x: PAD_LEFT + SWITCH_W / 2, y: switchY + SWITCH_H / 2 + 5,
+      "text-anchor": "middle", fill: "#fff",
+      "font-size": "13", "font-weight": "600", "font-family": "Pretendard, sans-serif",
+    }, ["switch"]));
+
+    // Row label below switch (italic)
+    root_svg.appendChild(svg("text", {
+      x: PAD_LEFT + SWITCH_W / 2, y: switchY + SWITCH_H + 18,
+      "text-anchor": "middle", fill: "var(--text2)",
+      "font-size": "12", "font-style": "italic", "font-family": "Pretendard, sans-serif",
+    }, [row.label]));
+
+    // Horizontal switch bus line
+    const lineEndX = totalW - PAD_RIGHT;
+    root_svg.appendChild(svg("line", {
+      x1: PAD_LEFT + SWITCH_W, y1: lineY,
+      x2: lineEndX, y2: lineY,
+      stroke: "#34495e", "stroke-width": 1.5,
+    }));
+
+    // Component boxes
+    let bx = PAD_LEFT + SWITCH_W + 30;
+    for (const item of row.items) {
+      const col = colorOf(item);
+      let label, sub, onclick;
+
+      if (item.kind === "l4") {
+        label = "L4";
+        sub = `(${(item.item.vendor || item.item.kind).toLowerCase()})`;
+        onclick = () => selectEntity("l4", item.item.id);
+      } else if (item.kind === "workload") {
+        const w = item.item;
+        label = w.name;
+        sub = w.replicas > 1 ? `×${w.replicas}` : "";
+        onclick = () => selectEntity("workload", w.id);
+      } else if (item.kind === "extsvc") {
+        label = item.item.name;
+        sub = item.item.engine || item.item.kind;
+        onclick = () => selectEntity("extsvc", item.item.id);
+      } else if (item.kind === "storage") {
+        label = item.item.name;
+        sub = item.item.kind;
+        onclick = () => selectEntity("storage", item.item.id);
+      }
+
+      // Vertical connector from bus line to box top
+      const cx = bx + BOX_W / 2;
+      root_svg.appendChild(svg("line", {
+        x1: cx, y1: lineY, x2: cx, y2: boxY,
+        stroke: "#34495e", "stroke-width": 1,
+      }));
+
+      // Box
+      const g = svg("g", { style: "cursor:pointer", onclick });
+      g.appendChild(svg("rect", {
+        x: bx, y: boxY, width: BOX_W, height: BOX_H, rx: 4, ry: 4,
+        fill: col.fill, stroke: col.stroke, "stroke-width": 1.5,
+      }));
+      // Truncate long labels
+      const lbl = label.length > 14 ? label.slice(0, 13) + "…" : label;
+      g.appendChild(svg("text", {
+        x: cx, y: boxY + (sub ? BOX_H / 2 - 2 : BOX_H / 2 + 5),
+        "text-anchor": "middle", fill: "#fff",
+        "font-size": "12", "font-weight": "600", "font-family": "Pretendard, sans-serif",
+      }, [lbl]));
+      if (sub) {
+        g.appendChild(svg("text", {
+          x: cx, y: boxY + BOX_H / 2 + 14,
+          "text-anchor": "middle", fill: "rgba(255,255,255,0.8)",
+          "font-size": "11", "font-family": "JetBrains Mono",
+        }, [sub.length > 16 ? sub.slice(0, 15) + "…" : sub]));
+      }
+      root_svg.appendChild(g);
+
+      bx += BOX_W + BOX_GAP;
+    }
+  });
+
+  // Wrapper with section header
+  const wrap = el("div", {});
+  wrap.appendChild(el("div", {
+    style: { display: "flex", alignItems: "baseline", gap: "12px", marginBottom: "10px" },
+  }, [
+    el("h2", { style: { fontSize: "16px", fontWeight: 600, margin: 0 } }, ["인프라 아키텍처 — 네트워크 관점"]),
+    el("span", { style: { fontSize: "11px", color: "var(--text3)", fontStyle: "italic" } }, [
+      "switch 버스 + 환경별 그룹 (prod/dev/관리/DB·Storage)",
+    ]),
+  ]));
+  wrap.appendChild(root_svg);
+
+  // Legend
+  wrap.appendChild(el("div", {
+    style: { fontSize: "11px", color: "var(--text2)", marginTop: "10px", display: "flex", gap: "10px", flexWrap: "wrap" },
+  }, [
+    el("span", { style: { background: "#7d3c98", color: "#fff", padding: "2px 8px", borderRadius: "3px" } }, ["Frontend"]),
+    el("span", { style: { background: "#1e6091", color: "#fff", padding: "2px 8px", borderRadius: "3px" } }, ["API/WAS"]),
+    el("span", { style: { background: "#1e8449", color: "#fff", padding: "2px 8px", borderRadius: "3px" } }, ["Batch/Storage"]),
+    el("span", { style: { background: "#922b21", color: "#fff", padding: "2px 8px", borderRadius: "3px" } }, ["ML"]),
+    el("span", { style: { background: "#1f618d", color: "#fff", padding: "2px 8px", borderRadius: "3px" } }, ["DB/Cache"]),
+    el("span", { style: { background: "#5d6d7e", color: "#fff", padding: "2px 8px", borderRadius: "3px" } }, ["Mgmt"]),
+    el("span", { style: { background: "#1e3a5f", color: "#fff", padding: "2px 8px", borderRadius: "3px" } }, ["L4/Switch"]),
+  ]));
+
+  root.appendChild(wrap);
+}
+
 //============ Render: dispatch ============
 function renderViewBody() {
   if (!state.project) { renderTopology(); return; }
   const v = state.ui.view;
   if (v === "topology") return renderTopology();
+  if (v === "architecture") return renderArchitecture();
   if (v === "capacity") return renderCapacity();
   if (v === "namespace") return renderNamespace();
   // placeholder for other views
