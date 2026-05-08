@@ -1044,7 +1044,7 @@ const VIEWS = [
   { id: "capacity",    name: "Capacity",     ready: true  },
   { id: "depgraph",    name: "Dependency",   ready: true  },
   { id: "namespace",   name: "Namespace",    ready: true  },
-  { id: "bottleneck",  name: "Bottleneck",   ready: false },
+  { id: "bottleneck",  name: "Bottleneck",   ready: true  },
   { id: "export",      name: "Export",       ready: false },
 ];
 
@@ -1281,6 +1281,12 @@ const HELP = {
     title: "Dependency Graph — 호출 그래프",
     body: "워크로드의 depends_on을 좌→우 layered DAG로 시각화. 진입점(아무도 호출 안 하는 노드)이 가장 왼쪽, 싱크(DB·Cache 등 leaf)가 가장 오른쪽. 화살표 방향 = caller→callee. 점선은 cycle (back edge).",
     reco: "긴 horizontal chain은 호출 깊이를 의미 — p99 latency 누적 위험. 한 노드로 들어오는 fan-in이 많으면 그 노드가 SPoF. 사이클이 있으면 데드락·재시도 폭주 가능성.",
+  },
+  "view.bottleneck": {
+    cat: "기타",
+    title: "Bottleneck — 정적 병목 분석",
+    body: "Little's Law (in-flight = RPS × avg_ms / 1000) 기반. 5개 룰: (1) compute capacity (thread-pool/replica), (2) caller connection pool 고갈, (3) downstream RPS budget 초과, (4) DB max_connections oversubscription, (5) p99 latency budget 누적 초과.",
+    reco: "BLOCK은 즉시 SLA 위반 — replicas/pool/threads 조정 필요. WARN은 트래픽 폭증 시 위험. 정적 룰이라 retry/circuit-breaker 등 동적 효과는 미반영. traffic_profile + runtime + depends_on이 채워져야 정확함.",
   },
 
   // ───── Namespace / NetworkPolicy ─────
@@ -7808,6 +7814,336 @@ function renderDependency() {
   root.appendChild(wrap);
 }
 
+//============ Bottleneck analysis (5 static rules) ============
+function analyzeBottlenecks(p) {
+  const items = [];
+  const byId = new Map();
+  for (const c of p.clusters || []) {
+    for (const w of c.workloads || []) {
+      items.push({ w, c });
+      byId.set(w.id, { w, c });
+    }
+  }
+  // Inbound DB pool demand: caller's (pool × replicas) summed over all callers
+  const dbPoolDemand = new Map();
+  for (const { w } of items) {
+    const pool = w.runtime?.connection_pool_per_replica;
+    if (!pool) continue;
+    for (const d of (w.depends_on || [])) {
+      const v = pool * (w.replicas || 1);
+      dbPoolDemand.set(d.target_workload_id, (dbPoolDemand.get(d.target_workload_id) || 0) + v);
+    }
+  }
+  return items.map(({ w, c }) => {
+    const tp = w.traffic_profile || {};
+    const rt = w.runtime || {};
+    const replicas = w.replicas || 1;
+    const issues = [];
+    let computeUtil = null, computeCap = null, computeInFlight = null;
+    let latencyUsed = null, latencyBudget = null;
+    const poolEntries = [];
+
+    // Rule 1 — Compute capacity (Little's Law)
+    if (tp.target_rps && tp.avg_request_ms) {
+      computeInFlight = (tp.target_rps / 1000) * tp.avg_request_ms;
+      let perRep;
+      const m = rt.concurrency?.model;
+      if (m === "thread-pool") perRep = rt.concurrency.max_threads || 200;
+      else if (m === "event-loop") perRep = rt.concurrency.max_threads || 1000;
+      else if (m === "process") perRep = rt.concurrency.max_threads || 50;
+      else perRep = rt.concurrency?.max_threads || 100;
+      computeCap = perRep * replicas;
+      computeUtil = computeInFlight / computeCap;
+      if (computeUtil > 1.0) {
+        issues.push({
+          sev: "block",
+          msg: `Compute saturated: ${Math.round(computeInFlight)} in-flight / ${computeCap} cap (${Math.round(computeUtil * 100)}%)`,
+          fix: `replicas 또는 max_threads 증가, avg_request_ms 단축`,
+        });
+      } else if (computeUtil > 0.8) {
+        issues.push({
+          sev: "warn",
+          msg: `Near compute capacity: ${Math.round(computeUtil * 100)}% util (${Math.round(computeInFlight)}/${computeCap})`,
+        });
+      }
+    }
+
+    // Rule 2 & 3 — Per-downstream
+    for (const d of (w.depends_on || [])) {
+      const target = byId.get(d.target_workload_id);
+      if (!target) continue;
+      const fanout = (d.fanout_pct ?? 100) / 100;
+      const cpr = d.calls_per_request || 1;
+      const callerRps = tp.target_rps || 0;
+      const rpsToTarget = callerRps * fanout * cpr;
+
+      // Rule 2 — Caller pool exhaustion to this target
+      if (rt.connection_pool_per_replica && d.avg_call_ms && callerRps) {
+        const need = (rpsToTarget / 1000) * d.avg_call_ms;
+        const avail = rt.connection_pool_per_replica * replicas;
+        const u = avail ? need / avail : 0;
+        poolEntries.push({
+          target: target.w.name, need: Math.round(need * 10) / 10,
+          avail, util: u, rpsToTarget: Math.round(rpsToTarget),
+        });
+        if (u > 1.0) {
+          issues.push({
+            sev: "block",
+            msg: `Pool→${target.w.name}: ${Math.round(need)} conn 필요 / ${avail} 보유 (${Math.round(u * 100)}%)`,
+            fix: `connection_pool_per_replica 또는 replicas 증가`,
+          });
+        } else if (u > 0.8) {
+          issues.push({
+            sev: "warn",
+            msg: `Pool→${target.w.name}: ${Math.round(u * 100)}% util`,
+          });
+        }
+      }
+
+      // Rule 3 — Downstream target RPS overload
+      const targetTp = target.w.traffic_profile || {};
+      if (targetTp.target_rps && rpsToTarget > targetTp.target_rps) {
+        issues.push({
+          sev: "block",
+          msg: `${target.w.name} RPS overload: ${Math.round(rpsToTarget)} req/s > ${targetTp.target_rps}`,
+          fix: `${target.w.name} replicas 증가 또는 fanout/calls_per_request 줄이기`,
+        });
+      }
+    }
+
+    // Rule 4 — DB max_connections oversubscription (this workload as TARGET)
+    if (rt.max_connections) {
+      const inbound = dbPoolDemand.get(w.id) || 0;
+      if (inbound > rt.max_connections) {
+        issues.push({
+          sev: "warn",
+          msg: `Connection oversubscription: callers may open ${inbound} > max ${rt.max_connections}`,
+          fix: `${w.name} max_connections 증가 또는 caller pool 축소`,
+        });
+      }
+    }
+
+    // Rule 5 — Latency budget (own + Σ downstream call_ms × calls_per_request)
+    if (tp.avg_request_ms || (w.depends_on && w.depends_on.length)) {
+      const own = tp.avg_request_ms || 0;
+      let down = 0;
+      for (const d of (w.depends_on || [])) {
+        down += (d.avg_call_ms || 0) * (d.calls_per_request || 1);
+      }
+      latencyUsed = own + down;
+      latencyBudget = tp.client_timeout_ms || 3000;
+      const r = latencyUsed / latencyBudget;
+      if (r > 1.0 && latencyUsed > 0) {
+        issues.push({
+          sev: "block",
+          msg: `Latency budget exceeded: ${latencyUsed}ms / ${latencyBudget}ms`,
+          fix: `downstream 호출 수/시간 줄이거나 client_timeout 늘리기`,
+        });
+      } else if (r > 0.7 && latencyUsed > 0) {
+        issues.push({
+          sev: "warn",
+          msg: `Tight latency: ${latencyUsed}ms / ${latencyBudget}ms (${Math.round(r * 100)}%)`,
+        });
+      }
+    }
+
+    const severity = issues.some(i => i.sev === "block") ? "block"
+                   : issues.some(i => i.sev === "warn") ? "warn"
+                   : (computeUtil != null || latencyUsed != null || poolEntries.length) ? "ok"
+                   : "nodata";
+    return {
+      w, c, issues, severity,
+      computeUtil, computeCap, computeInFlight,
+      latencyUsed, latencyBudget,
+      poolEntries,
+    };
+  });
+}
+
+//============ Render: Bottleneck ============
+function renderBottleneck() {
+  const root = $("#viewBody");
+  root.innerHTML = "";
+  const p = state.project;
+  if (!p) return;
+  const results = analyzeBottlenecks(p);
+  if (!results.length) {
+    root.appendChild(el("div", { class: "view-empty" }, [
+      el("div", { class: "big" }, ["⊟"]),
+      el("h2", {}, ["Bottleneck"]),
+      el("p", {}, ["워크로드가 있어야 분석합니다."]),
+    ]));
+    return;
+  }
+
+  const counts = { block: 0, warn: 0, ok: 0, nodata: 0 };
+  for (const r of results) counts[r.severity]++;
+
+  // Sort: block first, then warn, then ok, then nodata; within group by name
+  const order = { block: 0, warn: 1, ok: 2, nodata: 3 };
+  const sorted = [...results].sort((a, b) =>
+    (order[a.severity] - order[b.severity]) || a.w.name.localeCompare(b.w.name));
+
+  const wrap = el("div", {});
+
+  // Header
+  wrap.appendChild(el("div", {
+    style: { display: "flex", alignItems: "baseline", gap: "12px", marginBottom: "10px", flexWrap: "wrap" },
+  }, [
+    el("h2", { style: { fontSize: "16px", fontWeight: 600, margin: 0 } }, [
+      "Bottleneck Analysis", helpIcon("view.bottleneck"),
+    ]),
+    el("span", { style: { fontSize: "11px", color: "var(--text3)", fontStyle: "italic" } }, [
+      "정적 룰: Little's Law + pool + downstream RPS + latency",
+    ]),
+  ]));
+
+  // Severity counters
+  const counterRow = el("div", {
+    style: { display: "flex", gap: "8px", marginBottom: "14px", flexWrap: "wrap" },
+  });
+  const badge = (label, n, bg, fg = "#fff") => el("span", {
+    style: {
+      background: bg, color: fg, padding: "4px 12px", borderRadius: "4px",
+      fontSize: "12px", fontWeight: "600", fontFamily: "JetBrains Mono",
+    },
+  }, [`${label} ${n}`]);
+  counterRow.appendChild(badge("BLOCK", counts.block, "#922b21"));
+  counterRow.appendChild(badge("WARN",  counts.warn,  "#b9770e"));
+  counterRow.appendChild(badge("OK",    counts.ok,    "#1e8449"));
+  counterRow.appendChild(badge("no-data", counts.nodata, "#5d6d7e"));
+  wrap.appendChild(counterRow);
+
+  // Hint when nothing analyzable
+  if (counts.ok + counts.block + counts.warn === 0) {
+    wrap.appendChild(el("div", {
+      style: {
+        background: "var(--surface2)", border: "1px dashed var(--border)",
+        borderRadius: "8px", padding: "16px", color: "var(--text2)", fontSize: "12px",
+        marginBottom: "14px", lineHeight: "1.6",
+      },
+    }, [
+      el("strong", {}, ["분석 가능한 데이터가 없습니다."]), el("br"),
+      "워크로드 inspector에서 ", el("code", {}, ["traffic_profile"]),
+      " (target_rps + avg_request_ms) 와 ", el("code", {}, ["runtime.concurrency"]),
+      " (model + max_threads), ", el("code", {}, ["depends_on"]),
+      " (avg_call_ms + fanout) 를 채워야 룰이 작동합니다.",
+    ]));
+  }
+
+  // Cards grid
+  const grid = el("div", {
+    style: {
+      display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(360px, 1fr))",
+      gap: "10px",
+    },
+  });
+  const sevColor = {
+    block: { left: "#c0392b", chip: "#922b21" },
+    warn:  { left: "#d68910", chip: "#b9770e" },
+    ok:    { left: "#27ae60", chip: "#1e8449" },
+    nodata:{ left: "#5d6d7e", chip: "#5d6d7e" },
+  };
+  for (const r of sorted) {
+    const c = sevColor[r.severity];
+    const card = el("div", {
+      style: {
+        background: "var(--surface2)", border: "1px solid var(--border)",
+        borderLeft: `4px solid ${c.left}`, borderRadius: "6px", padding: "12px",
+        cursor: "pointer", display: "flex", flexDirection: "column", gap: "6px",
+      },
+      onclick: () => selectEntity("workload", r.w.id),
+    });
+    // Header line
+    const hdr = el("div", {
+      style: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px" },
+    });
+    hdr.appendChild(el("div", { style: { display: "flex", alignItems: "center", gap: "8px", minWidth: 0 } }, [
+      el("strong", { style: { fontSize: "13px" } }, [r.w.name]),
+      el("span", { style: { fontSize: "11px", color: "var(--text3)" } }, [
+        `×${r.w.replicas || 1}`,
+        r.w.namespace ? ` · ns:${r.w.namespace}` : "",
+        r.w.category ? ` · ${r.w.category}` : "",
+      ]),
+    ]));
+    hdr.appendChild(el("span", {
+      style: {
+        background: c.chip, color: "#fff", padding: "2px 8px", borderRadius: "3px",
+        fontSize: "10px", fontWeight: "700", fontFamily: "JetBrains Mono",
+      },
+    }, [r.severity.toUpperCase()]));
+    card.appendChild(hdr);
+
+    // Metric rows
+    const metricLine = (label, value, util) => {
+      const utilText = util != null ? ` · ${Math.round(util * 100)}%` : "";
+      const color = util == null ? "var(--text2)"
+                  : util > 1.0 ? "#e74c3c"
+                  : util > 0.8 ? "#f39c12"
+                  : util > 0.7 ? "#f1c40f"
+                  : "var(--text2)";
+      return el("div", {
+        style: { display: "flex", gap: "8px", fontSize: "11px", fontFamily: "JetBrains Mono" },
+      }, [
+        el("span", { style: { color: "var(--text3)", minWidth: "70px" } }, [label]),
+        el("span", { style: { color, flex: 1 } }, [`${value}${utilText}`]),
+      ]);
+    };
+    if (r.computeCap != null) {
+      card.appendChild(metricLine("Compute",
+        `${Math.round(r.computeInFlight)} in-flight / ${r.computeCap} cap`,
+        r.computeUtil));
+    }
+    for (const pe of r.poolEntries) {
+      card.appendChild(metricLine(`Pool→${pe.target}`,
+        `${pe.need} need / ${pe.avail} pool · ${pe.rpsToTarget} rps`,
+        pe.util));
+    }
+    if (r.latencyUsed != null) {
+      card.appendChild(metricLine("Latency",
+        `${r.latencyUsed}ms / ${r.latencyBudget}ms`,
+        r.latencyUsed / r.latencyBudget));
+    }
+    if (r.severity === "nodata") {
+      card.appendChild(el("div", {
+        style: { fontSize: "11px", color: "var(--text3)", fontStyle: "italic" },
+      }, ["traffic_profile 또는 depends_on 미설정 — 분석 불가"]));
+    }
+
+    // Issues list
+    if (r.issues.length) {
+      const ul = el("div", {
+        style: { borderTop: "1px solid var(--border)", marginTop: "4px", paddingTop: "6px",
+                 display: "flex", flexDirection: "column", gap: "4px" },
+      });
+      for (const iss of r.issues) {
+        const dotColor = iss.sev === "block" ? "#e74c3c" : "#f39c12";
+        ul.appendChild(el("div", {
+          style: { fontSize: "11px", lineHeight: "1.5" },
+        }, [
+          el("span", {
+            style: {
+              color: dotColor, fontFamily: "JetBrains Mono", fontWeight: "700",
+              marginRight: "5px",
+            },
+          }, [iss.sev === "block" ? "⛔" : "⚠"]),
+          el("span", { style: { color: "var(--text)" } }, [iss.msg]),
+          iss.fix ? el("div", {
+            style: { color: "var(--text3)", fontSize: "10px", marginLeft: "18px",
+                     fontStyle: "italic" },
+          }, [`→ ${iss.fix}`]) : null,
+        ]));
+      }
+      card.appendChild(ul);
+    }
+
+    grid.appendChild(card);
+  }
+  wrap.appendChild(grid);
+
+  root.appendChild(wrap);
+}
+
 //============ Render: dispatch ============
 function renderViewBody() {
   if (!state.project) { renderTopology(); return; }
@@ -7817,6 +8153,7 @@ function renderViewBody() {
   if (v === "capacity") return renderCapacity();
   if (v === "depgraph") return renderDependency();
   if (v === "namespace") return renderNamespace();
+  if (v === "bottleneck") return renderBottleneck();
   // placeholder for other views
   $("#viewBody").innerHTML = "";
   $("#viewBody").appendChild(el("div", { class: "view-empty" }, [
