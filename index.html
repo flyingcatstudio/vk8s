@@ -7003,33 +7003,45 @@ function renderArchitecture() {
   if (mgmtRow.length) rows.push({ label: "(관리/Mgmt)", items: mgmtRow, tag: "_mgmt" });
   if (dbRow.length) rows.push({ label: "(DB/Storage)", items: dbRow, tag: "_db" });
 
-  // Map row.tag → real switch entity (network_devices[kind=switch]).
-  // For env rows: pick a switch from any site that hosts a node of a cluster
-  // with that env_tag. For mgmt/db rows: any switch in any site (logical).
+  // Map row.tag → array of real switch entities (network_devices[kind=switch]).
+  // For env rows: ALL switches from sites that host this cluster's nodes.
+  // For mgmt/db rows: all switches in all sites (these are logical groupings).
   const rowSwitches = new Map();
   for (const c of p.clusters) {
     const tag = c.environment_tag || c.name;
-    if (rowSwitches.has(tag)) continue;
     const sitesUsed = new Set();
     for (const nid of (c.node_ids || [])) {
       const n = p.nodes.find(x => x.id === nid);
       if (n) sitesUsed.add(n.site_id);
     }
+    const switches = rowSwitches.get(tag) || [];
+    const seen = new Set(switches.map(s => s.id));
     for (const sid of sitesUsed) {
       const s = (p.sites || []).find(x => x.id === sid);
       if (!s) continue;
-      const sw = (s.network_devices || []).find(d => d.kind === "switch");
-      if (sw) { rowSwitches.set(tag, sw); break; }
+      for (const d of (s.network_devices || [])) {
+        if (d.kind === "switch" && !seen.has(d.id)) {
+          switches.push(d);
+          seen.add(d.id);
+        }
+      }
+    }
+    if (switches.length) rowSwitches.set(tag, switches);
+  }
+  // mgmt/db: all switches across all sites
+  const allSwitches = [];
+  const allSeen = new Set();
+  for (const s of (p.sites || [])) {
+    for (const d of (s.network_devices || [])) {
+      if (d.kind === "switch" && !allSeen.has(d.id)) {
+        allSwitches.push(d);
+        allSeen.add(d.id);
+      }
     }
   }
-  let anySwitch = null;
-  for (const s of (p.sites || [])) {
-    const sw = (s.network_devices || []).find(d => d.kind === "switch");
-    if (sw) { anySwitch = sw; break; }
-  }
-  if (anySwitch) {
-    if (!rowSwitches.has("_mgmt")) rowSwitches.set("_mgmt", anySwitch);
-    if (!rowSwitches.has("_db")) rowSwitches.set("_db", anySwitch);
+  if (allSwitches.length) {
+    rowSwitches.set("_mgmt", allSwitches);
+    rowSwitches.set("_db", allSwitches);
   }
 
   if (!rows.length) {
@@ -7040,14 +7052,18 @@ function renderArchitecture() {
   }
 
   // Layout constants
-  const SWITCH_W = 110, SWITCH_H = 36;
+  const SWITCH_W = 110, SWITCH_H = 36, SWITCH_VGAP = 4;
   const ROW_GAP = 32, BOX_W = 100, BOX_H = 56, BOX_GAP = 12, SUB_GAP = 8;
   const PAD_LEFT = 20, PAD_RIGHT = 30, PAD_TOP = 20;
   const STUB_LEN = 36;
-  const SUB_DROP = 18;            // L4 박스 하단부터 sub-line까지 vertical
-  const SUB_TO_CHILD = 12;        // sub-line부터 child 박스 위까지 vertical
+  const SUB_DROP = 18;
+  const SUB_TO_CHILD = 12;
 
-  // Per-row item footprint (L4 with children may be wider than BOX_W)
+  const rowSwitchCount = r => Math.max(1, (rowSwitches.get(r.tag) || []).length);
+  const rowSwitchStackH = r => {
+    const n = rowSwitchCount(r);
+    return n * SWITCH_H + (n - 1) * SWITCH_VGAP;
+  };
   const itemFootprint = it => {
     if (it.kind === "l4") {
       const ch = l4Children.get(it.item.id) || [];
@@ -7063,11 +7079,15 @@ function renderArchitecture() {
   };
   const rowHeight = r => {
     const hasSubs = r.items.some(it => it.kind === "l4" && (l4Children.get(it.item.id) || []).length > 0);
-    return SWITCH_H + 30 + STUB_LEN + BOX_H + (hasSubs ? SUB_DROP + SUB_TO_CHILD + BOX_H + 8 : 0) + ROW_GAP;
+    const stackH = rowSwitchStackH(r);
+    // Switch stack (above bus) + 30 (label space) + STUB_LEN (bus → boxes) + BOX_H + (subs)
+    // Bus is at stackH/2, items below.
+    const aboveBus = stackH / 2 + 30;
+    const belowBus = stackH / 2 + STUB_LEN + BOX_H + (hasSubs ? SUB_DROP + SUB_TO_CHILD + BOX_H + 8 : 0);
+    return aboveBus + belowBus + ROW_GAP;
   };
 
   const totalW = PAD_LEFT + SWITCH_W + 30 + Math.max(...rows.map(rowWidth), 0) + PAD_RIGHT;
-  // Sequential row tops + total height
   const rowTops = [];
   let cursorY = PAD_TOP;
   for (const r of rows) { rowTops.push(cursorY); cursorY += rowHeight(r); }
@@ -7150,51 +7170,105 @@ function renderArchitecture() {
     root_svg.appendChild(g);
   };
 
-  // Vertical spine (left edge connecting all switches)
+  // Per-row geometry: stack center = busY
+  const rowGeom = rowTops.map((top, i) => {
+    const stackH = rowSwitchStackH(rows[i]);
+    const stackTop = top;
+    const busY = stackTop + stackH / 2;
+    const boxY = busY + STUB_LEN;
+    return { stackTop, stackH, busY, boxY };
+  });
+
+  // Vertical spine (left edge connecting all switch stacks at their bus center)
   const spineX = PAD_LEFT + SWITCH_W / 2;
   root_svg.appendChild(svg("line", {
-    x1: spineX, y1: rowTops[0] + SWITCH_H / 2,
-    x2: spineX, y2: rowTops[rowTops.length - 1] + SWITCH_H / 2,
+    x1: spineX, y1: rowGeom[0].busY,
+    x2: spineX, y2: rowGeom[rowGeom.length - 1].busY,
     stroke: "#34495e", "stroke-width": 2,
   }));
 
   rows.forEach((row, rowIdx) => {
-    const switchY = rowTops[rowIdx];
-    const lineY = switchY + SWITCH_H / 2;
-    const boxY = lineY + STUB_LEN;
+    const { stackTop, stackH, busY, boxY } = rowGeom[rowIdx];
+    const lineY = busY;
 
-    // Switch box — bind to real network_devices[kind=switch] if available
-    const realSwitch = rowSwitches.get(row.tag);
-    const swAttrs = realSwitch
-      ? { style: "cursor:pointer", onclick: () => selectEntity("netdev", realSwitch.id) }
-      : {};
-    const swG = svg("g", swAttrs);
-    swG.appendChild(svg("rect", {
-      x: PAD_LEFT, y: switchY, width: SWITCH_W, height: SWITCH_H,
-      rx: 3, ry: 3,
-      fill: "#1e3a5f",
-      stroke: realSwitch ? "#4d9cff" : "#34495e",
-      "stroke-width": realSwitch ? 2 : 1.5,
-    }));
-    swG.appendChild(svg("text", {
-      x: PAD_LEFT + SWITCH_W / 2, y: switchY + SWITCH_H / 2 + 5,
-      "text-anchor": "middle", fill: "#fff",
-      "font-size": "13", "font-weight": "600", "font-family": "Pretendard, sans-serif",
-    }, ["switch"]));
-    root_svg.appendChild(swG);
+    // Switch stack — bind to real network_devices[kind=switch].
+    // When N>1, render each switch as a separate box stacked vertically;
+    // each connects to the same horizontal bus via a short stub.
+    const realSwitches = rowSwitches.get(row.tag) || [];
+    const sStackBottom = stackTop + stackH;
 
-    // Row label below switch (italic)
+    if (realSwitches.length === 0) {
+      // Logical-only switch (fallback)
+      const sy = busY - SWITCH_H / 2;
+      root_svg.appendChild(svg("rect", {
+        x: PAD_LEFT, y: sy, width: SWITCH_W, height: SWITCH_H,
+        rx: 3, ry: 3, fill: "#1e3a5f",
+        stroke: "#34495e", "stroke-width": 1.5,
+      }));
+      root_svg.appendChild(svg("text", {
+        x: PAD_LEFT + SWITCH_W / 2, y: sy + SWITCH_H / 2 + 5,
+        "text-anchor": "middle", fill: "#fff",
+        "font-size": "13", "font-weight": "600", "font-family": "Pretendard, sans-serif",
+      }, ["switch"]));
+    } else {
+      // Stack of real switches
+      for (let i = 0; i < realSwitches.length; i++) {
+        const sw = realSwitches[i];
+        const sy = stackTop + i * (SWITCH_H + SWITCH_VGAP);
+        const swG = svg("g", {
+          style: "cursor:pointer",
+          onclick: () => selectEntity("netdev", sw.id),
+        });
+        swG.appendChild(svg("rect", {
+          x: PAD_LEFT, y: sy, width: SWITCH_W, height: SWITCH_H,
+          rx: 3, ry: 3, fill: "#1e3a5f",
+          stroke: "#4d9cff", "stroke-width": 2,
+        }));
+        // First line: "switch"
+        swG.appendChild(svg("text", {
+          x: PAD_LEFT + SWITCH_W / 2, y: sy + SWITCH_H / 2 - 2,
+          "text-anchor": "middle", fill: "#fff",
+          "font-size": "11", "font-weight": "600", "font-family": "Pretendard, sans-serif",
+        }, ["switch"]));
+        // Second line: device name (small)
+        swG.appendChild(svg("text", {
+          x: PAD_LEFT + SWITCH_W / 2, y: sy + SWITCH_H / 2 + 11,
+          "text-anchor": "middle", fill: "rgba(255,255,255,0.75)",
+          "font-size": "9", "font-family": "JetBrains Mono",
+        }, [sw.name.length > 14 ? sw.name.slice(0, 13) + "…" : sw.name]));
+        root_svg.appendChild(swG);
+        // Stub from this switch's right edge to spine X (so each switch
+        // visibly joins the bus)
+        const swCY = sy + SWITCH_H / 2;
+        if (Math.abs(swCY - busY) > 1) {
+          // Draw vertical connector inside switch column area linking to busY
+          root_svg.appendChild(svg("line", {
+            x1: PAD_LEFT + SWITCH_W, y1: swCY,
+            x2: PAD_LEFT + SWITCH_W + 14, y2: swCY,
+            stroke: "#34495e", "stroke-width": 1.5,
+          }));
+          root_svg.appendChild(svg("line", {
+            x1: PAD_LEFT + SWITCH_W + 14, y1: swCY,
+            x2: PAD_LEFT + SWITCH_W + 14, y2: busY,
+            stroke: "#34495e", "stroke-width": 1.5,
+          }));
+        }
+      }
+    }
+
+    // Row label below stack (italic)
     root_svg.appendChild(svg("text", {
-      x: PAD_LEFT + SWITCH_W / 2, y: switchY + SWITCH_H + 18,
+      x: PAD_LEFT + SWITCH_W / 2, y: sStackBottom + 18,
       "text-anchor": "middle", fill: "var(--text2)",
       "font-size": "12", "font-style": "italic", "font-family": "Pretendard, sans-serif",
     }, [row.label]));
-
-    // Sub-label: real switch device name + vendor
-    if (realSwitch) {
-      const subLine = realSwitch.name + (realSwitch.vendor ? ` · ${realSwitch.vendor}` : "");
+    // Sub-label: count or vendor
+    if (realSwitches.length > 0) {
+      const subLine = realSwitches.length === 1
+        ? (realSwitches[0].vendor || realSwitches[0].kind)
+        : `${realSwitches.length} switches`;
       root_svg.appendChild(svg("text", {
-        x: PAD_LEFT + SWITCH_W / 2, y: switchY + SWITCH_H + 32,
+        x: PAD_LEFT + SWITCH_W / 2, y: sStackBottom + 32,
         "text-anchor": "middle", fill: "var(--text3)",
         "font-size": "10", "font-family": "JetBrains Mono",
       }, [subLine]));
