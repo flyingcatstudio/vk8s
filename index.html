@@ -5658,6 +5658,9 @@ function renderTopology() {
     el("span", { style: { fontSize: "10px", color: "var(--text3)", fontStyle: "italic" } }, [
       mode === "diagram" ? "여러 연결 레이어를 켜고 끌 수 있습니다" : "사이트별 카드 + 노드 그리드",
     ]),
+    ...(mode === "diagram"
+        ? diagramExportButtons(() => root.querySelector("svg"), "topology")
+        : []),
   ]);
   root.appendChild(toolbar);
 
@@ -7491,6 +7494,7 @@ function renderArchitecture() {
         ? "Zone (topology.kubernetes.io/zone 또는 site_id)별로 행을 분리합니다. L4·Switch·Storage가 zone별로 묶입니다."
         : "Zone이 2개 이상인 클러스터가 있을 때만 효과가 있습니다.",
     }, [zoneToggle, "Group by zone"]),
+    ...diagramExportButtons(() => root_svg, "architecture"),
   ]));
   wrap.appendChild(root_svg);
 
@@ -7806,6 +7810,8 @@ function renderDependency() {
       (cycleNodes.size ? ` · ⚠ cycle ${cycleNodes.size}` : ""),
     ]),
     topFanIn ? el("span", { style: { fontSize: "11px", color: "var(--text3)" } }, [topFanIn]) : null,
+    el("span", { style: { flex: 1 } }, []),
+    ...diagramExportButtons(() => root_svg, "dependency"),
   ]));
   wrap.appendChild(root_svg);
 
@@ -8334,6 +8340,104 @@ function renderBottleneck() {
   wrap.appendChild(grid);
 
   root.appendChild(wrap);
+}
+
+//============ Diagram SVG/PNG export helpers ============
+function _serializeSvg(svgEl) {
+  const clone = svgEl.cloneNode(true);
+  clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  clone.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
+  // Resolve CSS var() in attributes (style/fill/stroke) using computed style
+  const cs = getComputedStyle(document.documentElement);
+  const cssVars = [
+    "--bg", "--surface", "--surface2", "--border",
+    "--text", "--text2", "--text3",
+    "--accent", "--accent-glow", "--orange", "--purple",
+    "--green", "--blue", "--yellow", "--red",
+  ];
+  const map = {};
+  for (const v of cssVars) map[v] = cs.getPropertyValue(v).trim() || "#000";
+  const replaceVars = s => s ? s.replace(/var\((--[a-z0-9-]+)\)/g, (m, k) => map[k] || m) : s;
+  const allEls = [clone, ...clone.querySelectorAll("*")];
+  for (const n of allEls) {
+    for (const attr of ["style", "fill", "stroke"]) {
+      const v = n.getAttribute(attr);
+      if (v && v.includes("var(--")) n.setAttribute(attr, replaceVars(v));
+    }
+  }
+  // Explicit width/height from viewBox (some renderers ignore viewBox alone)
+  const vb = clone.getAttribute("viewBox");
+  if (vb) {
+    const parts = vb.split(/\s+/).map(Number);
+    if (parts.length === 4) {
+      clone.setAttribute("width", parts[2]);
+      clone.setAttribute("height", parts[3]);
+    }
+  }
+  return new XMLSerializer().serializeToString(clone);
+}
+function _triggerDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function _downloadSvg(svgEl, basename) {
+  const xml = _serializeSvg(svgEl);
+  _triggerDownload(new Blob([xml], { type: "image/svg+xml;charset=utf-8" }), `${basename}.svg`);
+}
+function _downloadPng(svgEl, basename, scale = 2) {
+  const xml = _serializeSvg(svgEl);
+  const vb = svgEl.getAttribute("viewBox");
+  let w = 1200, h = 800;
+  if (vb) { const [, , vw, vh] = vb.split(/\s+/).map(Number); w = vw; h = vh; }
+  const blob = new Blob([xml], { type: "image/svg+xml;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const img = new Image();
+  img.onload = () => {
+    const cv = document.createElement("canvas");
+    cv.width = w * scale; cv.height = h * scale;
+    const ctx = cv.getContext("2d");
+    const bg = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim() || "#000";
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, cv.width, cv.height);
+    ctx.scale(scale, scale);
+    ctx.drawImage(img, 0, 0, w, h);
+    cv.toBlob(b => {
+      _triggerDownload(b, `${basename}.png`);
+      URL.revokeObjectURL(url);
+    }, "image/png");
+  };
+  img.onerror = (e) => {
+    console.error("PNG export failed", e);
+    URL.revokeObjectURL(url);
+    alert("PNG export 실패. SVG로 시도해보세요.");
+  };
+  img.src = url;
+}
+function _todayStamp() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function diagramExportButtons(getSvg, kind) {
+  const btnStyle = {
+    background: "var(--surface2)", border: "1px solid var(--border)",
+    color: "var(--text)", padding: "4px 10px", borderRadius: "4px",
+    cursor: "pointer", fontSize: "11px", fontFamily: "inherit",
+  };
+  const base = () => `${slug(state.project?.name) || "vk8s"}-${kind}-${_todayStamp()}`;
+  return [
+    el("button", {
+      style: btnStyle, title: "SVG 다운로드 (벡터, 무손실)",
+      onclick: () => { const s = getSvg(); if (s) _downloadSvg(s, base()); },
+    }, ["⬇ SVG"]),
+    el("button", {
+      style: btnStyle, title: "PNG 다운로드 (2× 해상도)",
+      onclick: () => { const s = getSvg(); if (s) _downloadPng(s, base()); },
+    }, ["⬇ PNG"]),
+  ];
 }
 
 //============ YAML emit helpers ============
