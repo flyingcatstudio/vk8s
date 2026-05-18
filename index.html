@@ -2216,6 +2216,40 @@ function removeNodeGpu(nodeId, index) {
   emit(); saveSoon();
 }
 
+//============ Node disk editing (storage expansion) ============
+function addNodeDisk(nodeId) {
+  const n = state.project.nodes.find(x => x.id === nodeId);
+  if (!n) return;
+  if (!Array.isArray(n.spec.disks)) n.spec.disks = [];
+  // Seed new row from last existing disk so capacity expansion uses a familiar default.
+  const last = n.spec.disks[n.spec.disks.length - 1];
+  n.spec.disks.push({
+    size_gb: last?.size_gb || 960,
+    type: last?.type || "NVMe",
+    count: 1,
+  });
+  emit(); saveSoon();
+}
+
+function updateNodeDisk(nodeId, index, partial) {
+  const n = state.project.nodes.find(x => x.id === nodeId);
+  if (!n || !Array.isArray(n.spec.disks) || !n.spec.disks[index]) return;
+  const cur = n.spec.disks[index];
+  const next = { ...cur, ...partial };
+  if (partial.size_gb != null) next.size_gb = Math.max(1, Number(partial.size_gb) || 0);
+  if (partial.count != null) next.count = Math.max(1, parseInt(partial.count) || 1);
+  if (partial.type != null && !["NVMe", "SSD", "HDD"].includes(partial.type)) next.type = cur.type || "NVMe";
+  n.spec.disks[index] = next;
+  emit(); saveSoon();
+}
+
+function removeNodeDisk(nodeId, index) {
+  const n = state.project.nodes.find(x => x.id === nodeId);
+  if (!n || !Array.isArray(n.spec.disks)) return;
+  n.spec.disks.splice(index, 1);
+  emit(); saveSoon();
+}
+
 function setNodeRoleEnabled(nodeId, role, enabled) {
   const n = state.project.nodes.find(x => x.id === nodeId);
   if (!n) return;
@@ -2957,6 +2991,50 @@ function updateNodeField(id, path, value) {
     obj = obj[p];
   }
   obj[parts[0]] = value;
+  emit(); saveSoon();
+}
+
+// Edit a numeric spec field (vcpu/memory_gb); marks node as custom when changed from template.
+// Ignores in-progress input ("", "1.", "-") so the user can type decimals without the re-render
+// snapping them back to a partial value.
+function updateNodeSpecNumber(id, key, raw) {
+  const n = state.project.nodes.find(x => x.id === id);
+  if (!n) return;
+  const s = String(raw).trim();
+  if (s === "") return;
+  let num;
+  if (key === "vcpu") {
+    if (!/^\d+$/.test(s)) return;
+    num = parseInt(s, 10);
+    if (!Number.isFinite(num) || num < 1) return;
+  } else {
+    if (!/^\d+(\.\d+)?$/.test(s)) return; // reject "1.", ".5", "1e2" — let the user finish typing
+    num = parseFloat(s);
+    if (!Number.isFinite(num) || num <= 0) return;
+  }
+  if (!n.spec) n.spec = {};
+  if (n.spec[key] === num) return;
+  n.spec[key] = num;
+  if (!isNodeSpecMatchingCatalog(n)) n.custom = true;
+  emit(); saveSoon();
+}
+
+// Compare node.spec.vcpu and memory_gb against catalog template. Returns true if both match.
+function isNodeSpecMatchingCatalog(n) {
+  const tmpl = state.catalog.entries.find(e => e.key === n.model);
+  if (!tmpl) return false;
+  return (n.spec?.vcpu === tmpl.spec.vcpu) && (n.spec?.memory_gb === tmpl.spec.memory_gb);
+}
+
+function resetNodeSpecToCatalog(id) {
+  const n = state.project.nodes.find(x => x.id === id);
+  if (!n) return;
+  const tmpl = state.catalog.entries.find(e => e.key === n.model);
+  if (!tmpl) return;
+  // Preserve GPU edits — only reset vcpu/memory_gb (the user-editable scalars).
+  n.spec.vcpu = tmpl.spec.vcpu;
+  n.spec.memory_gb = tmpl.spec.memory_gb;
+  if (isNodeSpecMatchingCatalog(n)) n.custom = false;
   emit(); saveSoon();
 }
 
@@ -3859,7 +3937,15 @@ function renderNodeInspector(root, id) {
   root.appendChild(el("div", { class: "field-row" }, [
     el("div", { class: "field" }, [
       el("label", {}, ["Brand · Model"]),
-      el("div", { class: "field-readonly" }, [`${n.brand} · ${n.model}`]),
+      el("div", { class: "field-readonly" }, [
+        `${n.brand} · ${n.model}`,
+        n.custom ? el("span", {
+          style: { marginLeft: "6px", padding: "1px 6px", borderRadius: "3px",
+                   background: "var(--yellow-glow, rgba(255,200,0,0.15))",
+                   color: "var(--yellow)", fontSize: "10px", fontWeight: "600" },
+          title: "이 노드의 vCPU/Memory가 카탈로그 기본값과 다릅니다",
+        }, ["custom"]) : null,
+      ]),
     ]),
     el("div", { class: "field" }, [
       el("label", {}, ["Source"]),
@@ -3944,12 +4030,19 @@ function renderNodeInspector(root, id) {
           }),
         ]),
         el("button", {
-          class: "x", style: { padding: "4px 8px" },
+          class: "btn-ghost",
+          title: "Remove NIC",
+          style: {
+            padding: "4px 8px", fontSize: "12px", lineHeight: "1",
+            color: "var(--red)", border: "1px solid var(--border)",
+            borderRadius: "4px", background: "var(--surface)",
+          },
           onclick: () => {
+            if (!confirm(`NIC '${ifc.name || `#${i+1}`}' 삭제?`)) return;
             const ns = ifaces.filter((_, j) => j !== i);
             updateNodeField(id, "network.interfaces", ns);
           },
-        }, ["✕"]),
+        }, ["✕ Remove"]),
       ]),
       el("div", { class: "field", style: { margin: "4px 0 0", display: "flex", gap: "6px", alignItems: "center" } }, [
         el("label", { style: { fontSize: "10px", margin: 0 } }, ["purpose"]),
@@ -4039,16 +4132,54 @@ function renderNodeInspector(root, id) {
     ]));
   }
 
-  // Spec
-  root.appendChild(el("div", { class: "section-title" }, ["Spec"]));
+  // Spec — vcpu/memory_gb are editable; modifying them flags the node as 'custom'
+  // so users can pick a similar catalog model and dial in the exact spec.
+  const tmplForNode = state.catalog.entries.find(e => e.key === n.model);
+  const tmplSpec = tmplForNode ? tmplForNode.spec : null;
+  const showReset = n.custom && tmplSpec;
+  const specTitle = el("div", {
+    class: "section-title",
+    style: showReset ? { display: "flex", alignItems: "center", gap: "8px" } : null,
+  }, ["Spec"]);
+  if (showReset) {
+    specTitle.appendChild(el("button", {
+      style: { marginLeft: "auto", padding: "2px 8px", fontSize: "10px",
+               background: "transparent", color: "var(--text2)",
+               border: "1px solid var(--border)", borderRadius: "4px", cursor: "pointer",
+               textTransform: "none", letterSpacing: 0, fontWeight: 400 },
+      title: `카탈로그 기본값으로 복원 (vCPU ${tmplSpec.vcpu} · ${tmplSpec.memory_gb} GB)`,
+      onclick: () => resetNodeSpecToCatalog(id),
+    }, ["↺ Reset"]));
+  }
+  root.appendChild(specTitle);
   root.appendChild(el("div", { class: "field-row" }, [
     el("div", { class: "field" }, [
-      el("label", {}, ["vCPU"]),
-      el("div", { class: "field-readonly" }, [String(spec.vcpu || 0)]),
+      el("label", {}, [
+        "vCPU",
+        tmplSpec ? el("span", { style: { color: "var(--text3)", fontWeight: "400", marginLeft: "4px" } },
+          [`(default ${tmplSpec.vcpu})`]) : null,
+      ]),
+      el("input", {
+        "data-focus-key": `node.${id}.vcpu`,
+        // text+inputmode instead of type=number: number inputs don't support selectionStart,
+        // so per-keystroke re-render lost cursor position and reversed digits ("64" → "46").
+        type: "text", inputmode: "numeric", pattern: "[0-9]*",
+        value: String(spec.vcpu || 0),
+        oninput: e => updateNodeSpecNumber(id, "vcpu", e.target.value),
+      }),
     ]),
     el("div", { class: "field" }, [
-      el("label", {}, ["Memory (GB)"]),
-      el("div", { class: "field-readonly" }, [String(spec.memory_gb || 0)]),
+      el("label", {}, [
+        "Memory (GB)",
+        tmplSpec ? el("span", { style: { color: "var(--text3)", fontWeight: "400", marginLeft: "4px" } },
+          [`(default ${tmplSpec.memory_gb})`]) : null,
+      ]),
+      el("input", {
+        "data-focus-key": `node.${id}.memory_gb`,
+        type: "text", inputmode: "decimal", pattern: "[0-9]*\\.?[0-9]*",
+        value: String(spec.memory_gb || 0),
+        oninput: e => updateNodeSpecNumber(id, "memory_gb", e.target.value),
+      }),
     ]),
   ]));
   if (spec.form_factor || spec.power) {
@@ -4064,6 +4195,31 @@ function renderNodeInspector(root, id) {
         ]),
       ]),
     ]));
+  }
+
+  // Disks (storage capacity — editable for onprem, read-only for cloud)
+  {
+    const disks = Array.isArray(spec.disks) ? spec.disks : [];
+    const totalGb = disks.reduce((a, d) => a + (Number(d.size_gb) || 0) * (parseInt(d.count) || 1), 0);
+    root.appendChild(el("div", { class: "section-title" }, [`Disks (${disks.length})`]));
+    if (disks.length === 0) {
+      root.appendChild(el("div", { class: "empty-hint" }, ["디스크 없음"]));
+    } else {
+      root.appendChild(el("div", { style: { fontSize: "11px", color: "var(--text2)", marginBottom: "6px", fontFamily: "JetBrains Mono" } }, [
+        `Total raw: ${totalGb.toLocaleString()} GB (${(totalGb / 1024).toFixed(1)} TB)`,
+      ]));
+      for (let i = 0; i < disks.length; i++) {
+        root.appendChild(renderDiskRowEditable(n, i));
+      }
+    }
+    if (n.source === "onprem") {
+      root.appendChild(el("button", {
+        class: "add-btn", style: { width: "100%", marginTop: "6px" },
+        onclick: () => addNodeDisk(id),
+      }, ["＋ Add Disk"]));
+    } else if (disks.length) {
+      root.appendChild(el("div", { class: "empty-hint" }, ["Cloud 인스턴스는 디스크 구성 고정 (인스턴스 타입에 묶임)"]));
+    }
   }
 
   // GPU
@@ -5612,6 +5768,62 @@ function renderGpuRowEditable(n, idx, supportedModels, gpuModels) {
   return el("div", {
     style: { background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: "5px", padding: "8px 10px", marginBottom: "6px" },
   }, [headRow, tdpLine]);
+}
+
+function renderDiskRowEditable(n, idx) {
+  const d = n.spec.disks[idx];
+  const readOnly = n.source !== "onprem";
+  const inputStyle = { padding: "5px 6px", background: "var(--surface3)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: "4px", fontSize: "12px", width: "100%", textAlign: "center" };
+  const labelStyle = { fontSize: "10px", color: "var(--text3)", margin: 0 };
+
+  const sizeInput = el("input", {
+    "data-focus-key": `node.${n.id}.disk.${idx}.size_gb`,
+    type: "text", inputmode: "numeric", pattern: "[0-9]*",
+    value: String(d.size_gb || 0),
+    style: inputStyle,
+    disabled: readOnly ? "" : null,
+    oninput: e => updateNodeDisk(n.id, idx, { size_gb: e.target.value }),
+  });
+  const countInput = el("input", {
+    "data-focus-key": `node.${n.id}.disk.${idx}.count`,
+    type: "number", min: "1", value: String(d.count || 1),
+    style: inputStyle,
+    disabled: readOnly ? "" : null,
+    oninput: e => updateNodeDisk(n.id, idx, { count: e.target.value }),
+  });
+  const typeSel = el("select", {
+    style: inputStyle,
+    disabled: readOnly ? "" : null,
+    onchange: e => updateNodeDisk(n.id, idx, { type: e.target.value }),
+  }, ["NVMe", "SSD", "HDD"].map(t =>
+    el("option", { value: t, selected: t === (d.type || "NVMe") ? "" : null }, [t])));
+
+  const removeBtn = readOnly ? null : el("button", {
+    class: "x", title: "remove",
+    style: { background: "transparent", border: "none", color: "var(--text3)", cursor: "pointer", padding: "4px 8px" },
+    onclick: () => removeNodeDisk(n.id, idx),
+  }, ["✕"]);
+
+  const headRow = el("div", {
+    style: { display: "grid", gridTemplateColumns: "1fr 70px 80px auto", gap: "6px", alignItems: "end" },
+  }, [
+    el("div", { class: "field", style: { margin: 0 } }, [el("label", { style: labelStyle }, ["size (GB)"]), sizeInput]),
+    el("div", { class: "field", style: { margin: 0 } }, [el("label", { style: labelStyle }, ["count"]), countInput]),
+    el("div", { class: "field", style: { margin: 0 } }, [el("label", { style: labelStyle }, ["type"]), typeSel]),
+    removeBtn || el("span", {}, [""]),
+  ]);
+
+  const totalGb = (Number(d.size_gb) || 0) * (parseInt(d.count) || 1);
+  const sumLine = el("div", {
+    style: { fontSize: "10px", color: "var(--text3)", marginTop: "4px", fontFamily: "JetBrains Mono" },
+  }, [
+    `${d.count || 1}× ${d.size_gb || 0} GB = ${totalGb.toLocaleString()} GB`,
+    d.iops_hint ? `  ·  ${d.iops_hint.toLocaleString()} IOPS` : "",
+  ]);
+
+  return el("div", {
+    style: { background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: "5px", padding: "8px 10px", marginBottom: "6px" },
+  }, [headRow, sumLine]);
 }
 
 function moveNodeToSite(nodeId, newSiteId) {

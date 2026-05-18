@@ -65,6 +65,36 @@
       }
     },
     {
+      "key": "PowerEdge-R770",
+      "brand": "Dell",
+      "source": "onprem",
+      "category": "General",
+      "display_name": "Dell PowerEdge R770",
+      "generation": "17G",
+      "release_year": 2025,
+      "tags": ["2u", "general", "rack", "dual-socket", "gpu-light"],
+      "notes": "17G 범용 2U. Intel Xeon 6 (Granite Rapids). R760 후속. DDR5 대용량. 라이트 GPU(L4/L40/L40S 1-2장, H200-NVL)까지 가능.",
+      "spec": {
+        "vcpu": 96,
+        "memory_gb": 1536,
+        "disks": [{ "size_gb": 1920, "type": "NVMe", "count": 8 }],
+        "nics": [{ "speed_gbps": 25, "count": 2 }],
+        "form_factor": "2U",
+        "power": {
+          "psu_max_w": 2000,
+          "typical_w_base": 450,
+          "psu_redundancy": "1+1"
+        },
+        "gpu_chassis": {
+          "max_count": 3,
+          "supported_form_factors": ["PCIe-FH", "PCIe-LP"],
+          "supported_models": ["L40S", "L40", "L4", "H100-PCIe", "H200-NVL"],
+          "nvlink_topology": "none"
+        },
+        "gpu": []
+      }
+    },
+    {
       "key": "PowerEdge-R760xa",
       "brand": "Dell",
       "source": "onprem",
