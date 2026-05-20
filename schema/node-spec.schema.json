@@ -27,7 +27,8 @@
           "size_gb": { "type": "number", "exclusiveMinimum": 0 },
           "type": { "enum": ["NVMe", "SSD", "HDD"] },
           "iops_hint": { "type": "integer", "minimum": 0 },
-          "count": { "type": "integer", "minimum": 1, "default": 1 }
+          "count": { "type": "integer", "minimum": 1, "default": 1 },
+          "raid": { "enum": ["none", "0", "1", "5", "6", "10"], "default": "none" }
         }
       }
     },

@@ -173,6 +173,12 @@
     color: var(--text3);
     font-family: 'JetBrains Mono';
   }
+  .tree-item .lock-dot {
+    color: var(--yellow);
+    font-size: 9px;
+    line-height: 1;
+    flex-shrink: 0;
+  }
   .tree-item.child { padding-left: 24px; }
   .tree-actions {
     margin-top: 8px;
@@ -545,14 +551,38 @@
     font-weight: 600;
     font-size: 14px;
   }
-  .insp-header .delete {
+  .insp-header .delete,
+  .insp-header .duplicate {
     background: transparent;
     border: none;
     color: var(--text3);
     padding: 4px 8px;
     border-radius: 4px;
+    cursor: pointer;
   }
   .insp-header .delete:hover { color: var(--red); background: rgba(248,113,113,.1); }
+
+  /* Locked workload/cluster: disable editable controls but keep header buttons interactive */
+  .inspector-locked input,
+  .inspector-locked select,
+  .inspector-locked textarea,
+  .inspector-locked button.add-btn,
+  .inspector-locked button.btn-ghost {
+    pointer-events: none;
+    opacity: 0.55;
+  }
+  .inspector-locked .insp-header button { pointer-events: auto !important; opacity: 1 !important; }
+  .lock-banner {
+    background: rgba(251,191,36,.08);
+    border: 1px solid var(--yellow);
+    border-radius: 4px;
+    padding: 6px 10px;
+    margin-bottom: 10px;
+    font-size: 11px;
+    color: var(--yellow);
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .insp-header .duplicate:hover { color: var(--accent); background: var(--accent-glow); }
 
   .field {
     margin-bottom: 12px;
@@ -2045,6 +2075,36 @@ function addNode(seed) {
   return created;
 }
 
+function duplicateNode(nodeId) {
+  if (!state.project) return;
+  const orig = state.project.nodes.find(x => x.id === nodeId);
+  if (!orig) return;
+  const baseName = (orig.name || "").replace(/\s*#\d+\s*$/, "").trim() || "node";
+  const nameExists = name => state.project.nodes.some(n => n.name === name);
+  let n = 1;
+  while (nameExists(`${baseName} #${n}`)) n++;
+  const copy = {
+    ...orig,
+    id: slug(orig.model || "node") + "-" + uid(),
+    name: `${baseName} #${n}`,
+    cluster_roles: Array.isArray(orig.cluster_roles) ? [...orig.cluster_roles] : [],
+    spec: JSON.parse(JSON.stringify(orig.spec || {})),
+    network: orig.network ? JSON.parse(JSON.stringify(orig.network)) : undefined,
+  };
+  // Clear IP so it gets re-allocated when assigned to a cluster
+  if (copy.network) copy.network.ip = "";
+  state.project.nodes.push(copy);
+  const site = state.project.sites.find(s => s.id === copy.site_id);
+  if (site && !site.node_ids.includes(copy.id)) site.node_ids.push(copy.id);
+  const origCluster = getNodeCluster(nodeId);
+  if (origCluster) {
+    assignNodeToCluster(copy.id, origCluster.id, copy.cluster_roles[0] || "worker", true);
+  }
+  selectEntity("node", copy.id);
+  emit(); saveSoon();
+  return copy;
+}
+
 function deleteEntity(kind, id) {
   if (!state.project) return;
   if (kind === "site") {
@@ -2239,8 +2299,29 @@ function updateNodeDisk(nodeId, index, partial) {
   if (partial.size_gb != null) next.size_gb = Math.max(1, Number(partial.size_gb) || 0);
   if (partial.count != null) next.count = Math.max(1, parseInt(partial.count) || 1);
   if (partial.type != null && !["NVMe", "SSD", "HDD"].includes(partial.type)) next.type = cur.type || "NVMe";
+  if (partial.raid != null && !["none", "0", "1", "5", "6", "10"].includes(partial.raid)) next.raid = cur.raid || "none";
+  // Drop raid field entirely when "none" to keep payload clean
+  if (next.raid === "none" || next.raid == null) delete next.raid;
   n.spec.disks[index] = next;
   emit(); saveSoon();
+}
+
+// RAID usable capacity. Returns { usable_gb, min_count, valid }.
+// level: "0"=stripe, "1"=mirror, "5"=single parity, "6"=double parity, "10"=mirrored stripe.
+function raidUsable(disk) {
+  const size = Number(disk.size_gb) || 0;
+  const count = parseInt(disk.count) || 1;
+  const level = disk.raid || "none";
+  const raw = size * count;
+  switch (level) {
+    case "0":  return { usable_gb: raw,                       min_count: 2, valid: count >= 2 };
+    case "1":  return { usable_gb: size,                      min_count: 2, valid: count >= 2 };
+    case "5":  return { usable_gb: size * Math.max(0, count - 1), min_count: 3, valid: count >= 3 };
+    case "6":  return { usable_gb: size * Math.max(0, count - 2), min_count: 4, valid: count >= 4 };
+    case "10": return { usable_gb: size * Math.floor(count / 2),  min_count: 4, valid: count >= 4 && count % 2 === 0 };
+    case "none":
+    default:   return { usable_gb: raw, min_count: 1, valid: true };
+  }
 }
 
 function removeNodeDisk(nodeId, index) {
@@ -2249,6 +2330,8 @@ function removeNodeDisk(nodeId, index) {
   n.spec.disks.splice(index, 1);
   emit(); saveSoon();
 }
+
+const NIC_SPEEDS = [1, 10, 25, 40, 50, 100, 200, 400];
 
 function setNodeRoleEnabled(nodeId, role, enabled) {
   const n = state.project.nodes.find(x => x.id === nodeId);
@@ -2263,6 +2346,8 @@ function setNodeRoleEnabled(nodeId, role, enabled) {
 function updateClusterField(id, path, value) {
   const c = state.project.clusters.find(x => x.id === id);
   if (!c) return;
+  // Allow toggling lock itself even when locked
+  if (isClusterLocked(c) && path !== "locked") return;
   const parts = path.split(".");
   let obj = c;
   while (parts.length > 1) {
@@ -2330,6 +2415,138 @@ function addWorkload(clusterId, seed) {
   return wl;
 }
 
+// Quick-deploy templates for common pod frameworks/products.
+// Each template lists production-reasonable defaults; HA mode toggles a higher replica count
+// and adds anti-affinity. Stateful templates (DB/Cache/Queue) get a default PVC.
+// seed.{cpu,memory_gb} = requests (min). seed.{cpu_limit,memory_limit_gb} = limits (max).
+const QUICK_DEPLOY_TEMPLATES = {
+  fastapi: {
+    label: "FastAPI", icon: "🐍", namePrefix: "fastapi",
+    seed: { category: "API", replicas: 2, cpu: 0.5, memory_gb: 0.5, cpu_limit: 1, memory_limit_gb: 1, runtime_preset: "fastapi-3.12" },
+  },
+  "spring-boot": {
+    label: "Spring Boot", icon: "☕", namePrefix: "spring-boot",
+    seed: { category: "API", replicas: 2, cpu: 1, memory_gb: 2, cpu_limit: 2, memory_limit_gb: 3, runtime_preset: "spring-boot-17" },
+  },
+  "spring-webflux": {
+    label: "Spring WebFlux", icon: "☕", namePrefix: "spring-webflux",
+    seed: { category: "API", replicas: 2, cpu: 1, memory_gb: 2, cpu_limit: 2, memory_limit_gb: 3, runtime_preset: "spring-webflux-17" },
+  },
+  "spring-boot-21": {
+    label: "Spring Boot 21 (Virtual)", icon: "☕", namePrefix: "spring-boot21",
+    seed: { category: "API", replicas: 2, cpu: 1, memory_gb: 2, cpu_limit: 2, memory_limit_gb: 3, runtime_preset: "spring-boot-21-virtual" },
+  },
+  nginx: {
+    label: "Nginx", icon: "🌐", namePrefix: "nginx",
+    seed: { category: "Frontend", replicas: 2, cpu: 0.2, memory_gb: 0.25, cpu_limit: 0.5, memory_limit_gb: 0.5, runtime_preset: "nginx-static" },
+    haCapable: true, haReplicas: 4,
+  },
+  postgresql: {
+    label: "PostgreSQL", icon: "🐘", namePrefix: "postgres",
+    seed: { category: "DB", kind: "StatefulSet", replicas: 1, cpu: 2, memory_gb: 4, cpu_limit: 4, memory_limit_gb: 6, runtime_preset: "postgres-16" },
+    pvc: { size_gb: 100 }, servicePort: { name: "pg", port: 5432 },
+    haCapable: true, haReplicas: 3,
+  },
+  mysql: {
+    label: "MySQL", icon: "🐬", namePrefix: "mysql",
+    seed: { category: "DB", kind: "StatefulSet", replicas: 1, cpu: 2, memory_gb: 4, cpu_limit: 4, memory_limit_gb: 6, runtime_preset: "mysql-8" },
+    pvc: { size_gb: 100 }, servicePort: { name: "mysql", port: 3306 },
+    haCapable: true, haReplicas: 3,
+  },
+  mongodb: {
+    label: "MongoDB", icon: "🍃", namePrefix: "mongo",
+    seed: { category: "DB", kind: "StatefulSet", replicas: 1, cpu: 2, memory_gb: 4, cpu_limit: 4, memory_limit_gb: 6, runtime_preset: "mongodb-7" },
+    pvc: { size_gb: 100 }, servicePort: { name: "mongo", port: 27017 },
+    haCapable: true, haReplicas: 3,
+  },
+  redis: {
+    label: "Redis", icon: "🟥", namePrefix: "redis",
+    seed: { category: "Cache", kind: "StatefulSet", replicas: 1, cpu: 1, memory_gb: 2, cpu_limit: 2, memory_limit_gb: 3, runtime_preset: "redis-7" },
+    pvc: { size_gb: 20 }, servicePort: { name: "redis", port: 6379 },
+    haCapable: true, haReplicas: 6, // 3 master + 3 replica (cluster mode)
+  },
+  kafka: {
+    label: "Kafka", icon: "📬", namePrefix: "kafka",
+    seed: { category: "Queue", kind: "StatefulSet", replicas: 3, cpu: 1, memory_gb: 4, cpu_limit: 2, memory_limit_gb: 6, runtime_preset: "kafka-3.7" },
+    pvc: { size_gb: 200 }, servicePort: { name: "kafka", port: 9092 },
+    haCapable: true, haReplicas: 5, alwaysHA: true,
+  },
+  rabbitmq: {
+    label: "RabbitMQ", icon: "🐰", namePrefix: "rabbitmq",
+    seed: { category: "Queue", kind: "StatefulSet", replicas: 1, cpu: 1, memory_gb: 2, cpu_limit: 2, memory_limit_gb: 3, runtime_preset: "rabbitmq-3.13" },
+    pvc: { size_gb: 20 }, servicePort: { name: "amqp", port: 5672 },
+    haCapable: true, haReplicas: 3,
+  },
+  elasticsearch: {
+    label: "Elasticsearch", icon: "🔍", namePrefix: "es",
+    seed: { category: "DB", kind: "StatefulSet", replicas: 1, cpu: 2, memory_gb: 8, cpu_limit: 4, memory_limit_gb: 12, runtime_preset: "elasticsearch-8" },
+    pvc: { size_gb: 100 }, servicePort: { name: "http", port: 9200 },
+    haCapable: true, haReplicas: 3,
+  },
+  vllm: {
+    label: "vLLM (LLM Serving)", icon: "🤖", namePrefix: "vllm",
+    seed: { category: "ML-Inference", replicas: 1, cpu: 4, memory_gb: 32, cpu_limit: 8, memory_limit_gb: 48, gpu_count: 1, runtime_preset: "vllm-0.5" },
+    servicePort: { name: "http", port: 8000 },
+    haCapable: true, haReplicas: 2,
+  },
+};
+
+function quickDeployWorkload(clusterId, frameworkKey, ha = false) {
+  const tmpl = QUICK_DEPLOY_TEMPLATES[frameworkKey];
+  const c = (state.project?.clusters || []).find(x => x.id === clusterId);
+  if (!tmpl || !c) return;
+  const useHA = (ha && tmpl.haCapable) || tmpl.alwaysHA;
+  const preset = state.catalog.runtime?.[tmpl.seed.runtime_preset];
+  const existing = new Set((c.workloads || []).map(w => w.name));
+  let n = 1;
+  while (existing.has(`${tmpl.namePrefix}-${n}`)) n++;
+
+  const seed = {
+    name: `${tmpl.namePrefix}-${n}`,
+    ...tmpl.seed,
+    runtime_preset: preset ? tmpl.seed.runtime_preset : undefined,
+  };
+  if (useHA && tmpl.haReplicas) seed.replicas = tmpl.haReplicas;
+
+  const wl = addWorkload(clusterId, seed);
+  if (!wl) return;
+
+  let changed = false;
+  // Resource limits (max) — from template seed
+  if (tmpl.seed.cpu_limit != null || tmpl.seed.memory_limit_gb != null) {
+    wl.resources.limits = wl.resources.limits || {};
+    if (tmpl.seed.cpu_limit != null) wl.resources.limits.cpu = tmpl.seed.cpu_limit;
+    if (tmpl.seed.memory_limit_gb != null) wl.resources.limits.memory_gb = tmpl.seed.memory_limit_gb;
+    changed = true;
+  }
+  // Override service port for product-specific defaults (DB/Queue/etc)
+  if (tmpl.servicePort && wl.network?.service?.ports?.length) {
+    wl.network.service.ports[0] = {
+      name: tmpl.servicePort.name,
+      port: tmpl.servicePort.port,
+      target_port: tmpl.servicePort.port,
+      protocol: "TCP",
+    };
+    changed = true;
+  }
+  // Stateful templates get a PVC
+  if (tmpl.pvc) {
+    wl.persistent_volumes = [{
+      size_gb: tmpl.pvc.size_gb,
+      access_mode: tmpl.pvc.access_mode || "RWO",
+      storage_class: "",
+    }];
+    changed = true;
+  }
+  // HA: pod anti-affinity by node so replicas spread across nodes
+  if (useHA) {
+    wl.scheduling = wl.scheduling || {};
+    wl.scheduling.anti_affinity = "spread-by-node";
+    changed = true;
+  }
+  if (changed) { emit(); saveSoon(); }
+}
+
 function findWorkload(id) {
   for (const c of state.project.clusters || []) {
     const w = (c.workloads || []).find(x => x.id === id);
@@ -2356,9 +2573,176 @@ function deleteWorkload(id) {
   emit(); saveSoon();
 }
 
+// Parse decimal input from oninput handlers. Returns parsed number or null if the
+// input is in an intermediate state (empty, ".", "0.", "-", trailing dot) — caller
+// should skip the update so re-render doesn't snap the value back.
+function parseDecimalInput(raw) {
+  const s = String(raw).trim();
+  if (s === "" || s === "-" || s === "." || s === "-." || s.endsWith(".")) return null;
+  const v = parseFloat(s);
+  return Number.isFinite(v) ? v : null;
+}
+
+// ============ Copy/Paste via system clipboard ============
+// Clipboard envelope: { _vk8s_clip: 1, kind: "workload"|"cluster", data: {...} }
+const VK8S_CLIP_MARKER = "_vk8s_clip";
+
+async function copyEntityToClipboard(kind, id) {
+  let data;
+  if (kind === "workload") {
+    const f = findWorkload(id);
+    if (!f) return;
+    data = JSON.parse(JSON.stringify(f.workload));
+  } else if (kind === "cluster") {
+    const c = (state.project?.clusters || []).find(x => x.id === id);
+    if (!c) return;
+    data = JSON.parse(JSON.stringify(c));
+  } else { return; }
+  const envelope = { [VK8S_CLIP_MARKER]: 1, kind, data };
+  const text = JSON.stringify(envelope, null, 2);
+  // In-memory backup so paste works even if clipboard permission denied
+  state.ui.clipboard = envelope;
+  try {
+    if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
+    flashStatus(`${kind} '${data.name}' 복사됨`);
+  } catch (_) {
+    flashStatus(`${kind} '${data.name}' 복사됨 (메모리만)`);
+  }
+}
+
+async function readClipboardEnvelope() {
+  // Try system clipboard first, fall back to in-memory
+  try {
+    if (navigator.clipboard?.readText) {
+      const text = await navigator.clipboard.readText();
+      const parsed = JSON.parse(text);
+      if (parsed && parsed[VK8S_CLIP_MARKER]) return parsed;
+    }
+  } catch (_) { /* fall through */ }
+  return state.ui.clipboard || null;
+}
+
+async function pasteWorkloadIntoCluster(clusterId) {
+  const envelope = await readClipboardEnvelope();
+  if (!envelope || envelope.kind !== "workload") {
+    alert("클립보드에 워크로드가 없습니다.");
+    return;
+  }
+  const c = (state.project?.clusters || []).find(x => x.id === clusterId);
+  if (!c) return;
+  if (!Array.isArray(c.workloads)) c.workloads = [];
+  // Deep clone, regenerate id, dedupe name
+  const src = envelope.data;
+  const baseName = (src.name || "workload").replace(/\s*#\d+\s*$/, "").trim();
+  const existing = new Set(c.workloads.map(w => w.name));
+  let n = 1;
+  while (existing.has(`${baseName} #${n}`)) n++;
+  const newName = `${baseName} #${n}`;
+  const copy = JSON.parse(JSON.stringify(src));
+  copy.id = slug(copy.model || copy.name || "workload") + "-" + uid();
+  copy.name = newName;
+  delete copy.locked; // pasted copy starts unlocked
+  // depends_on inside the cloned workload still points to original IDs.
+  // If those workloads exist in this target cluster, keep refs; else drop.
+  const validIds = new Set((c.workloads || []).map(w => w.id));
+  if (Array.isArray(copy.depends_on)) {
+    copy.depends_on = copy.depends_on.filter(d => validIds.has(d.target_workload_id));
+  }
+  c.workloads.push(copy);
+  selectEntity("workload", copy.id);
+  emit(); saveSoon();
+  flashStatus(`Pasted as '${newName}'`);
+}
+
+async function pasteClusterIntoProject() {
+  const envelope = await readClipboardEnvelope();
+  if (!envelope || envelope.kind !== "cluster") {
+    alert("클립보드에 클러스터가 없습니다.");
+    return;
+  }
+  if (!Array.isArray(state.project.clusters)) state.project.clusters = [];
+  const src = envelope.data;
+  const baseName = (src.name || "cluster").replace(/\s*#\d+\s*$/, "").trim();
+  const existing = new Set(state.project.clusters.map(c => c.name));
+  let n = 1;
+  while (existing.has(`${baseName} #${n}`)) n++;
+  const newName = `${baseName} #${n}`;
+  const copy = JSON.parse(JSON.stringify(src));
+  copy.id = slug(copy.name || "cluster") + "-" + uid();
+  copy.name = newName;
+  delete copy.locked;
+  // Cluster's node_ids and workload IDs need handling. Strategy:
+  // - node_ids: cleared (target nodes don't exist in destination context)
+  // - workloads: keep but regenerate ids; remap depends_on within the cluster
+  copy.node_ids = [];
+  const idMap = new Map();
+  if (Array.isArray(copy.workloads)) {
+    for (const w of copy.workloads) {
+      const oldId = w.id;
+      w.id = slug(w.name || "wl") + "-" + uid();
+      idMap.set(oldId, w.id);
+      delete w.locked;
+    }
+    // Remap depends_on
+    for (const w of copy.workloads) {
+      if (Array.isArray(w.depends_on)) {
+        w.depends_on = w.depends_on
+          .map(d => ({ ...d, target_workload_id: idMap.get(d.target_workload_id) || d.target_workload_id }))
+          .filter(d => idMap.has(d.target_workload_id) || (d.target_workload_id && (state.project.clusters.flatMap(c2 => (c2.workloads || [])).some(w2 => w2.id === d.target_workload_id))));
+      }
+    }
+  }
+  state.project.clusters.push(copy);
+  selectEntity("cluster", copy.id);
+  emit(); saveSoon();
+  flashStatus(`Pasted as '${newName}'`);
+}
+
+function flashStatus(msg) {
+  const el = $("#saveStatus");
+  if (!el) return;
+  el.textContent = msg;
+  setTimeout(() => { if (el.textContent === msg) el.textContent = ""; }, 2500);
+}
+
+// ============ Entity lock helpers ============
+// Workload/cluster can be marked locked to prevent accidental edits.
+// All updateXField functions check this and silently no-op when locked.
+function isWorkloadLocked(workload) { return workload && workload.locked === true; }
+function isClusterLocked(cluster) { return cluster && cluster.locked === true; }
+function toggleWorkloadLock(id) {
+  const f = findWorkload(id);
+  if (!f) return;
+  f.workload.locked = !f.workload.locked;
+  if (!f.workload.locked) delete f.workload.locked;
+  emit(); saveSoon();
+}
+function toggleClusterLock(id) {
+  const c = (state.project?.clusters || []).find(x => x.id === id);
+  if (!c) return;
+  c.locked = !c.locked;
+  if (!c.locked) delete c.locked;
+  emit(); saveSoon();
+}
+
+// Integer-only variant. Returns null for empty / non-numeric. No decimal support.
+function parseIntInput(raw) {
+  const s = String(raw).trim();
+  if (s === "" || s === "-") return null;
+  if (!/^-?\d+$/.test(s)) return null;
+  const v = parseInt(s, 10);
+  return Number.isFinite(v) ? v : null;
+}
+
+// No-op kept for backwards compatibility in case any callsite still references it.
+// We rely on default browser focus behavior + restoreFocus for cursor preservation.
+const focusSelectAll = () => {};
+
 function updateWorkloadField(id, path, value) {
   const found = findWorkload(id);
   if (!found) return;
+  // Allow toggling lock itself even when locked
+  if (isWorkloadLocked(found.workload) && path !== "locked") return;
   const parts = path.split(".");
   let obj = found.workload;
   while (parts.length > 1) {
@@ -2979,6 +3363,72 @@ function selectEntity(kind, id) {
   emit();
 }
 
+// StorageClass name conventions for cluster.addons.local_pv provisioners.
+const LOCAL_PV_STORAGE_CLASS = {
+  "OpenEBS-LocalPV": "openebs-hostpath",
+  "Longhorn-Local":  "longhorn-static",
+  "Local-Path-Provisioner": "local-path",
+};
+
+// Connection-line style presets (used by Topology Diagram).
+const LINE_COLOR_PRESETS = {
+  accent: "#4d9cff",
+  green:  "#34d399",
+  orange: "#fb923c",
+  red:    "#f87171",
+  purple: "#a78bfa",
+  gray:   "#5a6377",
+};
+const LINE_STYLE_PRESETS = {
+  solid:  null,
+  dashed: "5,3",
+  dotted: "1,3",
+};
+
+function setLineStyle(lineId, partial) {
+  if (!state.project) return;
+  if (!state.project.line_styles) state.project.line_styles = {};
+  const cur = state.project.line_styles[lineId] || {};
+  state.project.line_styles[lineId] = { ...cur, ...partial };
+  emit(); saveSoon();
+}
+
+function resetLineStyle(lineId) {
+  if (!state.project?.line_styles) return;
+  delete state.project.line_styles[lineId];
+  if (Object.keys(state.project.line_styles).length === 0) delete state.project.line_styles;
+  emit(); saveSoon();
+}
+
+function lookupLineEndpointName(part) {
+  // part = "kind:id" (or "ingress:cid:idx" for ingress sources)
+  const [kind, ...rest] = part.split(":");
+  const id = rest.join(":");
+  const p = state.project;
+  if (!p) return id;
+  if (kind === "cluster") return p.clusters?.find(c => c.id === id)?.name || id;
+  if (kind === "node")    return p.nodes?.find(n => n.id === id)?.name || id;
+  if (kind === "l4")      {
+    for (const s of p.sites || []) for (const lb of s.l4_balancers || []) if (lb.id === id) return lb.name;
+  }
+  if (kind === "storage") {
+    for (const s of p.sites || []) for (const st of s.storages || []) if (st.id === id) return st.name;
+  }
+  if (kind === "netdev")  {
+    for (const s of p.sites || []) for (const d of s.network_devices || []) if (d.id === id) return d.name;
+  }
+  if (kind === "extsvc")  {
+    for (const s of p.sites || []) for (const e of s.external_services || []) if (e.id === id) return e.name;
+  }
+  if (kind === "ingress") {
+    // ingress:${cid}:${ruleIdx}
+    const [cid, idx] = rest;
+    const cn = p.clusters?.find(c => c.id === cid)?.name || cid;
+    return `${cn} ingress[${idx}]`;
+  }
+  return id;
+}
+
 function updateNodeField(id, path, value) {
   const n = state.project.nodes.find(x => x.id === id);
   if (!n) return;
@@ -3195,26 +3645,52 @@ function runValidator(project) {
         `${c.name}: worker 역할 노드가 없음 — 워크로드 스케줄 불가`, { kind: "cluster", id: c.id }, "node.cluster_roles");
     }
 
-    // GPU workload but no GPU node (count only worker-capable GPUs)
+    // GPU workload but no GPU node (VRAM-aware: VRAM mode if gpu.vram_gb is set, else legacy count)
     for (const w of wls) {
       const gReq = w.resources?.requests?.gpu;
       if (!gReq) continue;
-      const totalNeeded = (gReq.count || 0) * (w.replicas || 1);
-      const totalAvail = workerNodes.reduce((a, n) =>
+      const vramReq = gReq.vram_gb || 0;
+      const vramMode = vramReq > 0;
+      const totalAvailGpu = workerNodes.reduce((a, n) =>
         a + (n.spec?.gpu || []).reduce((aa, g) => aa + (g.count || 0), 0), 0);
-      if (totalNeeded > 0 && totalAvail === 0) {
-        F("WORKLOAD_GPU_NO_NODE", "error",
-          `${w.name}: GPU 요구하나 클러스터에 GPU 없음`, { kind: "workload", id: w.id });
-      }
-      if (totalNeeded > totalAvail && totalAvail > 0) {
-        F("WORKLOAD_GPU_INSUFFICIENT", "error",
-          `${w.name}: GPU ${totalNeeded}장 요구, ${totalAvail}장 가용`, { kind: "workload", id: w.id });
+      const totalAvailVram = workerNodes.reduce((a, n) =>
+        a + (n.spec?.gpu || []).reduce((aa, g) =>
+          aa + (g.count || 0) * (gpuModels[g.model]?.vram_gb || 0), 0), 0);
+
+      if (vramMode) {
+        const totalNeededVram = vramReq * (w.replicas || 1);
+        if (totalAvailGpu === 0) {
+          F("WORKLOAD_GPU_NO_NODE", "error",
+            `${w.name}: GPU 요구하나 클러스터에 GPU 없음`, { kind: "workload", id: w.id });
+        } else if (totalNeededVram > totalAvailVram) {
+          F("WORKLOAD_GPU_VRAM_INSUFFICIENT", "error",
+            `${w.name}: VRAM ${totalNeededVram}GB 요구, ${totalAvailVram}GB 가용`, { kind: "workload", id: w.id });
+        }
+      } else {
+        const totalNeeded = (gReq.count || 0) * (w.replicas || 1);
+        if (totalNeeded > 0 && totalAvailGpu === 0) {
+          F("WORKLOAD_GPU_NO_NODE", "error",
+            `${w.name}: GPU 요구하나 클러스터에 GPU 없음`, { kind: "workload", id: w.id });
+        }
+        if (totalNeeded > totalAvailGpu && totalAvailGpu > 0) {
+          F("WORKLOAD_GPU_INSUFFICIENT", "error",
+            `${w.name}: GPU ${totalNeeded}장 요구, ${totalAvailGpu}장 가용`, { kind: "workload", id: w.id });
+        }
       }
       if (gReq.model) {
         const have = workerNodes.some(n => (n.spec?.gpu || []).some(g => g.model === gReq.model));
         if (!have) {
           F("WORKLOAD_GPU_MODEL_NOT_AVAILABLE", "error",
             `${w.name}: ${gReq.model} 요구, worker 노드에 없음`, { kind: "workload", id: w.id });
+        } else if (vramMode) {
+          const modelVramAvail = workerNodes.reduce((a, n) =>
+            a + (n.spec?.gpu || []).reduce((aa, g) =>
+              aa + (g.model === gReq.model ? (g.count || 0) * (gpuModels[g.model]?.vram_gb || 0) : 0), 0), 0);
+          const modelVramNeeded = vramReq * (w.replicas || 1);
+          if (modelVramNeeded > modelVramAvail) {
+            F("WORKLOAD_GPU_MODEL_VRAM_INSUFFICIENT", "error",
+              `${w.name}: ${gReq.model} VRAM ${modelVramNeeded}GB 요구, ${modelVramAvail}GB 가용`, { kind: "workload", id: w.id });
+          }
         }
       }
     }
@@ -3653,6 +4129,7 @@ function renderTree() {
     }, [
       el("span", { class: "icon" }, ["⎈"]),
       el("span", { class: "label" }, [c.name]),
+      c.locked ? el("span", { class: "lock-dot", title: "Locked" }, ["●"]) : null,
       el("span", { class: "meta" }, [meta]),
     ]));
     for (const w of (c.workloads || [])) {
@@ -3662,6 +4139,7 @@ function renderTree() {
       }, [
         el("span", { class: "icon" }, ["◇"]),
         el("span", { class: "label" }, [w.name]),
+        w.locked ? el("span", { class: "lock-dot", title: "Locked" }, ["●"]) : null,
         el("span", { class: "meta" }, [w.category]),
       ]));
     }
@@ -3675,6 +4153,11 @@ function renderTree() {
   }
   actions.appendChild(el("button", { class: "add-btn", onclick: openAddNode }, ["＋ Add Node"]));
   actions.appendChild(el("button", { class: "add-btn", onclick: openAddCluster }, ["＋ Add Cluster"]));
+  actions.appendChild(el("button", {
+    class: "add-btn",
+    title: "Paste cluster from clipboard",
+    onclick: pasteClusterIntoProject,
+  }, ["📥 Paste Cluster"]));
   root.appendChild(actions);
 }
 
@@ -3682,6 +4165,7 @@ function renderTree() {
 function renderInspector() {
   const root = $("#inspector");
   root.innerHTML = "";
+  root.classList.remove("inspector-locked");
   if (!state.project || !state.ui.selectedId) {
     root.appendChild(el("div", { class: "inspector-empty" }, ["엔티티를 선택하세요"]));
     return;
@@ -3696,6 +4180,63 @@ function renderInspector() {
   else if (k === "netdev") renderNetworkDeviceInspector(root, id);
   else if (k === "extsvc") renderExternalServiceInspector(root, id);
   else if (k === "sitelink") renderSiteLinkInspector(root, id);
+  else if (k === "line") renderLineInspector(root, id);
+}
+
+function renderLineInspector(root, lineId) {
+  const [src, dst] = lineId.split("->");
+  const srcName = lookupLineEndpointName(src);
+  const dstName = lookupLineEndpointName(dst);
+  const current = state.project?.line_styles?.[lineId] || {};
+  const hasOverride = current.color || current.style;
+
+  root.appendChild(el("div", { class: "insp-header" }, [
+    el("span", { class: "kind" }, ["Connection"]),
+    el("span", { class: "name" }, [`${srcName} → ${dstName}`]),
+    hasOverride ? el("button", {
+      class: "duplicate", title: "Reset to default style",
+      onclick: () => resetLineStyle(lineId),
+    }, ["↺"]) : null,
+  ]));
+
+  root.appendChild(el("div", { class: "section-title" }, ["Color"]));
+  const colorRow = el("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap" } });
+  for (const key of Object.keys(LINE_COLOR_PRESETS)) {
+    const hex = LINE_COLOR_PRESETS[key];
+    const sel = current.color === key;
+    colorRow.appendChild(el("button", {
+      title: key,
+      style: {
+        width: "32px", height: "26px", borderRadius: "5px",
+        background: hex,
+        border: sel ? "2px solid var(--text)" : "1px solid var(--border)",
+        cursor: "pointer", padding: 0,
+      },
+      onclick: () => setLineStyle(lineId, { color: key }),
+    }));
+  }
+  root.appendChild(colorRow);
+
+  root.appendChild(el("div", { class: "section-title" }, ["Style"]));
+  const styleRow = el("div", { style: { display: "flex", gap: "6px" } });
+  for (const key of Object.keys(LINE_STYLE_PRESETS)) {
+    const sel = current.style === key;
+    styleRow.appendChild(el("button", {
+      style: {
+        padding: "5px 14px", fontSize: "11px",
+        background: sel ? "var(--accent-glow)" : "var(--surface2)",
+        border: "1px solid " + (sel ? "var(--accent)" : "var(--border)"),
+        color: "var(--text)", cursor: "pointer", borderRadius: "4px",
+        textTransform: "none", letterSpacing: 0,
+      },
+      onclick: () => setLineStyle(lineId, { style: key }),
+    }, [key]));
+  }
+  root.appendChild(styleRow);
+
+  root.appendChild(el("div", {
+    style: { marginTop: "12px", fontSize: "10px", color: "var(--text3)", fontFamily: "JetBrains Mono" },
+  }, [`id: ${lineId}`]));
 }
 
 function renderSiteInspector(root, id) {
@@ -3750,16 +4291,25 @@ function renderSiteInspector(root, id) {
         lbl("Rack Units (U)", "site.rack_units"),
         el("input", {
           "data-focus-key": `site.${id}.rack_units`,
-          type: "number", min: "0", value: s.capacity?.rack_units || 0,
-          oninput: e => updateSiteField(id, "capacity.rack_units", parseInt(e.target.value) || 0),
+          type: "text", inputmode: "numeric", pattern: "[0-9]*",
+          value: s.capacity?.rack_units != null ? s.capacity.rack_units : 0,
+          oninput: e => {
+            const v = parseIntInput(e.target.value);
+            if (v != null && v >= 0) updateSiteField(id, "capacity.rack_units", v);
+          },
         }),
       ]),
       el("div", { class: "field" }, [
         lbl("Power (kW)", "site.power_kw"),
         el("input", {
           "data-focus-key": `site.${id}.power_kw`,
-          type: "number", min: "0", step: "0.5", value: s.capacity?.power_kw || 0,
-          oninput: e => updateSiteField(id, "capacity.power_kw", parseFloat(e.target.value) || 0),
+          type: "text", inputmode: "decimal", pattern: "[0-9]*\\.?[0-9]*",
+          value: s.capacity?.power_kw != null ? s.capacity.power_kw : "",
+          onfocus: focusSelectAll,
+          oninput: e => {
+            const v = parseDecimalInput(e.target.value);
+            if (v != null && v >= 0) updateSiteField(id, "capacity.power_kw", v);
+          },
         }),
       ]),
     ]));
@@ -3767,8 +4317,14 @@ function renderSiteInspector(root, id) {
       lbl("Cooling (kW, optional)", "site.cooling_kw"),
       el("input", {
         "data-focus-key": `site.${id}.cooling_kw`,
-        type: "number", min: "0", step: "0.5", value: s.capacity?.cooling_kw || "",
-        oninput: e => updateSiteField(id, "capacity.cooling_kw", parseFloat(e.target.value) || undefined),
+        type: "text", inputmode: "decimal", pattern: "[0-9]*\\.?[0-9]*",
+        value: s.capacity?.cooling_kw != null ? s.capacity.cooling_kw : "",
+        oninput: e => {
+          const raw = e.target.value;
+          if (raw === "") return updateSiteField(id, "capacity.cooling_kw", undefined);
+          const v = parseDecimalInput(raw);
+          if (v != null && v >= 0) updateSiteField(id, "capacity.cooling_kw", v);
+        },
       }),
     ]));
 
@@ -3920,6 +4476,10 @@ function renderNodeInspector(root, id) {
     el("span", { class: "kind" }, ["Node"]),
     el("span", { class: "name" }, [n.name]),
     el("button", {
+      class: "duplicate", title: "Duplicate node",
+      onclick: () => duplicateNode(id),
+    }, ["⎘"]),
+    el("button", {
       class: "delete", title: "Delete node",
       onclick: () => { if (confirm(`노드 '${n.name}' 삭제?`)) deleteEntity("node", id); },
     }, ["🗑"]),
@@ -4021,10 +4581,19 @@ function renderNodeInspector(root, id) {
           el("label", { style: { fontSize: "10px" } }, ["VLAN"]),
           el("input", {
             "data-focus-key": `node.${id}.iface.${i}.vlan`,
-            type: "number", style: { padding: "4px 6px", fontSize: "11px" },
-            value: ifc.vlan || "",
+            type: "text", inputmode: "numeric", pattern: "[0-9]*",
+            style: { padding: "4px 6px", fontSize: "11px" },
+            value: ifc.vlan != null ? ifc.vlan : "",
             oninput: e => {
-              const ns = [...ifaces]; ns[i] = { ...ns[i], vlan: parseInt(e.target.value) || undefined };
+              const raw = e.target.value;
+              const ns = [...ifaces];
+              if (raw === "") {
+                const { vlan, ...rest } = ns[i]; ns[i] = rest;
+              } else {
+                const v = parseIntInput(raw);
+                if (v == null) return;
+                ns[i] = { ...ns[i], vlan: v };
+              }
               updateNodeField(id, "network.interfaces", ns);
             },
           }),
@@ -4044,18 +4613,48 @@ function renderNodeInspector(root, id) {
           },
         }, ["✕ Remove"]),
       ]),
-      el("div", { class: "field", style: { margin: "4px 0 0", display: "flex", gap: "6px", alignItems: "center" } }, [
-        el("label", { style: { fontSize: "10px", margin: 0 } }, ["purpose"]),
-        el("select", {
-          style: { padding: "3px 6px", fontSize: "11px", flex: 1 },
-          onchange: e => {
-            const ns = [...ifaces]; ns[i] = { ...ns[i], purpose: e.target.value || undefined };
-            updateNodeField(id, "network.interfaces", ns);
-          },
-        }, [
-          el("option", { value: "" }, ["(none)"]),
-          ...["mgmt", "pod", "storage", "external"].map(p =>
-            el("option", { value: p, selected: p === ifc.purpose ? "" : null }, [p])),
+      el("div", { class: "field", style: { margin: "4px 0 0", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px", alignItems: "center" } }, [
+        el("div", { style: { display: "flex", gap: "6px", alignItems: "center" } }, [
+          el("label", { style: { fontSize: "10px", margin: 0 } }, ["purpose"]),
+          el("select", {
+            style: { padding: "3px 6px", fontSize: "11px", flex: 1 },
+            onchange: e => {
+              const ns = [...ifaces]; ns[i] = { ...ns[i], purpose: e.target.value || undefined };
+              updateNodeField(id, "network.interfaces", ns);
+            },
+          }, [
+            el("option", { value: "" }, ["(none)"]),
+            ...["mgmt", "pod", "storage", "external"].map(p =>
+              el("option", { value: p, selected: p === ifc.purpose ? "" : null }, [p])),
+          ]),
+        ]),
+        el("div", { style: { display: "flex", gap: "6px", alignItems: "center" } }, [
+          el("label", { style: { fontSize: "10px", margin: 0 } }, ["speed"]),
+          (() => {
+            const cur = Number(ifc.speed_gbps) || 0;
+            const list = (cur === 0 || NIC_SPEEDS.includes(cur))
+              ? NIC_SPEEDS
+              : [...NIC_SPEEDS, cur].sort((a, b) => a - b);
+            return el("select", {
+              style: { padding: "3px 6px", fontSize: "11px", flex: 1 },
+              onchange: e => {
+                const v = e.target.value;
+                const ns = [...ifaces];
+                if (v === "") {
+                  const { speed_gbps, ...rest } = ns[i];
+                  ns[i] = rest;
+                } else {
+                  ns[i] = { ...ns[i], speed_gbps: Number(v) };
+                }
+                updateNodeField(id, "network.interfaces", ns);
+              },
+            }, [
+              el("option", { value: "", selected: cur === 0 ? "" : null }, ["(unset)"]),
+              ...list.map(s => el("option", {
+                value: String(s), selected: s === cur ? "" : null,
+              }, [`${s} G`])),
+            ]);
+          })(),
         ]),
       ]),
     ]));
@@ -4165,6 +4764,7 @@ function renderNodeInspector(root, id) {
         // so per-keystroke re-render lost cursor position and reversed digits ("64" → "46").
         type: "text", inputmode: "numeric", pattern: "[0-9]*",
         value: String(spec.vcpu || 0),
+        onfocus: focusSelectAll,
         oninput: e => updateNodeSpecNumber(id, "vcpu", e.target.value),
       }),
     ]),
@@ -4178,6 +4778,7 @@ function renderNodeInspector(root, id) {
         "data-focus-key": `node.${id}.memory_gb`,
         type: "text", inputmode: "decimal", pattern: "[0-9]*\\.?[0-9]*",
         value: String(spec.memory_gb || 0),
+        onfocus: focusSelectAll,
         oninput: e => updateNodeSpecNumber(id, "memory_gb", e.target.value),
       }),
     ]),
@@ -4201,12 +4802,15 @@ function renderNodeInspector(root, id) {
   {
     const disks = Array.isArray(spec.disks) ? spec.disks : [];
     const totalGb = disks.reduce((a, d) => a + (Number(d.size_gb) || 0) * (parseInt(d.count) || 1), 0);
+    const totalUsableGb = disks.reduce((a, d) => a + raidUsable(d).usable_gb, 0);
+    const anyRaid = disks.some(d => (d.raid || "none") !== "none");
     root.appendChild(el("div", { class: "section-title" }, [`Disks (${disks.length})`]));
     if (disks.length === 0) {
       root.appendChild(el("div", { class: "empty-hint" }, ["디스크 없음"]));
     } else {
       root.appendChild(el("div", { style: { fontSize: "11px", color: "var(--text2)", marginBottom: "6px", fontFamily: "JetBrains Mono" } }, [
         `Total raw: ${totalGb.toLocaleString()} GB (${(totalGb / 1024).toFixed(1)} TB)`,
+        anyRaid ? `  ·  usable: ${totalUsableGb.toLocaleString()} GB (${(totalUsableGb / 1024).toFixed(1)} TB)` : "",
       ]));
       for (let i = 0; i < disks.length; i++) {
         root.appendChild(renderDiskRowEditable(n, i));
@@ -4311,14 +4915,33 @@ function renderClusterInspector(root, id) {
   const c = state.project.clusters.find(x => x.id === id);
   if (!c) return;
 
+  const cLocked = isClusterLocked(c);
+  if (cLocked) root.classList.add("inspector-locked");
   root.appendChild(el("div", { class: "insp-header" }, [
-    el("span", { class: "kind" }, ["Cluster"]),
+    el("span", { class: "kind" }, [cLocked ? "🔒 Cluster" : "Cluster"]),
     el("span", { class: "name" }, [c.name]),
     el("button", {
+      class: "duplicate", title: cLocked ? "Unlock cluster" : "Lock cluster (편집/삭제 보호)",
+      onclick: () => toggleClusterLock(id),
+    }, [cLocked ? "🔒" : "🔓"]),
+    el("button", {
+      class: "duplicate", title: "Copy cluster to clipboard",
+      onclick: () => copyEntityToClipboard("cluster", id),
+    }, ["📋"]),
+    el("button", {
       class: "delete", title: "Delete cluster",
-      onclick: () => { if (confirm(`클러스터 '${c.name}' 삭제? (노드는 unassigned로 돌아갑니다)`)) deleteEntity("cluster", id); },
+      onclick: () => {
+        if (cLocked && !confirm(`'${c.name}'은 잠긴 클러스터입니다. 정말 삭제?`)) return;
+        if (!cLocked && !confirm(`클러스터 '${c.name}' 삭제? (노드는 unassigned로 돌아갑니다)`)) return;
+        deleteEntity("cluster", id);
+      },
     }, ["🗑"]),
   ]));
+  if (cLocked) {
+    root.appendChild(el("div", { class: "lock-banner" }, [
+      "🔒 이 클러스터는 잠겨있습니다. 편집하려면 헤더의 🔒 아이콘을 클릭해 해제하세요.",
+    ]));
+  }
 
   root.appendChild(el("div", { class: "field" }, [
     el("label", {}, ["Name"]),
@@ -4387,6 +5010,16 @@ function renderClusterInspector(root, id) {
     gpuOpInput,
     el("span", {}, ["NVIDIA GPU Operator (GPU 노드 있을 때 권장)"]),
     helpIcon("cluster.gpu_operator"),
+  ]));
+
+  // Local PV provisioner (app-replicated stateful 워크로드용)
+  root.appendChild(el("div", { class: "field" }, [
+    el("label", {}, ["Local PV Provisioner"]),
+    el("select", {
+      onchange: e => updateClusterField(id, "addons.local_pv", e.target.value),
+      title: "노드 로컬 디스크 기반 PV. Patroni/MongoDB replica set/Kafka 등 app-replicated 워크로드용",
+    }, ["None", "OpenEBS-LocalPV", "Longhorn-Local", "Local-Path-Provisioner"].map(v =>
+      el("option", { value: v, selected: (c.addons?.local_pv || "None") === v ? "" : null }, [v]))),
   ]));
 
   // Production preset CTA
@@ -4667,11 +5300,65 @@ function renderClusterInspector(root, id) {
     }
     root.appendChild(list);
   }
-  root.appendChild(el("button", {
-    class: "add-btn",
-    style: { marginTop: "8px", width: "100%" },
-    onclick: () => openAddWorkload(c.id),
-  }, ["＋ Add Workload"]));
+  root.appendChild(el("div", { style: { display: "grid", gridTemplateColumns: "1fr auto", gap: "6px", marginTop: "8px" } }, [
+    el("button", {
+      class: "add-btn",
+      onclick: () => openAddWorkload(c.id),
+    }, ["＋ Add Workload"]),
+    el("button", {
+      class: "add-btn",
+      title: "Paste workload from clipboard",
+      style: { padding: "0 12px" },
+      onclick: () => pasteWorkloadIntoCluster(c.id),
+    }, ["📥 Paste"]),
+  ]));
+
+  // Quick deploy — pre-configured framework/product templates with optional HA mode
+  if (state.ui.quickDeployHA == null) state.ui.quickDeployHA = false;
+  const haOn = !!state.ui.quickDeployHA;
+  const sectionHeader = el("div", {
+    style: { marginTop: "10px", display: "flex", alignItems: "center", justifyContent: "space-between" },
+  }, [
+    el("span", {
+      style: { fontSize: "10px", color: "var(--text3)", textTransform: "uppercase", letterSpacing: "0.05em", fontFamily: "JetBrains Mono" },
+    }, ["✨ Quick deploy"]),
+    el("label", {
+      style: { fontSize: "10px", display: "inline-flex", alignItems: "center", gap: "4px", cursor: "pointer", color: haOn ? "var(--accent)" : "var(--text3)" },
+      title: "HA 모드 ON: 가능한 템플릿은 HA 권장 replicas + anti-affinity 적용",
+    }, [
+      el("input", {
+        type: "checkbox",
+        checked: haOn ? "" : null,
+        onchange: e => { state.ui.quickDeployHA = !!e.target.checked; emit(); },
+        style: { margin: 0 },
+      }),
+      "HA mode",
+    ]),
+  ]);
+  root.appendChild(sectionHeader);
+
+  const quickGrid = el("div", {
+    style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px", marginTop: "6px" },
+  });
+  for (const [key, tmpl] of Object.entries(QUICK_DEPLOY_TEMPLATES)) {
+    const willUseHA = (haOn && tmpl.haCapable) || tmpl.alwaysHA;
+    const replicas = willUseHA && tmpl.haReplicas ? tmpl.haReplicas : tmpl.seed.replicas;
+    const haBadge = willUseHA ? ` HA×${replicas}` : "";
+    const tooltipExtra = tmpl.pvc ? ` · PVC ${tmpl.pvc.size_gb}G` : "";
+    const gpuExtra = tmpl.seed.gpu_count ? ` · ${tmpl.seed.gpu_count} GPU` : "";
+    quickGrid.appendChild(el("button", {
+      class: "btn-ghost",
+      style: {
+        padding: "6px 8px", fontSize: "11px", textAlign: "left",
+        background: willUseHA ? "var(--accent-glow)" : "var(--surface2)",
+        border: "1px solid " + (willUseHA ? "var(--accent)" : "var(--border)"),
+        borderRadius: "4px", color: "var(--text)", cursor: "pointer",
+      },
+      title: `${tmpl.label} · replicas ${replicas} · ${tmpl.seed.cpu}c · ${tmpl.seed.memory_gb}G${gpuExtra}${tooltipExtra}`,
+      onclick: () => quickDeployWorkload(c.id, key, haOn),
+    }, [`${tmpl.icon} ${tmpl.label}${haBadge}`]));
+  }
+  root.appendChild(quickGrid);
 
   // Findings preview (basic checks)
   const cpCount = assignedNodes.filter(n => (n.cluster_roles || []).includes("control-plane")).length;
@@ -4748,9 +5435,13 @@ function renderL4Inspector(root, id) {
       lbl("Throughput (Gbps)", "l4.throughput"),
       el("input", {
         "data-focus-key": `l4.${id}.throughput`,
-        type: "number", min: "0", step: "1",
-        value: l4.throughput_gbps || 0,
-        oninput: e => updateL4Field(id, "throughput_gbps", parseFloat(e.target.value) || 0),
+        type: "text", inputmode: "decimal", pattern: "[0-9]*\\.?[0-9]*",
+        value: l4.throughput_gbps != null ? l4.throughput_gbps : "",
+        onfocus: focusSelectAll,
+        oninput: e => {
+          const v = parseDecimalInput(e.target.value);
+          if (v != null && v >= 0) updateL4Field(id, "throughput_gbps", v);
+        },
       }),
     ]),
   ]));
@@ -4843,9 +5534,13 @@ function renderStorageInspector(root, id) {
       lbl("Capacity (TB)", "storage.capacity"),
       el("input", {
         "data-focus-key": `storage.${id}.capacity`,
-        type: "number", min: "0", step: "1",
-        value: st.capacity_tb || 0,
-        oninput: e => updateStorageField(id, "capacity_tb", parseFloat(e.target.value) || 0),
+        type: "text", inputmode: "decimal", pattern: "[0-9]*\\.?[0-9]*",
+        value: st.capacity_tb != null ? st.capacity_tb : "",
+        onfocus: focusSelectAll,
+        oninput: e => {
+          const v = parseDecimalInput(e.target.value);
+          if (v != null && v >= 0) updateStorageField(id, "capacity_tb", v);
+        },
       }),
     ]),
   ]));
@@ -4944,9 +5639,13 @@ function renderNetworkDeviceInspector(root, id) {
       lbl("Throughput (Gbps)", "netdev.throughput"),
       el("input", {
         "data-focus-key": `netdev.${id}.throughput`,
-        type: "number", min: "0",
-        value: d.throughput_gbps || 0,
-        oninput: e => updateNetworkDeviceField(id, "throughput_gbps", parseFloat(e.target.value) || 0),
+        type: "text", inputmode: "decimal", pattern: "[0-9]*\\.?[0-9]*",
+        value: d.throughput_gbps != null ? d.throughput_gbps : "",
+        onfocus: focusSelectAll,
+        oninput: e => {
+          const v = parseDecimalInput(e.target.value);
+          if (v != null && v >= 0) updateNetworkDeviceField(id, "throughput_gbps", v);
+        },
       }),
     ]),
   ]));
@@ -5056,9 +5755,12 @@ function renderExternalServiceInspector(root, id) {
       lbl("Capacity (GB)", "extsvc.capacity"),
       el("input", {
         "data-focus-key": `extsvc.${id}.capacity`,
-        type: "number", min: "0",
-        value: e.capacity_gb || 0,
-        oninput: ev => updateExternalServiceField(id, "capacity_gb", parseFloat(ev.target.value) || 0),
+        type: "text", inputmode: "decimal", pattern: "[0-9]*\\.?[0-9]*",
+        value: e.capacity_gb != null ? e.capacity_gb : 0,
+        oninput: ev => {
+          const v = parseDecimalInput(ev.target.value);
+          if (v != null && v >= 0) updateExternalServiceField(id, "capacity_gb", v);
+        },
       }),
     ]),
     el("div", { class: "field" }, [
@@ -5140,9 +5842,13 @@ function renderSiteLinkInspector(root, id) {
       lbl("Bandwidth (Gbps)", "sitelink.bandwidth"),
       el("input", {
         "data-focus-key": `sitelink.${id}.bandwidth`,
-        type: "number", min: "0", step: "0.1",
-        value: link.bandwidth_gbps || 0,
-        oninput: e => updateSiteLinkField(id, "bandwidth_gbps", parseFloat(e.target.value) || 0),
+        type: "text", inputmode: "decimal", pattern: "[0-9]*\\.?[0-9]*",
+        value: link.bandwidth_gbps != null ? link.bandwidth_gbps : "",
+        onfocus: focusSelectAll,
+        oninput: e => {
+          const v = parseDecimalInput(e.target.value);
+          if (v != null && v >= 0) updateSiteLinkField(id, "bandwidth_gbps", v);
+        },
       }),
     ]),
   ]));
@@ -5151,9 +5857,13 @@ function renderSiteLinkInspector(root, id) {
       lbl("Latency (ms)", "sitelink.latency"),
       el("input", {
         "data-focus-key": `sitelink.${id}.latency`,
-        type: "number", min: "0",
-        value: link.latency_ms || 0,
-        oninput: e => updateSiteLinkField(id, "latency_ms", parseFloat(e.target.value) || 0),
+        type: "text", inputmode: "decimal", pattern: "[0-9]*\\.?[0-9]*",
+        value: link.latency_ms != null ? link.latency_ms : "",
+        onfocus: focusSelectAll,
+        oninput: e => {
+          const v = parseDecimalInput(e.target.value);
+          if (v != null && v >= 0) updateSiteLinkField(id, "latency_ms", v);
+        },
       }),
     ]),
     el("div", { class: "field" }, [
@@ -5176,14 +5886,33 @@ function renderWorkloadInspector(root, id) {
   const totalMem = (w.resources?.requests?.memory_gb || 0) * (w.replicas || 1);
   const gpuReq = w.resources?.requests?.gpu;
 
+  const wlLocked = isWorkloadLocked(w);
+  if (wlLocked) root.classList.add("inspector-locked");
   root.appendChild(el("div", { class: "insp-header" }, [
-    el("span", { class: "kind" }, ["Workload"]),
+    el("span", { class: "kind" }, [wlLocked ? "🔒 Workload" : "Workload"]),
     el("span", { class: "name" }, [w.name]),
     el("button", {
+      class: "duplicate", title: wlLocked ? "Unlock workload" : "Lock workload (편집/삭제 보호)",
+      onclick: () => toggleWorkloadLock(id),
+    }, [wlLocked ? "🔒" : "🔓"]),
+    el("button", {
+      class: "duplicate", title: "Copy workload to clipboard",
+      onclick: () => copyEntityToClipboard("workload", id),
+    }, ["📋"]),
+    el("button", {
       class: "delete", title: "Delete workload",
-      onclick: () => { if (confirm(`'${w.name}' 삭제?`)) deleteWorkload(id); },
+      onclick: () => {
+        if (wlLocked && !confirm(`'${w.name}'은 잠긴 워크로드입니다. 정말 삭제?`)) return;
+        if (!wlLocked && !confirm(`'${w.name}' 삭제?`)) return;
+        deleteWorkload(id);
+      },
     }, ["🗑"]),
   ]));
+  if (wlLocked) {
+    root.appendChild(el("div", { class: "lock-banner" }, [
+      "🔒 이 워크로드는 잠겨있습니다. 편집하려면 헤더의 🔒 아이콘을 클릭해 해제하세요.",
+    ]));
+  }
 
   // Tabs
   if (!state.ui.workloadTab) state.ui.workloadTab = "basic";
@@ -5232,8 +5961,12 @@ function renderWorkloadInspector(root, id) {
         lbl("Replicas", "workload.replicas"),
         el("input", {
           "data-focus-key": `workload.${id}.replicas`,
-          type: "number", min: "1", value: w.replicas || 1,
-          oninput: e => updateWorkloadField(id, "replicas", parseInt(e.target.value) || 1),
+          type: "text", inputmode: "numeric", pattern: "[0-9]*",
+          value: w.replicas != null ? w.replicas : 1,
+          oninput: e => {
+            const v = parseIntInput(e.target.value);
+            if (v != null && v >= 1) updateWorkloadField(id, "replicas", v);
+          },
         }),
       ]),
       el("div", { class: "field" }, [
@@ -5248,68 +5981,203 @@ function renderWorkloadInspector(root, id) {
       el("label", {}, ["Cluster"]),
       el("div", { class: "field-readonly" }, [cluster.name]),
     ]));
+    // Visibility toggle — exclude this workload (and its edges) from the Dependency graph view.
+    const hideInput = el("input", {
+      type: "checkbox",
+      checked: w.hide_from_dep_graph ? "" : null,
+      onchange: e => updateWorkloadField(id, "hide_from_dep_graph", e.target.checked || undefined),
+    });
+    root.appendChild(el("label", {
+      style: { display: "flex", alignItems: "center", gap: "8px", margin: "8px 0", fontSize: "12px", textTransform: "none", letterSpacing: 0 },
+    }, [
+      hideInput,
+      el("span", {}, ["Dependency 그래프에서 숨기기"]),
+      el("span", { style: { color: "var(--text3)", fontSize: "11px" } }, ["(이 워크로드 노드와 연결된 edge가 그래프에서 제외)"]),
+    ]));
   }
   else if (state.ui.workloadTab === "resources") {
     const reqs = w.resources?.requests || {};
-    root.appendChild(el("div", { class: "section-title" }, ["Per-pod requests"]));
+    const lims = w.resources?.limits || {};
+    root.appendChild(el("div", { class: "section-title" }, ["Per-pod requests (min — guaranteed)"]));
     root.appendChild(el("div", { class: "field-row" }, [
       el("div", { class: "field" }, [
         lbl("CPU (cores)", "resources.cpu"),
         el("input", {
           "data-focus-key": `workload.${id}.cpu`,
-          type: "number", min: "0", step: "0.1", value: reqs.cpu || 0,
-          oninput: e => updateWorkloadField(id, "resources.requests.cpu", parseFloat(e.target.value) || 0),
+          type: "text", inputmode: "decimal", pattern: "[0-9]*\\.?[0-9]*",
+          value: reqs.cpu != null ? reqs.cpu : "",
+          onfocus: focusSelectAll,
+          oninput: e => {
+            const v = parseDecimalInput(e.target.value);
+            if (v != null && v > 0) updateWorkloadField(id, "resources.requests.cpu", v);
+          },
         }),
       ]),
       el("div", { class: "field" }, [
         lbl("Memory (GB)", "resources.memory"),
         el("input", {
           "data-focus-key": `workload.${id}.memory`,
-          type: "number", min: "0", step: "0.5", value: reqs.memory_gb || 0,
-          oninput: e => updateWorkloadField(id, "resources.requests.memory_gb", parseFloat(e.target.value) || 0),
+          type: "text", inputmode: "decimal", pattern: "[0-9]*\\.?[0-9]*",
+          value: reqs.memory_gb != null ? reqs.memory_gb : "",
+          onfocus: focusSelectAll,
+          oninput: e => {
+            const v = parseDecimalInput(e.target.value);
+            if (v != null && v > 0) updateWorkloadField(id, "resources.requests.memory_gb", v);
+          },
         }),
       ]),
     ]));
 
-    // GPU section
-    root.appendChild(el("div", { class: "section-title" }, ["GPU (선택)"]));
-    const gpuModels = state.catalog.gpuModels;
-    const gpuReq = reqs.gpu || {};
+    // Limits (max). Empty → exported as 2× request fallback.
+    root.appendChild(el("div", { class: "section-title" }, ["Per-pod limits (max — empty → 2× request)"]));
+    const onLimitInput = (key) => e => {
+      const raw = e.target.value;
+      if (raw === "") return updateWorkloadField(id, `resources.limits.${key}`, undefined);
+      const v = parseDecimalInput(raw);
+      if (v != null && v > 0) updateWorkloadField(id, `resources.limits.${key}`, v);
+    };
     root.appendChild(el("div", { class: "field-row" }, [
       el("div", { class: "field" }, [
-        lbl("GPU count", "resources.gpu_count"),
+        lbl("CPU limit (cores)", "resources.cpu"),
         el("input", {
-          "data-focus-key": `workload.${id}.gpu_count`,
-          type: "number", min: "0", value: gpuReq.count || 0,
+          "data-focus-key": `workload.${id}.cpu_limit`,
+          type: "text", inputmode: "decimal", pattern: "[0-9]*\\.?[0-9]*",
+          value: lims.cpu != null ? lims.cpu : "",
+          placeholder: `(default: ${((reqs.cpu || 0) * 2).toFixed(2).replace(/\.?0+$/, "")})`,
+          onfocus: focusSelectAll,
+          oninput: onLimitInput("cpu"),
+        }),
+      ]),
+      el("div", { class: "field" }, [
+        lbl("Memory limit (GB)", "resources.memory"),
+        el("input", {
+          "data-focus-key": `workload.${id}.memory_limit`,
+          type: "text", inputmode: "decimal", pattern: "[0-9]*\\.?[0-9]*",
+          value: lims.memory_gb != null ? lims.memory_gb : "",
+          placeholder: `(default: ${((reqs.memory_gb || 0) * 2).toFixed(2).replace(/\.?0+$/, "")})`,
+          onfocus: focusSelectAll,
+          oninput: onLimitInput("memory_gb"),
+        }),
+      ]),
+    ]));
+    // Validation hint
+    const badCpu = lims.cpu != null && reqs.cpu != null && lims.cpu < reqs.cpu;
+    const badMem = lims.memory_gb != null && reqs.memory_gb != null && lims.memory_gb < reqs.memory_gb;
+    if (badCpu || badMem) {
+      root.appendChild(el("div", {
+        style: { fontSize: "11px", color: "var(--yellow)", padding: "4px 0", fontFamily: "JetBrains Mono" },
+      }, [`▲ limit < request — K8s가 거부합니다 (${[badCpu && "cpu", badMem && "memory"].filter(Boolean).join(", ")})`]));
+    }
+
+    // GPU section — VRAM-based: workload은 node GPU의 VRAM을 소비하는 주체 (개수가 아닌 메모리).
+    root.appendChild(el("div", { class: "section-title" }, ["GPU (선택) — VRAM 소비량 기준"]));
+    const gpuModels = state.catalog.gpuModels;
+    const gpuReq = reqs.gpu || {};
+    // Models actually installed in this cluster's worker nodes.
+    const installedModels = new Set();
+    const installedVramByModel = new Map();
+    for (const nid of (cluster.node_ids || [])) {
+      const nd = state.project.nodes.find(x => x.id === nid);
+      if (!nd || !(nd.cluster_roles || []).includes("worker")) continue;
+      for (const g of (nd.spec?.gpu || [])) {
+        if (g.model && (g.count || 0) > 0) {
+          installedModels.add(g.model);
+          const vram = (g.count || 0) * (gpuModels[g.model]?.vram_gb || 0);
+          installedVramByModel.set(g.model, (installedVramByModel.get(g.model) || 0) + vram);
+        }
+      }
+    }
+    // Always include the currently-selected model so existing data is not orphaned.
+    if (gpuReq.model) installedModels.add(gpuReq.model);
+    const modelOptions = [...installedModels].sort();
+
+    root.appendChild(el("div", { class: "field-row" }, [
+      el("div", { class: "field" }, [
+        lbl("GPU VRAM (GB / pod)", "resources.gpu_vram"),
+        el("input", {
+          "data-focus-key": `workload.${id}.gpu_vram`,
+          type: "text", inputmode: "decimal", pattern: "[0-9]*\\.?[0-9]*",
+          value: gpuReq.vram_gb != null ? gpuReq.vram_gb : "",
+          placeholder: "예: 80 — 비우면 GPU 미요청",
+          onfocus: focusSelectAll,
           oninput: e => {
-            const cnt = parseInt(e.target.value) || 0;
-            if (cnt > 0) updateWorkloadField(id, "resources.requests.gpu", { ...gpuReq, count: cnt });
-            else updateWorkloadField(id, "resources.requests.gpu", undefined);
+            const raw = e.target.value;
+            if (raw === "") {
+              updateWorkloadField(id, "resources.requests.gpu", undefined);
+              return;
+            }
+            const v = parseDecimalInput(raw);
+            if (v == null || v <= 0) return;
+            // Keep count=1 for schema validity; scheduler ignores it when vram_gb is set.
+            updateWorkloadField(id, "resources.requests.gpu", { ...gpuReq, vram_gb: v, count: gpuReq.count || 1 });
           },
         }),
       ]),
       el("div", { class: "field" }, [
-        lbl("GPU model (선택)", "resources.gpu_model"),
-        el("select", { onchange: e => {
-          const model = e.target.value || undefined;
-          if (gpuReq.count) updateWorkloadField(id, "resources.requests.gpu", { ...gpuReq, model });
-        }}, [
-          el("option", { value: "" }, ["(any)"]),
-          ...Object.keys(gpuModels).map(k =>
-            el("option", { value: k, selected: gpuReq.model === k ? "" : null }, [k])),
+        lbl("GPU model (cluster 장착 모델)", "resources.gpu_model"),
+        el("select", {
+          disabled: !gpuReq.vram_gb && !gpuReq.count ? true : null,
+          onchange: e => {
+            const model = e.target.value || undefined;
+            if (gpuReq.vram_gb || gpuReq.count) {
+              updateWorkloadField(id, "resources.requests.gpu", { ...gpuReq, model });
+            }
+          },
+        }, [
+          el("option", { value: "" }, [
+            modelOptions.length
+              ? `(any — installed 합산: ${[...installedVramByModel.values()].reduce((a,b)=>a+b,0)} GB)`
+              : "(cluster에 GPU 노드 없음)",
+          ]),
+          ...modelOptions.map(k => {
+            const installedV = installedVramByModel.get(k);
+            const label = installedV != null
+              ? `${k} · ${gpuModels[k]?.vram_gb || "?"} GB/card · cluster ${installedV} GB`
+              : `${k} · ${gpuModels[k]?.vram_gb || "?"} GB/card · (not installed)`;
+            return el("option", { value: k, selected: gpuReq.model === k ? "" : null }, [label]);
+          }),
         ]),
       ]),
     ]));
+    // Hint when workload picks a model that no worker in this cluster actually has.
+    if (gpuReq.model && !installedVramByModel.has(gpuReq.model)) {
+      root.appendChild(el("div", {
+        style: { fontSize: "11px", color: "var(--yellow)", padding: "4px 0", fontFamily: "JetBrains Mono" },
+      }, [`▲ '${gpuReq.model}'은 이 cluster의 어떤 worker에도 장착돼 있지 않습니다 — 스케줄 불가`]));
+    }
+    // Legacy count-based data hint.
+    if (gpuReq.count && !gpuReq.vram_gb) {
+      root.appendChild(el("div", {
+        style: { fontSize: "11px", color: "var(--text3)", padding: "4px 0", fontFamily: "JetBrains Mono" },
+      }, [`ℹ legacy: GPU count=${gpuReq.count} 모드. VRAM(GB)을 입력하면 VRAM 기준 스케줄로 전환됩니다.`]));
+    }
 
     root.appendChild(el("div", { class: "section-title" }, ["Cluster total"]));
+    const totalGpuLine = gpuReq.vram_gb
+      ? `${(gpuReq.vram_gb * (w.replicas || 1)).toFixed(0)} GB VRAM${gpuReq.model ? ` (${gpuReq.model})` : " (any)"}`
+      : gpuReq.count ? `${gpuReq.count * (w.replicas || 1)} GPUs` : "no GPU";
     root.appendChild(el("div", { class: "compat-result" }, [
-      el("div", {}, [`${totalCpu} vCPU · ${totalMem} GB RAM · ${gpuReq.count ? `${gpuReq.count * (w.replicas || 1)} GPUs` : "no GPU"}`]),
+      el("div", {}, [`${totalCpu} vCPU · ${totalMem} GB RAM · ${totalGpuLine}`]),
       el("div", { style: { color: "var(--text2)" } }, [`(per pod × ${w.replicas} replicas)`]),
     ]));
 
     // Persistent Volumes
     const pvs = w.persistent_volumes || [];
+    // Storages bound to this cluster (across all sites) — eligible PVC targets.
+    const availStorages = [];
+    for (const s of (state.project.sites || [])) {
+      for (const st of (s.storages || [])) {
+        if ((st.target_cluster_ids || []).includes(cluster.id)) {
+          availStorages.push({ id: st.id, name: st.name, siteName: s.name, kind: st.kind, protocol: st.protocol });
+        }
+      }
+    }
     root.appendChild(el("div", { class: "section-title" }, [`Persistent Volumes (${pvs.length})`, helpIcon("workload.pvc")]));
+    if (availStorages.length === 0 && !cluster.addons?.local_pv) {
+      root.appendChild(el("div", { class: "empty-hint" }, [
+        "사용 가능한 storage 옵션이 없습니다. 1) Site 인스펙터에서 Storage 추가 후 target에 이 클러스터 지정, 또는 2) 클러스터 addons에서 Local PV Provisioner 활성화.",
+      ]));
+    }
     for (let i = 0; i < pvs.length; i++) {
       const pv = pvs[i];
       root.appendChild(el("div", {
@@ -5320,10 +6188,14 @@ function renderWorkloadInspector(root, id) {
             el("label", { style: { fontSize: "10px" } }, ["size GB"]),
             el("input", {
               "data-focus-key": `workload.${id}.pvc.${i}.size`,
-              type: "number", min: "0", style: { padding: "4px 6px", fontSize: "11px" },
-              value: pv.size_gb || 0,
+              type: "text", inputmode: "decimal", pattern: "[0-9]*\\.?[0-9]*",
+              style: { padding: "4px 6px", fontSize: "11px" },
+              value: pv.size_gb != null ? pv.size_gb : "",
+              onfocus: focusSelectAll,
               oninput: e => {
-                const ns = [...pvs]; ns[i] = { ...ns[i], size_gb: parseFloat(e.target.value) || 0 };
+                const v = parseDecimalInput(e.target.value);
+                if (v == null || v <= 0) return;
+                const ns = [...pvs]; ns[i] = { ...ns[i], size_gb: v };
                 updateWorkloadField(id, "persistent_volumes", ns);
               },
             }),
@@ -5353,19 +6225,113 @@ function renderWorkloadInspector(root, id) {
               el("option", { value: am, selected: am === (pv.access_mode || "RWO") ? "" : null }, [am]))),
           ]),
           el("button", {
-            class: "x", style: { padding: "4px 8px" },
+            title: "Remove this PVC",
+            style: {
+              padding: "4px 10px", fontSize: "12px", lineHeight: "1",
+              color: "var(--red)", border: "1px solid var(--border)",
+              borderRadius: "4px", background: "var(--surface)",
+              cursor: "pointer",
+            },
+            onmouseover: e => { e.target.style.background = "rgba(248,113,113,.12)"; e.target.style.borderColor = "var(--red)"; },
+            onmouseout: e => { e.target.style.background = "var(--surface)"; e.target.style.borderColor = "var(--border)"; },
             onclick: () => {
+              const label = pv.name || `data-${i}`;
+              if (!confirm(`PVC '${label}' (${pv.size_gb}GB) 삭제? 워크로드의 마운트가 제거됩니다.`)) return;
               const ns = pvs.filter((_, j) => j !== i);
               updateWorkloadField(id, "persistent_volumes", ns);
             },
-          }, ["✕"]),
+          }, ["✕ Delete"]),
         ]),
+        // Name + mount path (row 2)
+        el("div", { class: "field", style: { margin: "6px 0 0", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" } }, [
+          el("div", { style: { display: "flex", gap: "4px", alignItems: "center" } }, [
+            el("label", { style: { fontSize: "10px", margin: 0, minWidth: "30px" } }, ["name"]),
+            el("input", {
+              "data-focus-key": `workload.${id}.pvc.${i}.name`,
+              style: { padding: "3px 6px", fontSize: "11px", flex: 1 },
+              value: pv.name || "",
+              placeholder: `data-${i}`,
+              oninput: e => {
+                const ns = [...pvs];
+                const v = e.target.value.trim();
+                if (v) ns[i] = { ...ns[i], name: v };
+                else { const { name, ...rest } = ns[i]; ns[i] = rest; }
+                updateWorkloadField(id, "persistent_volumes", ns);
+              },
+            }),
+          ]),
+          el("div", { style: { display: "flex", gap: "4px", alignItems: "center" } }, [
+            el("label", { style: { fontSize: "10px", margin: 0, minWidth: "40px" } }, ["mount"]),
+            el("input", {
+              "data-focus-key": `workload.${id}.pvc.${i}.mount`,
+              style: { padding: "3px 6px", fontSize: "11px", flex: 1 },
+              value: pv.mount_path || "",
+              placeholder: `/data/${pv.name || `data-${i}`}`,
+              oninput: e => {
+                const ns = [...pvs];
+                const v = e.target.value.trim();
+                if (v) ns[i] = { ...ns[i], mount_path: v };
+                else { const { mount_path, ...rest } = ns[i]; ns[i] = rest; }
+                updateWorkloadField(id, "persistent_volumes", ns);
+              },
+            }),
+          ]),
+        ]),
+        // Unified storage picker (row 3): Local PV + external storages
+        (() => {
+          const lpv = cluster.addons?.local_pv;
+          const lpvClass = LOCAL_PV_STORAGE_CLASS[lpv];
+          // Determine current selection from PV state
+          let currentValue = "";
+          if (pv.target_storage_id) currentValue = `ext:${pv.target_storage_id}`;
+          else if (lpvClass && pv.storage_class === lpvClass) currentValue = "localpv";
+          else if (pv.storage_class) currentValue = "custom";
+          return el("div", { class: "field", style: { margin: "6px 0 0", display: "flex", gap: "6px", alignItems: "center" } }, [
+            el("label", { style: { fontSize: "10px", margin: 0, minWidth: "44px" } }, ["target"]),
+            el("select", {
+              style: { padding: "3px 6px", fontSize: "11px", flex: 1 },
+              onchange: e => {
+                const v = e.target.value;
+                const ns = [...pvs];
+                const cur = { ...ns[i] };
+                delete cur.target_storage_id;
+                if (v === "") {
+                  cur.storage_class = "";
+                } else if (v === "localpv") {
+                  cur.storage_class = lpvClass || "local-path";
+                } else if (v === "custom") {
+                  // keep storage_class as-is (user will edit)
+                } else if (v.startsWith("ext:")) {
+                  const sid = v.slice(4);
+                  cur.target_storage_id = sid;
+                  const st = availStorages.find(x => x.id === sid);
+                  if (st) cur.storage_class = st.name;
+                }
+                ns[i] = cur;
+                updateWorkloadField(id, "persistent_volumes", ns);
+              },
+            }, [
+              el("option", { value: "", selected: currentValue === "" ? "" : null }, ["(none — dynamic provisioning by class)"]),
+              lpvClass ? el("option", { value: "localpv", selected: currentValue === "localpv" ? "" : null }, [`📍 Local PV: ${lpvClass} (${lpv})`]) : null,
+              ...availStorages.map(st => el("option", {
+                value: `ext:${st.id}`, selected: currentValue === `ext:${st.id}` ? "" : null,
+              }, [`🗄 External: ${st.name} · ${st.kind}/${st.protocol} @ ${st.siteName}`])),
+              el("option", { value: "custom", selected: currentValue === "custom" ? "" : null }, ["✎ (custom — edit storage_class manually)"]),
+            ]),
+          ]);
+        })(),
       ]));
     }
     root.appendChild(el("button", {
       class: "add-btn", style: { width: "100%", marginTop: "4px" },
       onclick: () => {
-        const ns = [...pvs, { size_gb: 10, access_mode: "RWO", storage_class: "" }];
+        const seed = { size_gb: 10, access_mode: "RWO", storage_class: "" };
+        // Pre-bind to the only available storage if there's exactly one
+        if (availStorages.length === 1) {
+          seed.target_storage_id = availStorages[0].id;
+          seed.storage_class = availStorages[0].name;
+        }
+        const ns = [...pvs, seed];
         updateWorkloadField(id, "persistent_volumes", ns);
       },
     }, ["＋ Add PVC"]));
@@ -5424,8 +6390,15 @@ function renderWorkloadInspector(root, id) {
         lbl("Max threads / workers", "runtime.max_threads"),
         el("input", {
           "data-focus-key": `workload.${id}.runtime.threads`,
-          type: "number", min: "1", value: conc.max_threads || conc.workers || "",
-          oninput: e => updateWorkloadField(id, "runtime.concurrency." + (conc.model === "process-pool" ? "workers" : "max_threads"), parseInt(e.target.value) || undefined),
+          type: "text", inputmode: "numeric", pattern: "[0-9]*",
+          value: conc.max_threads != null ? conc.max_threads : (conc.workers != null ? conc.workers : ""),
+          oninput: e => {
+            const raw = e.target.value;
+            const key = conc.model === "process-pool" ? "workers" : "max_threads";
+            if (raw === "") return updateWorkloadField(id, `runtime.concurrency.${key}`, undefined);
+            const v = parseIntInput(raw);
+            if (v != null && v >= 1) updateWorkloadField(id, `runtime.concurrency.${key}`, v);
+          },
         }),
       ]),
     ]));
@@ -5435,16 +6408,28 @@ function renderWorkloadInspector(root, id) {
         lbl("Heap (GB)", "runtime.heap_gb"),
         el("input", {
           "data-focus-key": `workload.${id}.runtime.heap_gb`,
-          type: "number", min: "0", step: "0.5", value: conc.heap_gb || "",
-          oninput: e => updateWorkloadField(id, "runtime.concurrency.heap_gb", parseFloat(e.target.value) || undefined),
+          type: "text", inputmode: "decimal", pattern: "[0-9]*\\.?[0-9]*",
+          value: conc.heap_gb != null ? conc.heap_gb : "",
+          oninput: e => {
+            const raw = e.target.value;
+            if (raw === "") return updateWorkloadField(id, "runtime.concurrency.heap_gb", undefined);
+            const v = parseDecimalInput(raw);
+            if (v != null && v > 0) updateWorkloadField(id, "runtime.concurrency.heap_gb", v);
+          },
         }),
       ]),
       el("div", { class: "field" }, [
         lbl("DB max_connections", "runtime.max_connections"),
         el("input", {
           "data-focus-key": `workload.${id}.runtime.max_connections`,
-          type: "number", min: "1", value: r.max_connections || "",
-          oninput: e => updateWorkloadField(id, "runtime.max_connections", parseInt(e.target.value) || undefined),
+          type: "text", inputmode: "numeric", pattern: "[0-9]*",
+          value: r.max_connections != null ? r.max_connections : "",
+          oninput: e => {
+            const raw = e.target.value;
+            if (raw === "") return updateWorkloadField(id, "runtime.max_connections", undefined);
+            const v = parseIntInput(raw);
+            if (v != null && v >= 1) updateWorkloadField(id, "runtime.max_connections", v);
+          },
         }),
       ]),
     ]));
@@ -5514,24 +6499,44 @@ function renderWorkloadInspector(root, id) {
               el("label", { style: { fontSize: "10px" } }, ["port"]),
               el("input", {
                 "data-focus-key": `workload.${id}.svc.ports.${i}.port`,
-                type: "number", value: p.port || 0,
+                type: "text", inputmode: "numeric", pattern: "[0-9]*",
+                value: p.port != null ? p.port : "",
                 style: { padding: "4px 6px", fontSize: "11px" },
-                oninput: e => updateServicePort(id, i, { port: parseInt(e.target.value) || 0 }),
+                oninput: e => {
+                  const v = parseIntInput(e.target.value);
+                  if (v != null && v > 0) updateServicePort(id, i, { port: v });
+                },
               }),
             ]),
             el("div", { class: "field", style: { margin: 0 } }, [
               el("label", { style: { fontSize: "10px" } }, ["target"]),
               el("input", {
                 "data-focus-key": `workload.${id}.svc.ports.${i}.target_port`,
-                type: "number", value: p.target_port || p.port || 0,
+                type: "text", inputmode: "numeric", pattern: "[0-9]*",
+                value: p.target_port != null ? p.target_port : (p.port || ""),
                 style: { padding: "4px 6px", fontSize: "11px" },
-                oninput: e => updateServicePort(id, i, { target_port: parseInt(e.target.value) || 0 }),
+                oninput: e => {
+                  const v = parseIntInput(e.target.value);
+                  if (v != null && v > 0) updateServicePort(id, i, { target_port: v });
+                },
               }),
             ]),
             el("button", {
-              class: "x", style: { padding: "4px 8px" },
-              onclick: () => removeServicePort(id, i),
-            }, ["✕"]),
+              title: "Remove this port",
+              style: {
+                padding: "4px 10px", fontSize: "12px", lineHeight: "1",
+                color: "var(--red)", border: "1px solid var(--border)",
+                borderRadius: "4px", background: "var(--surface)",
+                cursor: "pointer",
+              },
+              onmouseover: e => { e.target.style.background = "rgba(248,113,113,.12)"; e.target.style.borderColor = "var(--red)"; },
+              onmouseout: e => { e.target.style.background = "var(--surface)"; e.target.style.borderColor = "var(--border)"; },
+              onclick: () => {
+                const label = p.name || `port-${p.port}`;
+                if (!confirm(`Port '${label}' 삭제?`)) return;
+                removeServicePort(id, i);
+              },
+            }, ["✕ Delete"]),
           ]),
           showNodePort ? el("div", { class: "field-row", style: { marginTop: "6px" } }, [
             el("div", { class: "field", style: { margin: 0 } }, [
@@ -5541,10 +6546,15 @@ function renderWorkloadInspector(root, id) {
               ]),
               el("input", {
                 "data-focus-key": `workload.${id}.svc.ports.${i}.node_port`,
-                type: "number", min: "30000", max: "32767",
-                value: p.node_port || "",
+                type: "text", inputmode: "numeric", pattern: "[0-9]*",
+                value: p.node_port != null ? p.node_port : "",
                 style: { padding: "4px 6px", fontSize: "11px" },
-                oninput: e => updateServicePort(id, i, { node_port: parseInt(e.target.value) || undefined }),
+                oninput: e => {
+                  const raw = e.target.value;
+                  if (raw === "") return updateServicePort(id, i, { node_port: undefined });
+                  const v = parseIntInput(raw);
+                  if (v != null && v >= 30000 && v <= 32767) updateServicePort(id, i, { node_port: v });
+                },
               }),
             ]),
             el("div", { class: "field", style: { margin: 0 } }, [
@@ -5624,33 +6634,59 @@ function renderWorkloadInspector(root, id) {
             el("label", { style: { fontSize: "10px" } }, ["port"]),
             el("input", {
               "data-focus-key": `workload.${id}.deps.${i}.port`,
-              type: "number", min: "1", max: "65535",
+              type: "text", inputmode: "numeric", pattern: "[0-9]*",
               style: { padding: "4px 6px", fontSize: "11px" },
-              value: d.port || "",
+              value: d.port != null ? d.port : "",
               oninput: e => {
-                const ns = [...deps]; ns[i] = { ...ns[i], port: parseInt(e.target.value) || undefined };
+                const raw = e.target.value;
+                const ns = [...deps];
+                if (raw === "") {
+                  const { port, ...rest } = ns[i]; ns[i] = rest;
+                } else {
+                  const v = parseIntInput(raw);
+                  if (v == null || v < 1 || v > 65535) return;
+                  ns[i] = { ...ns[i], port: v };
+                }
                 updateWorkloadField(id, "depends_on", ns);
               },
             }),
           ]),
           el("button", {
-            class: "x", style: { padding: "4px 8px" },
+            title: "Remove this dependency",
+            style: {
+              padding: "4px 10px", fontSize: "12px", lineHeight: "1",
+              color: "var(--red)", border: "1px solid var(--border)",
+              borderRadius: "4px", background: "var(--surface)",
+              cursor: "pointer",
+            },
+            onmouseover: e => { e.target.style.background = "rgba(248,113,113,.12)"; e.target.style.borderColor = "var(--red)"; },
+            onmouseout: e => { e.target.style.background = "var(--surface)"; e.target.style.borderColor = "var(--border)"; },
             onclick: () => {
+              const tn = target?.name || "(unknown)";
+              if (!confirm(`Dependency → '${tn}' 삭제?`)) return;
               const ns = deps.filter((_, j) => j !== i);
               updateWorkloadField(id, "depends_on", ns);
             },
-          }, ["✕"]),
+          }, ["✕ Delete"]),
         ]),
         el("div", { class: "field-row", style: { marginTop: "4px" } }, [
           el("div", { class: "field", style: { margin: 0 } }, [
             el("label", { style: { fontSize: "10px" } }, ["avg call ms"]),
             el("input", {
               "data-focus-key": `workload.${id}.deps.${i}.avg_call`,
-              type: "number", min: "0", step: "1",
+              type: "text", inputmode: "decimal", pattern: "[0-9]*\\.?[0-9]*",
               style: { padding: "4px 6px", fontSize: "11px" },
-              value: d.avg_call_ms || "",
+              value: d.avg_call_ms != null ? d.avg_call_ms : "",
               oninput: e => {
-                const ns = [...deps]; ns[i] = { ...ns[i], avg_call_ms: parseFloat(e.target.value) || undefined };
+                const raw = e.target.value;
+                const ns = [...deps];
+                if (raw === "") {
+                  const { avg_call_ms, ...rest } = ns[i]; ns[i] = rest;
+                } else {
+                  const v = parseDecimalInput(raw);
+                  if (v == null || v < 0) return;
+                  ns[i] = { ...ns[i], avg_call_ms: v };
+                }
                 updateWorkloadField(id, "depends_on", ns);
               },
             }),
@@ -5659,11 +6695,15 @@ function renderWorkloadInspector(root, id) {
             el("label", { style: { fontSize: "10px" } }, ["fanout %"]),
             el("input", {
               "data-focus-key": `workload.${id}.deps.${i}.fanout`,
-              type: "number", min: "0", max: "100", step: "1",
+              type: "text", inputmode: "decimal", pattern: "[0-9]*\\.?[0-9]*",
               style: { padding: "4px 6px", fontSize: "11px" },
-              value: d.fanout_pct || 100,
+              value: d.fanout_pct != null ? d.fanout_pct : 100,
               oninput: e => {
-                const ns = [...deps]; ns[i] = { ...ns[i], fanout_pct: parseFloat(e.target.value) || 100 };
+                const raw = e.target.value;
+                if (raw === "") return;
+                const v = parseDecimalInput(raw);
+                if (v == null || v < 0 || v > 100) return;
+                const ns = [...deps]; ns[i] = { ...ns[i], fanout_pct: v };
                 updateWorkloadField(id, "depends_on", ns);
               },
             }),
@@ -5672,11 +6712,15 @@ function renderWorkloadInspector(root, id) {
             el("label", { style: { fontSize: "10px" } }, ["calls/req"]),
             el("input", {
               "data-focus-key": `workload.${id}.deps.${i}.calls_per_request`,
-              type: "number", min: "0.1", step: "0.1",
+              type: "text", inputmode: "decimal", pattern: "[0-9]*\\.?[0-9]*",
               style: { padding: "4px 6px", fontSize: "11px" },
-              value: d.calls_per_request || 1,
+              value: d.calls_per_request != null ? d.calls_per_request : 1,
               oninput: e => {
-                const ns = [...deps]; ns[i] = { ...ns[i], calls_per_request: parseFloat(e.target.value) || 1 };
+                const raw = e.target.value;
+                if (raw === "") return;
+                const v = parseDecimalInput(raw);
+                if (v == null || v <= 0) return;
+                const ns = [...deps]; ns[i] = { ...ns[i], calls_per_request: v };
                 updateWorkloadField(id, "depends_on", ns);
               },
             }),
@@ -5719,12 +6763,12 @@ function renderGpuRowEditable(n, idx, supportedModels, gpuModels) {
 
   const countInput = el("input", {
     "data-focus-key": `node.${n.id}.gpu.${idx}.count`,
-    type: "number", min: "1", max: String(myMax), value: g.count,
+    type: "text", inputmode: "numeric", pattern: "[0-9]*",
+    value: g.count != null ? g.count : 1,
     style: { padding: "5px 6px", background: "var(--surface3)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: "4px", fontSize: "12px", width: "60px", textAlign: "center" },
     oninput: e => {
-      let v = parseInt(e.target.value) || 1;
-      if (v < 1) v = 1;
-      if (v > myMax) { v = myMax; e.target.value = String(myMax); }
+      const v = parseIntInput(e.target.value);
+      if (v == null || v < 1 || v > myMax) return;
       updateNodeGpu(n.id, idx, { count: v });
     },
   });
@@ -5782,14 +6826,20 @@ function renderDiskRowEditable(n, idx) {
     value: String(d.size_gb || 0),
     style: inputStyle,
     disabled: readOnly ? "" : null,
+    onfocus: focusSelectAll,
     oninput: e => updateNodeDisk(n.id, idx, { size_gb: e.target.value }),
   });
   const countInput = el("input", {
     "data-focus-key": `node.${n.id}.disk.${idx}.count`,
-    type: "number", min: "1", value: String(d.count || 1),
+    type: "text", inputmode: "numeric", pattern: "[0-9]*",
+    value: d.count != null ? d.count : 1,
     style: inputStyle,
     disabled: readOnly ? "" : null,
-    oninput: e => updateNodeDisk(n.id, idx, { count: e.target.value }),
+    oninput: e => {
+      const v = parseIntInput(e.target.value);
+      if (v == null || v < 1) return;
+      updateNodeDisk(n.id, idx, { count: v });
+    },
   });
   const typeSel = el("select", {
     style: inputStyle,
@@ -5797,6 +6847,19 @@ function renderDiskRowEditable(n, idx) {
     onchange: e => updateNodeDisk(n.id, idx, { type: e.target.value }),
   }, ["NVMe", "SSD", "HDD"].map(t =>
     el("option", { value: t, selected: t === (d.type || "NVMe") ? "" : null }, [t])));
+  const raidSel = el("select", {
+    style: inputStyle,
+    disabled: readOnly ? "" : null,
+    onchange: e => updateNodeDisk(n.id, idx, { raid: e.target.value }),
+    title: "RAID 레벨",
+  }, [
+    { v: "none", t: "none" },
+    { v: "0",    t: "RAID 0" },
+    { v: "1",    t: "RAID 1" },
+    { v: "5",    t: "RAID 5" },
+    { v: "6",    t: "RAID 6" },
+    { v: "10",   t: "RAID 10" },
+  ].map(o => el("option", { value: o.v, selected: o.v === (d.raid || "none") ? "" : null }, [o.t])));
 
   const removeBtn = readOnly ? null : el("button", {
     class: "x", title: "remove",
@@ -5805,25 +6868,40 @@ function renderDiskRowEditable(n, idx) {
   }, ["✕"]);
 
   const headRow = el("div", {
-    style: { display: "grid", gridTemplateColumns: "1fr 70px 80px auto", gap: "6px", alignItems: "end" },
+    style: { display: "grid", gridTemplateColumns: "1fr 54px 64px 76px auto", gap: "6px", alignItems: "end" },
   }, [
     el("div", { class: "field", style: { margin: 0 } }, [el("label", { style: labelStyle }, ["size (GB)"]), sizeInput]),
     el("div", { class: "field", style: { margin: 0 } }, [el("label", { style: labelStyle }, ["count"]), countInput]),
     el("div", { class: "field", style: { margin: 0 } }, [el("label", { style: labelStyle }, ["type"]), typeSel]),
+    el("div", { class: "field", style: { margin: 0 } }, [el("label", { style: labelStyle }, ["RAID"]), raidSel]),
     removeBtn || el("span", {}, [""]),
   ]);
 
-  const totalGb = (Number(d.size_gb) || 0) * (parseInt(d.count) || 1);
+  const raw = (Number(d.size_gb) || 0) * (parseInt(d.count) || 1);
+  const r = raidUsable(d);
+  const hasRaid = (d.raid || "none") !== "none";
+  const overhead = raw > 0 ? Math.round((1 - r.usable_gb / raw) * 100) : 0;
   const sumLine = el("div", {
     style: { fontSize: "10px", color: "var(--text3)", marginTop: "4px", fontFamily: "JetBrains Mono" },
   }, [
-    `${d.count || 1}× ${d.size_gb || 0} GB = ${totalGb.toLocaleString()} GB`,
+    `${d.count || 1}× ${d.size_gb || 0} GB · raw ${raw.toLocaleString()} GB`,
+    hasRaid ? `  →  usable ${r.usable_gb.toLocaleString()} GB (RAID ${d.raid}, -${overhead}%)` : "",
     d.iops_hint ? `  ·  ${d.iops_hint.toLocaleString()} IOPS` : "",
   ]);
 
+  const warnLine = (hasRaid && !r.valid)
+    ? el("div", {
+        style: { fontSize: "10px", color: "var(--yellow)", marginTop: "2px", fontFamily: "JetBrains Mono" },
+      }, [
+        d.raid === "10" && (parseInt(d.count) || 1) % 2 !== 0
+          ? `▲ RAID 10은 짝수 디스크 필요 (현재 ${d.count})`
+          : `▲ RAID ${d.raid}은 최소 ${r.min_count}개 디스크 필요 (현재 ${d.count})`,
+      ])
+    : null;
+
   return el("div", {
     style: { background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: "5px", padding: "8px 10px", marginBottom: "6px" },
-  }, [headRow, sumLine]);
+  }, [headRow, sumLine, warnLine]);
 }
 
 function moveNodeToSite(nodeId, newSiteId) {
@@ -6388,6 +7466,8 @@ function renderTopologyDiagram(root, p) {
   defs.appendChild(mkMarker("arrow-green", colors.green));
   defs.appendChild(mkMarker("arrow-purple", colors.purple));
   defs.appendChild(mkMarker("arrow-orange", colors.orange));
+  defs.appendChild(mkMarker("arrow-red", "#f87171"));
+  defs.appendChild(mkMarker("arrow-gray", colors.text3));
   root_svg.appendChild(defs);
 
   // Read layer toggles
@@ -6428,74 +7508,162 @@ function renderTopologyDiagram(root, p) {
     }, [`⎈ ${cb.cluster.name}`]));
   }
 
+  // ---- Connection-line routing helpers ----
+  // Each obstacle is a tagged rect (id is `${kind}:${itemId}`). Shrink by 2px so
+  // endpoints sitting on a box edge don't register as crossings.
+  const obstacles = [];
+  for (const ip of placed) {
+    if (!ip.item || ip.kind === "site" || ip.kind === "_cluster_bounds") continue;
+    obstacles.push({
+      id: `${ip.kind}:${ip.item.id}`,
+      x: ip.x + 2, y: ip.y + 2, w: ip.w - 4, h: ip.h - 4,
+    });
+  }
+  const segHitsRect = (x1, y1, x2, y2, r) => {
+    const sMinX = Math.min(x1, x2), sMaxX = Math.max(x1, x2);
+    const sMinY = Math.min(y1, y2), sMaxY = Math.max(y1, y2);
+    if (sMaxX <= r.x || sMinX >= r.x + r.w) return false;
+    if (sMaxY <= r.y || sMinY >= r.y + r.h) return false;
+    if (x1 === x2) return x1 > r.x && x1 < r.x + r.w && sMaxY > r.y && sMinY < r.y + r.h;
+    if (y1 === y2) return y1 > r.y && y1 < r.y + r.h && sMaxX > r.x && sMinX < r.x + r.w;
+    // Liang–Barsky for diagonals
+    const dx = x2 - x1, dy = y2 - y1;
+    const p = [-dx, dx, -dy, dy];
+    const q = [x1 - r.x, r.x + r.w - x1, y1 - r.y, r.y + r.h - y1];
+    let tE = 0, tX = 1;
+    for (let i = 0; i < 4; i++) {
+      if (p[i] === 0) { if (q[i] < 0) return false; }
+      else {
+        const t = q[i] / p[i];
+        if (p[i] < 0) { if (t > tX) return false; if (t > tE) tE = t; }
+        else { if (t < tE) return false; if (t < tX) tX = t; }
+      }
+    }
+    return tE < tX;
+  };
+  const segHitsAny = (x1, y1, x2, y2, obs) => {
+    for (const o of obs) if (segHitsRect(x1, y1, x2, y2, o)) return true;
+    return false;
+  };
+  // Returns SVG path "d" — straight if clear, else orthogonal 3-segment detour.
+  const routePath = (x1, y1, x2, y2, excludeIds) => {
+    const obs = excludeIds && excludeIds.size
+      ? obstacles.filter(o => !excludeIds.has(o.id))
+      : obstacles;
+    if (!segHitsAny(x1, y1, x2, y2, obs)) return `M ${x1},${y1} L ${x2},${y2}`;
+    const midY = (y1 + y2) / 2;
+    for (const dy of [0, 12, -12, 25, -25, 40, -40, 60, -60]) {
+      const my = midY + dy;
+      if (!segHitsAny(x1, y1, x1, my, obs)
+          && !segHitsAny(x1, my, x2, my, obs)
+          && !segHitsAny(x2, my, x2, y2, obs)) {
+        return `M ${x1},${y1} L ${x1},${my} L ${x2},${my} L ${x2},${y2}`;
+      }
+    }
+    const midX = (x1 + x2) / 2;
+    for (const dx of [0, 30, -30, 60, -60, 100, -100]) {
+      const mx = midX + dx;
+      if (!segHitsAny(x1, y1, mx, y1, obs)
+          && !segHitsAny(mx, y1, mx, y2, obs)
+          && !segHitsAny(mx, y2, x2, y2, obs)) {
+        return `M ${x1},${y1} L ${mx},${y1} L ${mx},${y2} L ${x2},${y2}`;
+      }
+    }
+    return `M ${x1},${y1} L ${x2},${y2}`;
+  };
+  // Endpoint helper: return the center of the box face nearest to (srcX, srcY).
+  // Priority: if the source is above/below the box (vertically outside the box's
+  // y-extent), pick top/bottom face regardless of horizontal distance. Only when
+  // the source is at the box's y-range do we fall back to a left/right face.
+  const nearestFaceCenter = (box, srcX, srcY) => {
+    const cx = box.x + box.w / 2;
+    const cy = box.y + box.h / 2;
+    if (srcY < box.y) return { x: cx, y: box.y };
+    if (srcY > box.y + box.h) return { x: cx, y: box.y + box.h };
+    return srcX < cx ? { x: box.x, y: cy } : { x: box.x + box.w, y: cy };
+  };
+
+  // Selectable connection. Returns a <g> with hit layer + visible layer (+ halo if selected).
+  // baseAttrs: { stroke, "stroke-width", "stroke-opacity", "stroke-dasharray"?, "marker-end"? }
+  const drawConn = (lineId, x1, y1, x2, y2, excludeIds, baseAttrs) => {
+    const d = routePath(x1, y1, x2, y2, excludeIds);
+    const override = state.project?.line_styles?.[lineId];
+    const isSelected = state.ui.selectedKind === "line" && state.ui.selectedId === lineId;
+
+    // Apply style override
+    const vis = { ...baseAttrs, fill: "none" };
+    if (override?.color && LINE_COLOR_PRESETS[override.color]) {
+      vis.stroke = LINE_COLOR_PRESETS[override.color];
+      if (vis["marker-end"]) vis["marker-end"] = `url(#arrow-${override.color})`;
+    }
+    if (override?.style === "solid") delete vis["stroke-dasharray"];
+    else if (override?.style === "dashed") vis["stroke-dasharray"] = "5,3";
+    else if (override?.style === "dotted") vis["stroke-dasharray"] = "1,3";
+    vis["pointer-events"] = "none";
+
+    const g = svg("g", { "data-line-id": lineId });
+    if (isSelected) {
+      g.appendChild(svg("path", {
+        d, fill: "none",
+        stroke: vis.stroke || colors.accent,
+        "stroke-width": (parseFloat(vis["stroke-width"]) || 2) + 6,
+        "stroke-opacity": 0.25, "pointer-events": "none",
+      }));
+    }
+    g.appendChild(svg("path", { d, ...vis }));
+    g.appendChild(svg("path", {
+      d, fill: "none",
+      stroke: "transparent", "stroke-width": 14,
+      "pointer-events": "stroke", style: "cursor:pointer",
+      onclick: e => { e.stopPropagation(); selectEntity("line", lineId); },
+    }));
+    return g;
+  };
+
+  const LINE_COLOR_PRESETS_KEYS = ["accent", "green", "orange", "red", "purple", "gray"];
+
   // STEP 2: Draw connection lines (above site rects, below inner boxes)
   // ── Compute layer ──
   if (layers.compute) {
-  // L4 → worker nodes
+  // L4 → cluster. Only draws when target_cluster_ids is set; empty = no connection.
   for (const it of placed) {
     if (it.kind !== "l4") continue;
     const targets = it.item.target_cluster_ids || [];
-    let targetNodes = [];
-    if (targets.length) {
-      for (const cid of targets) {
-        const c = p.clusters.find(x => x.id === cid);
-        if (!c) continue;
-        for (const nid of c.node_ids || []) {
-          const n = p.nodes.find(x => x.id === nid);
-          if (n && (n.cluster_roles || []).includes("worker")) {
-            const placement = placedById.get("node:" + nid);
-            if (placement) targetNodes.push(placement);
-          }
-        }
-      }
-    } else {
-      // Fallback: same-site worker nodes
-      const owner = ownerSiteOf("l4")(it.item.id);
-      const ownerSiteId = owner?.item?.id;
-      for (const np of placed) {
-        if (np.kind !== "node") continue;
-        if (ownerSiteId && np.item.site_id !== ownerSiteId) continue;
-        if ((np.item.cluster_roles || []).includes("worker")) targetNodes.push(np);
-      }
-    }
-    for (const tgt of targetNodes) {
-      root_svg.appendChild(svg("line", {
-        x1: it.x + it.w / 2, y1: it.y + it.h,
-        x2: tgt.x + tgt.w / 2, y2: tgt.y,
-        stroke: colors.accent, "stroke-width": 2, "stroke-opacity": 0.7,
+    if (!targets.length) continue;
+    const srcId = `l4:${it.item.id}`;
+    for (const cid of targets) {
+      const cb = clusterBounds.get(cid);
+      if (!cb) continue;
+      const lbCx = it.x + it.w / 2;
+      const lbBy = it.y + it.h;
+      const tgt = nearestFaceCenter(cb, lbCx, lbBy);
+      const excl = new Set([srcId]);
+      for (const nid of (p.clusters.find(c => c.id === cid)?.node_ids || [])) excl.add(`node:${nid}`);
+      const lineId = `l4:${it.item.id}->cluster:${cid}`;
+      root_svg.appendChild(drawConn(lineId, lbCx, lbBy, tgt.x, tgt.y, excl, {
+        stroke: colors.accent, "stroke-width": 2.5, "stroke-opacity": 0.8,
       }));
     }
   }
 
-  // Storage → cluster nodes (same fallback)
+  // Storage → cluster (one line per target cluster). PV-level binding: a storage
+  // backend serves a cluster's StorageClass, not individual nodes.
   for (const it of placed) {
     if (it.kind !== "storage") continue;
     const targets = it.item.target_cluster_ids || [];
-    let targetNodes = [];
-    if (targets.length) {
-      for (const cid of targets) {
-        const c = p.clusters.find(x => x.id === cid);
-        if (!c) continue;
-        for (const nid of c.node_ids || []) {
-          const placement = placedById.get("node:" + nid);
-          if (placement) targetNodes.push(placement);
-        }
-      }
-    } else {
-      // Fallback: all nodes in same site that belong to a cluster
-      const owner = ownerSiteOf("storage")(it.item.id);
-      const ownerSiteId = owner?.item?.id;
-      for (const np of placed) {
-        if (np.kind !== "node") continue;
-        if (ownerSiteId && np.item.site_id !== ownerSiteId) continue;
-        if (getNodeCluster(np.item.id)) targetNodes.push(np);
-      }
-    }
-    for (const tgt of targetNodes) {
-      root_svg.appendChild(svg("line", {
-        x1: it.x + it.w / 2, y1: it.y,
-        x2: tgt.x + tgt.w / 2, y2: tgt.y + tgt.h,
-        stroke: colors.green, "stroke-width": 2, "stroke-opacity": 0.7,
+    if (!targets.length) continue;
+    const srcId = `storage:${it.item.id}`;
+    const stCx = it.x + it.w / 2;
+    const stTy = it.y;
+    for (const cid of targets) {
+      const cb = clusterBounds.get(cid);
+      if (!cb) continue;
+      const tgt = nearestFaceCenter(cb, stCx, stTy);
+      const excl = new Set([srcId]);
+      for (const nid of (p.clusters.find(c => c.id === cid)?.node_ids || [])) excl.add(`node:${nid}`);
+      const lineId = `storage:${it.item.id}->cluster:${cid}`;
+      root_svg.appendChild(drawConn(lineId, stCx, stTy, tgt.x, tgt.y, excl, {
+        stroke: colors.green, "stroke-width": 2.5, "stroke-opacity": 0.8,
         "stroke-dasharray": "5,3",
       }));
     }
@@ -6516,72 +7684,60 @@ function renderTopologyDiagram(root, p) {
         x.kind === "l4" && (owner.item.l4_balancers || []).some(l => l.id === x.item.id));
       const nodesInSite = placed.filter(x => x.kind === "node" && x.item.site_id === ownerSiteId);
 
+      const srcId = `netdev:${it.item.id}`;
       if (it.item.kind === "firewall" || it.item.kind === "waf" || it.item.kind === "ddos" || it.item.kind === "router") {
-        // Perimeter device → connect to all L4s in same site
         for (const l4 of l4sInSite) {
-          root_svg.appendChild(svg("line", {
-            x1: it.x + it.w / 2, y1: it.y + it.h,
-            x2: l4.x + l4.w / 2, y2: l4.y,
-            stroke: colors.orange, "stroke-width": 2, "stroke-opacity": 0.7,
-            "marker-end": "url(#arrow-orange)",
-          }));
+          const excl = new Set([srcId, `l4:${l4.item.id}`]);
+          const lineId = `netdev:${it.item.id}->l4:${l4.item.id}`;
+          root_svg.appendChild(drawConn(lineId,
+            it.x + it.w / 2, it.y + it.h,
+            l4.x + l4.w / 2, l4.y, excl, {
+              stroke: colors.orange, "stroke-width": 2, "stroke-opacity": 0.7,
+              "marker-end": "url(#arrow-orange)",
+            }));
         }
       } else if (it.item.kind === "switch") {
-        // Switch → all nodes in same site (uplink, dotted)
         for (const np of nodesInSite) {
-          root_svg.appendChild(svg("line", {
-            x1: it.x + it.w / 2, y1: it.y + it.h,
-            x2: np.x + np.w / 2, y2: np.y,
-            stroke: colors.text3, "stroke-width": 1, "stroke-opacity": 0.4,
-            "stroke-dasharray": "1,3",
-          }));
+          const excl = new Set([srcId, `node:${np.item.id}`]);
+          const lineId = `netdev:${it.item.id}->node:${np.item.id}`;
+          root_svg.appendChild(drawConn(lineId,
+            it.x + it.w / 2, it.y + it.h,
+            np.x + np.w / 2, np.y, excl, {
+              stroke: colors.text3, "stroke-width": 1, "stroke-opacity": 0.4,
+              "stroke-dasharray": "1,3",
+            }));
         }
       } else if (it.item.kind === "vpn" || it.item.kind === "cdn" || it.item.kind === "dns") {
-        // Edge devices: just connect to first L4 (or skip)
         if (l4sInSite[0]) {
-          root_svg.appendChild(svg("line", {
-            x1: it.x + it.w / 2, y1: it.y + it.h,
-            x2: l4sInSite[0].x + l4sInSite[0].w / 2, y2: l4sInSite[0].y,
-            stroke: colors.orange, "stroke-width": 1.5, "stroke-opacity": 0.4,
-            "stroke-dasharray": "3,3",
-          }));
+          const excl = new Set([srcId, `l4:${l4sInSite[0].item.id}`]);
+          const lineId = `netdev:${it.item.id}->l4:${l4sInSite[0].item.id}`;
+          root_svg.appendChild(drawConn(lineId,
+            it.x + it.w / 2, it.y + it.h,
+            l4sInSite[0].x + l4sInSite[0].w / 2, l4sInSite[0].y, excl, {
+              stroke: colors.orange, "stroke-width": 1.5, "stroke-opacity": 0.4,
+              "stroke-dasharray": "3,3",
+            }));
         }
       }
     }
   }
 
-  // ── Services layer: External Service → Cluster ──
+  // ── Services layer: External Service → Cluster. Empty target = no connection. ──
   if (layers.services) {
     for (const it of placed) {
       if (it.kind !== "extsvc") continue;
       const targets = it.item.target_cluster_ids || [];
-      // Fallback: same-site clusters
-      let resolved = targets;
-      if (!resolved.length) {
-        const owner = placed.find(x =>
-          x.kind === "site" && (x.item.external_services || []).some(s => s.id === it.item.id));
-        if (owner) {
-          const ownerSiteId = owner.item.id;
-          // Clusters where any node is in this site
-          const clusterIds = new Set();
-          for (const c of (p.clusters || [])) {
-            if ((c.node_ids || []).some(nid => {
-              const n = p.nodes.find(x => x.id === nid);
-              return n?.site_id === ownerSiteId;
-            })) clusterIds.add(c.id);
-          }
-          resolved = Array.from(clusterIds);
-        }
-      }
-      for (const cid of resolved) {
+      if (!targets.length) continue;
+      const srcId = `extsvc:${it.item.id}`;
+      for (const cid of targets) {
         const cb = clusterBounds.get(cid);
         if (!cb) continue;
-        // Line from extsvc top to cluster boundary bottom (extsvc is below cluster)
         const exX = it.x + it.w / 2;
         const cbX = cb.x + cb.w / 2;
-        root_svg.appendChild(svg("line", {
-          x1: exX, y1: it.y,
-          x2: cbX, y2: cb.y + cb.h,
+        const excl = new Set([srcId]);
+        for (const nid of (p.clusters.find(c => c.id === cid)?.node_ids || [])) excl.add(`node:${nid}`);
+        const lineId = `extsvc:${it.item.id}->cluster:${cid}`;
+        root_svg.appendChild(drawConn(lineId, exX, it.y, cbX, cb.y + cb.h, excl, {
           stroke: colors.purple, "stroke-width": 1.5, "stroke-opacity": 0.6,
           "stroke-dasharray": "5,4",
           "marker-end": "url(#arrow-purple)",
@@ -6608,9 +7764,8 @@ function renderTopologyDiagram(root, p) {
           x: ax, y: arrowYStart - 4, fill: lineColor,
           "font-size": "9", "font-family": "JetBrains Mono", "font-weight": "600",
         }, [`${r.tls ? "🔒" : "🌐"} ${r.host}`]));
-        root_svg.appendChild(svg("line", {
-          x1: ax, y1: arrowYStart,
-          x2: ax, y2: arrowYEnd,
+        const lineId = `ingress:${c.id}:${i}->cluster:${c.id}`;
+        root_svg.appendChild(drawConn(lineId, ax, arrowYStart, ax, arrowYEnd, null, {
           stroke: lineColor, "stroke-width": 1.5, "stroke-opacity": 0.8,
           "marker-end": r.tls ? "url(#arrow-green)" : "url(#arrow-accent)",
         }));
@@ -6788,17 +7943,23 @@ function simulateScheduling(project) {
     const totalGpu = gpus.reduce((a, g) => a + (g.count || 0), 0);
     const totalVram = gpus.reduce((a, g) => a + (g.count || 0) * (gpuModels[g.model]?.vram_gb || 0), 0);
     const byModel = new Map();
-    for (const g of gpus) byModel.set(g.model, (byModel.get(g.model) || 0) + (g.count || 0));
+    const vramByModel = new Map();
+    for (const g of gpus) {
+      byModel.set(g.model, (byModel.get(g.model) || 0) + (g.count || 0));
+      const v = (g.count || 0) * (gpuModels[g.model]?.vram_gb || 0);
+      vramByModel.set(g.model, (vramByModel.get(g.model) || 0) + v);
+    }
     remaining.set(n.id, {
       cpu: n.spec?.vcpu || 0,
       mem: n.spec?.memory_gb || 0,
       gpu: totalGpu,
       vram: totalVram,
       gpuByModel: byModel,
+      vramByModel,
     });
   }
 
-  const placements = new Map();   // nodeId → array of { workloadId, workloadName, replicaIdx, cpuReq, memReq, gpuReq, gpuModel }
+  const placements = new Map();   // nodeId → array of { workloadId, workloadName, replicaIdx, cpuReq, memReq, gpuReq, vramReq, gpuModel, vramMode }
   const unscheduled = [];
 
   for (const c of project.clusters || []) {
@@ -6809,19 +7970,41 @@ function simulateScheduling(project) {
       const reqs = w.resources?.requests || {};
       const cpuReq = reqs.cpu || 0;
       const memReq = reqs.memory_gb || 0;
-      const gpuReq = reqs.gpu?.count || 0;
-      const gpuModel = reqs.gpu?.model;
-      const vramReq = (reqs.gpu?.vram_gb || 0) * gpuReq;
+      const gpuModel = reqs.gpu?.model;                     // optional model filter
+      const vramReq = reqs.gpu?.vram_gb || 0;               // VRAM-based primary
+      const gpuCountReq = reqs.gpu?.count || 0;             // legacy count fallback
+      const vramMode = vramReq > 0;                         // VRAM-mode flag
+
       for (let i = 0; i < (w.replicas || 1); i++) {
         let placedNode = null;
         for (const n of workers) {
           const r = remaining.get(n.id);
           if (!r) continue;
-          if (r.cpu < cpuReq || r.mem < memReq || r.gpu < gpuReq || r.vram < vramReq) continue;
-          if (gpuModel && (r.gpuByModel.get(gpuModel) || 0) < gpuReq) continue;
+          if (r.cpu < cpuReq || r.mem < memReq) continue;
+          if (vramMode) {
+            // VRAM-based: workload consumes VRAM from a model-specific pool, or any pool if no model.
+            const availVram = gpuModel ? (r.vramByModel.get(gpuModel) || 0) : r.vram;
+            if (availVram < vramReq) continue;
+          } else {
+            // Legacy count-based.
+            if (r.gpu < gpuCountReq) continue;
+            if (gpuModel && (r.gpuByModel.get(gpuModel) || 0) < gpuCountReq) continue;
+          }
           // Place
-          r.cpu -= cpuReq; r.mem -= memReq; r.gpu -= gpuReq; r.vram -= vramReq;
-          if (gpuModel && gpuReq > 0) r.gpuByModel.set(gpuModel, r.gpuByModel.get(gpuModel) - gpuReq);
+          r.cpu -= cpuReq; r.mem -= memReq;
+          if (vramMode) {
+            r.vram -= vramReq;
+            if (gpuModel) {
+              r.vramByModel.set(gpuModel, (r.vramByModel.get(gpuModel) || 0) - vramReq);
+            }
+          } else {
+            r.gpu -= gpuCountReq; r.vram -= (vramReq || 0);
+            if (gpuModel && gpuCountReq > 0) {
+              r.gpuByModel.set(gpuModel, r.gpuByModel.get(gpuModel) - gpuCountReq);
+              const perCardVram = gpuModels[gpuModel]?.vram_gb || 0;
+              r.vramByModel.set(gpuModel, (r.vramByModel.get(gpuModel) || 0) - gpuCountReq * perCardVram);
+            }
+          }
           placedNode = n.id;
           break;
         }
@@ -6829,13 +8012,43 @@ function simulateScheduling(project) {
           if (!placements.has(placedNode)) placements.set(placedNode, []);
           placements.get(placedNode).push({
             workloadId: w.id, workloadName: w.name, replicaIdx: i,
-            cpuReq, memReq, gpuReq, gpuModel,
+            cpuReq, memReq,
+            gpuReq: vramMode ? 0 : gpuCountReq,
+            vramReq: vramMode ? vramReq : 0,
+            gpuModel, vramMode,
           });
         } else {
+          // Collect per-node fail reasons against the live remaining state.
+          const perNode = [];
+          for (const n of workers) {
+            const r = remaining.get(n.id);
+            if (!r) continue;
+            const fails = [];
+            if (r.cpu < cpuReq) fails.push({ dim: "cpu", have: r.cpu, need: cpuReq, unit: "c" });
+            if (r.mem < memReq) fails.push({ dim: "mem", have: r.mem, need: memReq, unit: "GB" });
+            if (vramMode) {
+              const availVram = gpuModel ? (r.vramByModel.get(gpuModel) || 0) : r.vram;
+              if (availVram < vramReq) {
+                fails.push({ dim: gpuModel ? `${gpuModel} VRAM` : "VRAM", have: availVram, need: vramReq, unit: "GB" });
+              }
+            } else {
+              if (r.gpu < gpuCountReq) fails.push({ dim: "gpu", have: r.gpu, need: gpuCountReq, unit: "" });
+              if (gpuModel && (r.gpuByModel.get(gpuModel) || 0) < gpuCountReq) {
+                fails.push({ dim: gpuModel, have: r.gpuByModel.get(gpuModel) || 0, need: gpuCountReq, unit: "" });
+              }
+            }
+            perNode.push({ nodeId: n.id, nodeName: n.name, fails });
+          }
           unscheduled.push({
             workloadId: w.id, workloadName: w.name, replicaIdx: i,
             clusterId: c.id, clusterName: c.name,
-            reqs: { cpu: cpuReq, mem: memReq, gpu: gpuReq, gpuModel },
+            reqs: {
+              cpu: cpuReq, mem: memReq,
+              gpu: vramMode ? 0 : gpuCountReq,
+              vram: vramMode ? vramReq : 0,
+              gpuModel, vramMode,
+            },
+            perNode,
           });
         }
       }
@@ -6921,9 +8134,11 @@ function renderCapacityNode(n, sim, gpuModels) {
   const placed = sim.placements.get(n.id) || [];
   const usedCpu = placed.reduce((a, p) => a + p.cpuReq, 0);
   const usedMem = placed.reduce((a, p) => a + p.memReq, 0);
-  const usedGpu = placed.reduce((a, p) => a + p.gpuReq, 0);
-  const usedVram = placed.reduce((a, p) =>
-    a + (p.gpuModel ? (gpuModels[p.gpuModel]?.vram_gb || 0) * p.gpuReq : 0), 0);
+  const usedGpu = placed.reduce((a, p) => a + (p.gpuReq || 0), 0);
+  const usedVram = placed.reduce((a, p) => {
+    if (p.vramMode) return a + (p.vramReq || 0);
+    return a + (p.gpuModel ? (gpuModels[p.gpuModel]?.vram_gb || 0) * (p.gpuReq || 0) : 0);
+  }, 0);
 
   const totCpu = n.spec?.vcpu || 0;
   const totMem = n.spec?.memory_gb || 0;
@@ -6968,18 +8183,21 @@ function renderCapacityNode(n, sim, gpuModels) {
     // Group by workload
     const byWl = new Map();
     for (const p of placed) {
-      const e = byWl.get(p.workloadId) || { name: p.workloadName, count: 0, cpu: 0, mem: 0, gpu: 0 };
-      e.count += 1; e.cpu += p.cpuReq; e.mem += p.memReq; e.gpu += p.gpuReq;
+      const e = byWl.get(p.workloadId) || { name: p.workloadName, count: 0, cpu: 0, mem: 0, gpu: 0, vram: 0, gpuModel: p.gpuModel };
+      e.count += 1; e.cpu += p.cpuReq; e.mem += p.memReq; e.gpu += (p.gpuReq || 0); e.vram += (p.vramReq || 0);
       byWl.set(p.workloadId, e);
     }
     for (const [wlId, info] of byWl) {
+      const gpuPart = info.vram > 0
+        ? ` · ${info.vram.toFixed(0)} GB${info.gpuModel ? ` (${info.gpuModel})` : ""}`
+        : info.gpu ? ` · ${info.gpu} GPU${info.gpuModel ? ` (${info.gpuModel})` : ""}` : "";
       const row = el("div", {
         style: { fontSize: "11px", padding: "3px 0", display: "flex", gap: "8px", cursor: "pointer", color: "var(--text2)" },
         onclick: e => { e.stopPropagation(); selectEntity("workload", wlId); },
       }, [
         el("span", {}, [`◇ ${info.name} × ${info.count}`]),
         el("span", { style: { color: "var(--text3)", marginLeft: "auto", fontFamily: "JetBrains Mono", fontSize: "10px" } }, [
-          `${info.cpu.toFixed(1)}c · ${info.mem.toFixed(0)}GB${info.gpu ? ` · ${info.gpu} GPU` : ""}`,
+          `${info.cpu.toFixed(1)}c · ${info.mem.toFixed(0)}GB${gpuPart}`,
         ]),
       ]);
       podBox.appendChild(row);
@@ -7001,15 +8219,56 @@ function renderUnscheduled(list) {
   card.appendChild(el("div", {
     style: { fontSize: "12px", color: "var(--red)", marginBottom: "8px", fontWeight: 600 },
   }, [`⊗ ${list.length} pods unschedulable`]));
+  const fmtNum = (v) => Number.isInteger(v) ? String(v) : Number(v).toFixed(1).replace(/\.?0+$/, "");
+  const fmtFail = (f) => `${f.dim} ${fmtNum(f.have)}/${fmtNum(f.need)}${f.unit}`;
   for (const u of list) {
-    const reqs = `${u.reqs.cpu}c · ${u.reqs.mem}GB${u.reqs.gpu ? ` · ${u.reqs.gpu}× ${u.reqs.gpuModel || "GPU"}` : ""}`;
-    card.appendChild(el("div", {
-      style: { fontSize: "11px", color: "var(--text)", padding: "3px 0", cursor: "pointer", display: "flex", gap: "8px" },
+    const gpuPart = u.reqs.vramMode
+      ? ` · ${u.reqs.vram}GB VRAM${u.reqs.gpuModel ? ` (${u.reqs.gpuModel})` : " (any)"}`
+      : (u.reqs.gpu ? ` · ${u.reqs.gpu}× ${u.reqs.gpuModel || "GPU"}` : "");
+    const reqs = `${u.reqs.cpu}c · ${u.reqs.mem}GB${gpuPart}`;
+    const row = el("div", {
+      style: { padding: "8px 0", borderTop: "1px solid rgba(248,113,113,.18)", marginTop: "4px" },
+    });
+    row.appendChild(el("div", {
+      style: { fontSize: "11px", color: "var(--text)", display: "flex", gap: "8px", cursor: "pointer" },
       onclick: () => selectEntity("workload", u.workloadId),
     }, [
       el("span", {}, [`◇ ${u.workloadName} replica #${u.replicaIdx + 1} (${u.clusterName})`]),
       el("span", { style: { color: "var(--text3)", marginLeft: "auto", fontFamily: "JetBrains Mono", fontSize: "10px" } }, [reqs]),
     ]));
+
+    // Per-node fail breakdown
+    const reasonsBox = el("div", { style: { marginTop: "6px", paddingLeft: "14px" } });
+    if (!u.perNode || u.perNode.length === 0) {
+      reasonsBox.appendChild(el("div", {
+        style: { fontSize: "10px", color: "var(--yellow)", fontStyle: "italic" },
+      }, ["사유: cluster에 worker 역할 노드가 없음 — node의 cluster_roles에 'worker' 추가 필요"]));
+    } else {
+      // Summary: which dimension blocks how many nodes (sorted desc)
+      const dimCount = new Map();
+      for (const r of u.perNode) {
+        for (const f of r.fails) dimCount.set(f.dim, (dimCount.get(f.dim) || 0) + 1);
+      }
+      const total = u.perNode.length;
+      const summary = [...dimCount.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([d, c]) => `${d} ${c}/${total}`)
+        .join(" · ");
+      reasonsBox.appendChild(el("div", {
+        style: { fontSize: "10px", color: "var(--text2)", marginBottom: "4px", fontFamily: "JetBrains Mono" },
+      }, [`사유 요약 (${total} workers): ${summary || "(no fails recorded)"}`]));
+      for (const r of u.perNode) {
+        reasonsBox.appendChild(el("div", {
+          style: { fontSize: "10px", color: "var(--text3)", padding: "2px 0", display: "flex", gap: "10px", cursor: "pointer", fontFamily: "JetBrains Mono" },
+          onclick: e => { e.stopPropagation(); selectEntity("node", r.nodeId); },
+        }, [
+          el("span", { style: { minWidth: "140px", color: "var(--text2)" } }, [`▣ ${r.nodeName}`]),
+          el("span", { style: { color: "var(--red)" } }, [r.fails.length ? r.fails.map(fmtFail).join(" · ") : "(no fail — race?)"]),
+        ]));
+      }
+    }
+    row.appendChild(reasonsBox);
+    card.appendChild(row);
   }
   return card;
 }
@@ -7395,7 +8654,9 @@ function renderArchitecture() {
 
   // Layout constants
   const SWITCH_W = 110, SWITCH_H = 36, SWITCH_VGAP = 4;
-  const ROW_GAP = 32, BOX_W = 100, BOX_H = 56, BOX_GAP = 12, SUB_GAP = 8;
+  const ROW_GAP = 50, BOX_W = 100, BOX_H = 56, BOX_GAP = 12, SUB_GAP = 8;
+  const GROUP_GAP = 32, GROUP_LABEL_H = 16; // mgmt/db row: gap between cluster groups + room for label
+  const GROUP_VGAP = 22; // vertical gap between stacked cluster groups (mgmt/db rows)
   const PAD_LEFT = 20, PAD_RIGHT = 30, PAD_TOP = 20;
   const STUB_LEN = 36;
   const SUB_DROP = 18;
@@ -7413,19 +8674,63 @@ function renderArchitecture() {
     }
     return BOX_W;
   };
-  const rowWidth = r => {
-    if (!r.items.length) return BOX_W;
+  // For mgmt/db rows: group items by their owning cluster (items w/o cluster → "shared" tail group).
+  // Other rows: single passthrough group preserving the existing layout.
+  const getRowGroups = (r) => {
+    if (r.tag !== "_mgmt" && r.tag !== "_db") {
+      return [{ key: r.tag, label: null, items: r.items }];
+    }
+    const byCluster = new Map();
+    const shared = { key: "_shared", label: "외부", items: [] };
+    for (const it of r.items) {
+      if (it.cluster) {
+        const cid = it.cluster.id;
+        if (!byCluster.has(cid)) byCluster.set(cid, { key: cid, label: it.cluster.name, items: [] });
+        byCluster.get(cid).items.push(it);
+      } else {
+        shared.items.push(it);
+      }
+    }
+    const groups = [...byCluster.values()].sort((a, b) => (a.label || "").localeCompare(b.label || ""));
+    if (shared.items.length) groups.push(shared);
+    return groups;
+  };
+  const groupWidth = g => {
+    if (!g.items.length) return 0;
     let w = 0;
-    for (const it of r.items) w += itemFootprint(it) + BOX_GAP;
+    for (const it of g.items) w += itemFootprint(it) + BOX_GAP;
     return w - BOX_GAP;
+  };
+  // mgmt/db rows stack their cluster groups vertically off a trunk; other rows lay items out side-by-side.
+  const rowIsStacked = r => {
+    const groups = getRowGroups(r);
+    return groups.length > 1 && groups.some(g => g.label != null);
+  };
+  const rowWidth = r => {
+    const groups = getRowGroups(r);
+    if (!groups.length) return BOX_W;
+    if (rowIsStacked(r)) {
+      return Math.max(BOX_W, ...groups.map(groupWidth));
+    }
+    let w = 0;
+    for (const g of groups) w += groupWidth(g) + GROUP_GAP;
+    return Math.max(BOX_W, w - GROUP_GAP);
   };
   const rowHeight = r => {
     const hasSubs = r.items.some(it => it.kind === "l4" && (l4Children.get(it.item.id) || []).length > 0);
     const stackH = rowSwitchStackH(r);
-    // Switch stack (above bus) + 30 (label space) + STUB_LEN (bus → boxes) + BOX_H + (subs)
-    // Bus is at stackH/2, items below.
     const aboveBus = stackH / 2 + 30;
-    const belowBus = stackH / 2 + STUB_LEN + BOX_H + (hasSubs ? SUB_DROP + SUB_TO_CHILD + BOX_H + 8 : 0);
+    const groups = getRowGroups(r);
+    let blockH;
+    if (rowIsStacked(r)) {
+      const n = groups.length;
+      // Each group: label space + box height. Gaps between groups.
+      blockH = n * (GROUP_LABEL_H + BOX_H) + (n - 1) * GROUP_VGAP;
+    } else {
+      blockH = BOX_H;
+    }
+    const belowBus = stackH / 2 + STUB_LEN + blockH
+      + (hasSubs ? SUB_DROP + SUB_TO_CHILD + BOX_H + 8 : 0);
     return aboveBus + belowBus + ROW_GAP;
   };
 
@@ -7513,6 +8818,9 @@ function renderArchitecture() {
     }
     root_svg.appendChild(g);
   };
+
+  // Track final positions of workload/storage boxes so we can draw PVC→storage lines after.
+  const archPositions = new Map();
 
   // Per-row geometry: stack center = busY
   const rowGeom = rowTops.map((top, i) => {
@@ -7626,55 +8934,155 @@ function renderArchitecture() {
       stroke: "#34495e", "stroke-width": 1.5,
     }));
 
-    // Component boxes (with optional L4 sub-trees)
-    let bx = PAD_LEFT + SWITCH_W + 30;
-    for (const item of row.items) {
-      const subs = item.kind === "l4" ? (l4Children.get(item.item.id) || []) : [];
-      const footprint = itemFootprint(item);
-      const cx = bx + footprint / 2;
-      const itemX = cx - BOX_W / 2;
+    // Component boxes — grouped by cluster for mgmt/db rows, flat for others
+    const groups = getRowGroups(row);
+    const stacked = rowIsStacked(row);
 
-      // Vertical connector from bus line down to box top
+    if (stacked) {
+      // Vertical trunk pattern: each cluster group on its own line, connected
+      // via a single vertical trunk that comes off the bus.
+      const maxGW = Math.max(...groups.map(groupWidth));
+      const rowAreaLeft = PAD_LEFT + SWITCH_W + 30;
+      const trunkX = rowAreaLeft + maxGW / 2;
+      // Trunk goes from bus down to the last group's sub-trunk level
+      const lastGroupSubTrunkY = boxY + (groups.length - 1) * (GROUP_LABEL_H + BOX_H + GROUP_VGAP) + GROUP_LABEL_H - 4;
       root_svg.appendChild(svg("line", {
-        x1: cx, y1: lineY, x2: cx, y2: boxY,
+        x1: trunkX, y1: lineY, x2: trunkX, y2: lastGroupSubTrunkY,
         stroke: "#34495e", "stroke-width": 1,
       }));
 
-      drawBox(item, itemX, boxY);
+      for (let gi = 0; gi < groups.length; gi++) {
+        const g = groups[gi];
+        if (!g.items.length) continue;
+        const gw = groupWidth(g);
+        const groupTopY = boxY + gi * (GROUP_LABEL_H + BOX_H + GROUP_VGAP);
+        const subTrunkY = groupTopY + GROUP_LABEL_H - 4;
+        const itemsTopY = groupTopY + GROUP_LABEL_H;
 
-      if (subs.length) {
-        const subsW = subs.length * BOX_W + (subs.length - 1) * SUB_GAP;
-        const subY = boxY + BOX_H + SUB_DROP;
-        const childY = subY + SUB_TO_CHILD;
-        const childStartX = cx - subsW / 2;
-
-        // L4 bottom → sub line vertical
-        root_svg.appendChild(svg("line", {
-          x1: cx, y1: boxY + BOX_H, x2: cx, y2: subY,
-          stroke: "#34495e", "stroke-width": 1,
-        }));
-        // Horizontal connector spanning children (only if 2+)
-        if (subs.length > 1) {
-          root_svg.appendChild(svg("line", {
-            x1: childStartX + BOX_W / 2, y1: subY,
-            x2: childStartX + subsW - BOX_W / 2, y2: subY,
-            stroke: "#34495e", "stroke-width": 1,
-          }));
+        // Cluster label centered on trunk
+        if (g.label) {
+          root_svg.appendChild(svg("text", {
+            x: trunkX, y: groupTopY + GROUP_LABEL_H - 6,
+            "text-anchor": "middle", fill: "var(--text2)",
+            "font-size": "10", "font-family": "JetBrains Mono", "font-weight": "600",
+          }, [`⎈ ${g.label}`]));
         }
-        // Each child: vertical drop + box
-        for (let i = 0; i < subs.length; i++) {
-          const ccx = childStartX + i * (BOX_W + SUB_GAP) + BOX_W / 2;
+
+        // Items centered around trunkX
+        const itemsLeft = trunkX - gw / 2;
+        let bx = itemsLeft;
+        const itemCxs = [];
+        for (let i = 0; i < g.items.length; i++) {
+          const item = g.items[i];
+          const footprint = itemFootprint(item);
+          const cx = bx + footprint / 2;
+          const itemX = cx - BOX_W / 2;
+          itemCxs.push(cx);
+
+          // Short stub from sub-trunk down to box top
           root_svg.appendChild(svg("line", {
-            x1: ccx, y1: subY, x2: ccx, y2: childY,
+            x1: cx, y1: subTrunkY, x2: cx, y2: itemsTopY,
             stroke: "#34495e", "stroke-width": 1,
           }));
-          drawBox(subs[i], ccx - BOX_W / 2, childY);
+
+          drawBox(item, itemX, itemsTopY);
+          if (item.kind === "workload" || item.kind === "storage") {
+            archPositions.set(`${item.kind}:${item.item.id}`, { x: itemX, y: itemsTopY, w: BOX_W, h: BOX_H });
+          }
+
+          bx += footprint;
+          if (i < g.items.length - 1) bx += BOX_GAP;
+        }
+        // Horizontal sub-trunk across this group's items (only if 2+)
+        if (itemCxs.length > 1) {
+          root_svg.appendChild(svg("line", {
+            x1: itemCxs[0], y1: subTrunkY, x2: itemCxs[itemCxs.length - 1], y2: subTrunkY,
+            stroke: "#34495e", "stroke-width": 1,
+          }));
         }
       }
+    } else {
+      // Side-by-side layout (env rows or single-group mgmt/db)
+      let bx = PAD_LEFT + SWITCH_W + 30;
+      for (let gi = 0; gi < groups.length; gi++) {
+        const g = groups[gi];
+        if (!g.items.length) continue;
+        for (let i = 0; i < g.items.length; i++) {
+          const item = g.items[i];
+          const subs = item.kind === "l4" ? (l4Children.get(item.item.id) || []) : [];
+          const footprint = itemFootprint(item);
+          const cx = bx + footprint / 2;
+          const itemX = cx - BOX_W / 2;
 
-      bx += footprint + BOX_GAP;
+          root_svg.appendChild(svg("line", {
+            x1: cx, y1: lineY, x2: cx, y2: boxY,
+            stroke: "#34495e", "stroke-width": 1,
+          }));
+
+          drawBox(item, itemX, boxY);
+          if (item.kind === "workload" || item.kind === "storage") {
+            archPositions.set(`${item.kind}:${item.item.id}`, { x: itemX, y: boxY, w: BOX_W, h: BOX_H });
+          }
+
+          if (subs.length) {
+            const subsW = subs.length * BOX_W + (subs.length - 1) * SUB_GAP;
+            const subY = boxY + BOX_H + SUB_DROP;
+            const childY = subY + SUB_TO_CHILD;
+            const childStartX = cx - subsW / 2;
+
+            root_svg.appendChild(svg("line", {
+              x1: cx, y1: boxY + BOX_H, x2: cx, y2: subY,
+              stroke: "#34495e", "stroke-width": 1,
+            }));
+            if (subs.length > 1) {
+              root_svg.appendChild(svg("line", {
+                x1: childStartX + BOX_W / 2, y1: subY,
+                x2: childStartX + subsW - BOX_W / 2, y2: subY,
+                stroke: "#34495e", "stroke-width": 1,
+              }));
+            }
+            for (let j = 0; j < subs.length; j++) {
+              const ccx = childStartX + j * (BOX_W + SUB_GAP) + BOX_W / 2;
+              root_svg.appendChild(svg("line", {
+                x1: ccx, y1: subY, x2: ccx, y2: childY,
+                stroke: "#34495e", "stroke-width": 1,
+              }));
+              drawBox(subs[j], ccx - BOX_W / 2, childY);
+              const sub = subs[j];
+              if (sub.kind === "workload") {
+                archPositions.set(`workload:${sub.item.id}`, { x: ccx - BOX_W / 2, y: childY, w: BOX_W, h: BOX_H });
+              }
+            }
+          }
+
+          bx += footprint;
+          if (i < g.items.length - 1) bx += BOX_GAP;
+        }
+        if (gi < groups.length - 1) bx += GROUP_GAP;
+      }
     }
   });
+
+  // PVC → storage connection lines (per workload's persistent_volumes[].target_storage_id)
+  for (const c of (p.clusters || [])) {
+    for (const w of (c.workloads || [])) {
+      const wPos = archPositions.get(`workload:${w.id}`);
+      if (!wPos) continue;
+      for (const pv of (w.persistent_volumes || [])) {
+        if (!pv.target_storage_id) continue;
+        const stPos = archPositions.get(`storage:${pv.target_storage_id}`);
+        if (!stPos) continue;
+        const x1 = wPos.x + wPos.w / 2, y1 = wPos.y + wPos.h;
+        const x2 = stPos.x + stPos.w / 2, y2 = stPos.y;
+        root_svg.appendChild(svg("path", {
+          d: `M ${x1},${y1} L ${x2},${y2}`,
+          fill: "none",
+          stroke: "#34d399", "stroke-width": 1.4, "stroke-opacity": 0.55,
+          "stroke-dasharray": "4,3",
+        }));
+      }
+    }
+  }
 
   // Wrapper with section header
   const wrap = el("div", {});
@@ -7734,26 +9142,86 @@ function renderDependency() {
   const p = state.project;
   if (!p) return;
 
-  // Collect all workloads across clusters (with cluster ref for context)
+  const allClusters = p.clusters || [];
+  // Reset selection if the targeted cluster has been removed.
+  if (state.ui.depCluster && !allClusters.find(c => c.id === state.ui.depCluster)) {
+    state.ui.depCluster = "";
+  }
+  const selectedClusterId = state.ui.depCluster || "";
+
+  // View-local option (not persisted in project data): show edge labels (protocol + latency).
+  if (state.ui.depShowLabels == null) state.ui.depShowLabels = true;
+  const showEdgeLabels = state.ui.depShowLabels !== false;
+
+  // Cluster filter bar — "All" + one tab per cluster (with workload count) + label toggle on the right.
+  if (allClusters.length > 0) {
+    const bar = el("div", {
+      style: { display: "flex", gap: "4px", marginBottom: "12px", flexWrap: "wrap", alignItems: "center" },
+    });
+    bar.appendChild(el("span", {
+      style: { fontSize: "11px", color: "var(--text2)", marginRight: "6px", letterSpacing: "0.05em", textTransform: "uppercase", fontWeight: 600 },
+    }, ["Cluster"]));
+    const mkTab = (id, label, count) => el("button", {
+      class: "view-tab" + (selectedClusterId === id ? " active" : ""),
+      style: { padding: "4px 10px", fontSize: "11px" },
+      onclick: () => { state.ui.depCluster = id; emit(); },
+    }, [
+      label,
+      el("span", { style: { color: "var(--text3)", marginLeft: "6px", fontFamily: "JetBrains Mono", fontSize: "10px" } }, [`(${count})`]),
+    ]);
+    const totalWls = allClusters.reduce((a, c) => a + (c.workloads || []).length, 0);
+    bar.appendChild(mkTab("", "All", totalWls));
+    for (const c of allClusters) {
+      bar.appendChild(mkTab(c.id, c.name, (c.workloads || []).length));
+    }
+    // Right-aligned label toggle.
+    const labelToggle = el("input", {
+      type: "checkbox",
+      checked: showEdgeLabels ? "" : null,
+      onchange: e => { state.ui.depShowLabels = e.target.checked; emit(); },
+    });
+    bar.appendChild(el("label", {
+      style: { display: "flex", alignItems: "center", gap: "6px", marginLeft: "auto", fontSize: "11px", color: "var(--text2)", cursor: "pointer" },
+    }, [
+      labelToggle,
+      el("span", {}, ["edge label (protocol·latency)"]),
+    ]));
+    root.appendChild(bar);
+  }
+
+  // Collect workloads — filtered by selected cluster (or all clusters when blank),
+  // and by the per-workload `hide_from_dep_graph` opt-out.
   const items = [];
   const byId = new Map();
-  for (const c of p.clusters || []) {
+  let hiddenByOptOut = 0;
+  for (const c of allClusters) {
+    if (selectedClusterId && c.id !== selectedClusterId) continue;
     for (const w of (c.workloads || [])) {
+      if (w.hide_from_dep_graph) { hiddenByOptOut++; continue; }
       items.push({ w, c });
       byId.set(w.id, { w, c });
     }
   }
+  if (hiddenByOptOut > 0) {
+    root.appendChild(el("div", {
+      style: { fontSize: "11px", color: "var(--text3)", marginBottom: "8px", fontFamily: "JetBrains Mono" },
+    }, [`ℹ ${hiddenByOptOut} workload(s) hidden by 'hide_from_dep_graph' option`]));
+  }
 
   if (!items.length) {
+    const selName = selectedClusterId ? allClusters.find(c => c.id === selectedClusterId)?.name : null;
     root.appendChild(el("div", { class: "view-empty" }, [
       el("div", { class: "big" }, ["⊟"]),
       el("h2", {}, ["Dependency Graph"]),
-      el("p", {}, ["워크로드가 있어야 표시됩니다."]),
+      el("p", {}, [selName
+        ? `'${selName}' 클러스터에 워크로드가 없습니다.`
+        : "워크로드가 있어야 표시됩니다."]),
     ]));
     return;
   }
 
-  // Build edges and adjacency. Drop edges to unknown targets (silent).
+  // Build edges and adjacency. Drop edges to unknown targets (silent),
+  // but count cross-cluster ones when a cluster filter is active so we can surface them.
   const edges = [];     // { from, to, protocol, port, avg_call_ms, fanout_pct, calls_per_request }
   const out = new Map();
   const inDeg = new Map();
@@ -7761,10 +9229,19 @@ function renderDependency() {
     out.set(w.id, []);
     inDeg.set(w.id, 0);
   }
+  let crossClusterHidden = 0;
+  // Build a lookup for cross-cluster detection (only used when filter is active).
+  const allWorkloadCluster = new Map();
+  if (selectedClusterId) {
+    for (const c of allClusters) for (const w of (c.workloads || [])) allWorkloadCluster.set(w.id, c);
+  }
   for (const { w } of items) {
     for (const d of (w.depends_on || [])) {
       const tgt = d.target_workload_id;
-      if (!byId.has(tgt)) continue;
+      if (!byId.has(tgt)) {
+        if (selectedClusterId && allWorkloadCluster.has(tgt)) crossClusterHidden++;
+        continue;
+      }
       edges.push({
         from: w.id, to: tgt,
         protocol: d.protocol || "", port: d.port,
@@ -7774,6 +9251,11 @@ function renderDependency() {
       out.get(w.id).push(tgt);
       inDeg.set(tgt, (inDeg.get(tgt) || 0) + 1);
     }
+  }
+  if (crossClusterHidden > 0) {
+    root.appendChild(el("div", {
+      style: { fontSize: "11px", color: "var(--yellow)", background: "rgba(234,179,8,.08)", border: "1px solid rgba(234,179,8,.25)", borderRadius: "6px", padding: "6px 10px", marginBottom: "10px", fontFamily: "JetBrains Mono" },
+    }, [`▲ cross-cluster 의존 ${crossClusterHidden}개가 숨겨져 있습니다 — 'All' 탭에서 확인하세요`]));
   }
 
   if (!edges.length) {
@@ -7890,9 +9372,46 @@ function renderDependency() {
     return node;
   };
 
+  // Pre-pass: compute lane routing for non-back, multi-layer edges so we can
+  // expand the SVG viewBox to accommodate bezier control-point overshoot.
+  const laneOf = new Map(); // edge idx → { yLane, yc }
+  let vbMinY = 0, vbMaxY = totalH;
+  edges.forEach((e, idx) => {
+    const a = pos.get(e.from), b = pos.get(e.to);
+    if (!a || !b) return;
+    if (backEdges.has(idx)) {
+      // Back edges arc up ~30px above the source/target row.
+      vbMinY = Math.min(vbMinY, Math.min(a.cy, b.cy) - 40);
+      return;
+    }
+    const fromL = layer.get(e.from);
+    const toL = layer.get(e.to);
+    const blockers = [];
+    for (let l = fromL + 1; l <= toL - 1; l++) {
+      for (const wid of layerNodes[l]) blockers.push(pos.get(wid).cy);
+    }
+    if (!blockers.length) return;
+    blockers.sort((p, q) => p - q);
+    const half = BOX_H / 2 + 12;
+    const candidates = [blockers[0] - half, blockers[blockers.length - 1] + half];
+    for (let i = 0; i < blockers.length - 1; i++) {
+      if (blockers[i + 1] - blockers[i] >= 2 * half) {
+        candidates.push((blockers[i] + blockers[i + 1]) / 2);
+      }
+    }
+    const mid = (a.cy + b.cy) / 2;
+    candidates.sort((p, q) => Math.abs(p - mid) - Math.abs(q - mid));
+    const yLane = candidates[0];
+    const yc = (4 * yLane - mid) / 3;
+    laneOf.set(idx, { yLane, yc });
+    vbMinY = Math.min(vbMinY, yc - 8);
+    vbMaxY = Math.max(vbMaxY, yc + 8);
+  });
+  const vbHeight = vbMaxY - vbMinY;
+
   const root_svg = svg("svg", {
     width: "100%",
-    viewBox: `0 0 ${totalW} ${totalH}`,
+    viewBox: `${0} ${vbMinY} ${totalW} ${vbHeight}`,
     style: "background:var(--bg);border:1px solid var(--border);border-radius:8px;",
   });
 
@@ -7909,6 +9428,9 @@ function renderDependency() {
   root_svg.appendChild(defs);
 
   // ---- Edges (drawn first so nodes overlap) ----
+  // Multi-layer edges route through a horizontal lane that lies in a gutter
+  // between intervening layers' node rows, so the curve doesn't pass through any box.
+  // Lanes are pre-computed below in `laneOf` (defined before viewBox so SVG height can expand to fit overshoot).
   edges.forEach((e, idx) => {
     const a = pos.get(e.from), b = pos.get(e.to);
     if (!a || !b) return;
@@ -7917,13 +9439,25 @@ function renderDependency() {
     const y1 = a.cy;
     const x2 = b.cx - BOX_W / 2;
     const y2 = b.cy;
-    // For back edges, route around (curve more), else gentle bezier
     const dx = Math.max(40, (x2 - x1) / 2);
-    const c1x = x1 + dx, c1y = y1;
-    const c2x = x2 - dx, c2y = y2;
-    const path = back
-      ? `M${a.cx + BOX_W / 2},${y1} C${a.cx + BOX_W},${y1 - 30} ${b.cx - BOX_W},${y2 - 30} ${b.cx - BOX_W / 2},${y2}`
-      : `M${x1},${y1} C${c1x},${c1y} ${c2x},${c2y} ${x2},${y2}`;
+    const midline = (y1 + y2) / 2;
+
+    let path;
+    let labelY = midline - 8;
+    if (back) {
+      path = `M${a.cx + BOX_W / 2},${y1} C${a.cx + BOX_W},${y1 - 30} ${b.cx - BOX_W},${y2 - 30} ${b.cx - BOX_W / 2},${y2}`;
+      labelY = midline - 28;
+    } else {
+      const lane = laneOf.get(idx);
+      if (lane) {
+        path = `M${x1},${y1} C${x1 + dx},${lane.yc} ${x2 - dx},${lane.yc} ${x2},${y2}`;
+        labelY = lane.yLane - 4;
+      } else {
+        // Adjacent layers — gentle bezier (no intervening boxes to clear).
+        path = `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`;
+      }
+    }
+
     root_svg.appendChild(svg("path", {
       d: path, fill: "none",
       stroke: back ? "#e67e22" : "#7f8c8d",
@@ -7931,18 +9465,19 @@ function renderDependency() {
       "stroke-dasharray": back ? "4 3" : "",
       "marker-end": back ? "url(#arr-back)" : "url(#arr)",
     }));
-    // Edge label (protocol + ms) — small, mid-arc
-    const labelParts = [];
-    if (e.protocol) labelParts.push(e.protocol);
-    if (e.avg_call_ms != null) labelParts.push(`${e.avg_call_ms}ms`);
-    if (labelParts.length) {
-      const mx = (x1 + x2) / 2;
-      const my = (y1 + y2) / 2 - (back ? 28 : 8);
-      root_svg.appendChild(svg("text", {
-        x: mx, y: my, "text-anchor": "middle",
-        fill: back ? "#e67e22" : "var(--text3)",
-        "font-size": "9", "font-family": "JetBrains Mono",
-      }, [labelParts.join(" / ")]));
+    // Edge label (protocol + ms) — small, mid-arc. Suppressed when view-local toggle is off.
+    if (showEdgeLabels) {
+      const labelParts = [];
+      if (e.protocol) labelParts.push(e.protocol);
+      if (e.avg_call_ms != null) labelParts.push(`${e.avg_call_ms}ms`);
+      if (labelParts.length) {
+        const mx = (x1 + x2) / 2;
+        root_svg.appendChild(svg("text", {
+          x: mx, y: labelY, "text-anchor": "middle",
+          fill: back ? "#e67e22" : "var(--text3)",
+          "font-size": "9", "font-family": "JetBrains Mono",
+        }, [labelParts.join(" / ")]));
+      }
     }
   });
 
@@ -8902,9 +10437,21 @@ ${_yObj(spec, 1)}`);
         },
       };
       if (containerPorts.length) container.ports = containerPorts;
-      // GPU resource
-      const gpuCount = (w.resources?.requests?.gpu_count) || 0;
+      // GPU resource (path: resources.requests.gpu.count)
+      const gpuCount = w.resources?.requests?.gpu?.count || 0;
       if (gpuCount) container.resources.limits["nvidia.com/gpu"] = String(gpuCount);
+
+      // volumeMounts derived from persistent_volumes (works for both StatefulSet and Deployment)
+      const pvcList = (w.persistent_volumes || []).map((pv, i) => ({
+        name: pv.name || `data-${i}`,
+        mountPath: pv.mount_path || `/data/${pv.name || `data-${i}`}`,
+        size_gb: pv.size_gb,
+        accessMode: _accessMode(pv.access_mode),
+        storageClass: pv.storage_class || null,
+      }));
+      if (pvcList.length) {
+        container.volumeMounts = pvcList.map(p => ({ name: p.name, mountPath: p.mountPath }));
+      }
 
       const podSpec = { containers: [container] };
       if (w.runtime?.connection_pool_per_replica || w.runtime?.heap_gb) {
@@ -8935,6 +10482,27 @@ ${_yObj(spec, 1)}`);
               ...(pv.storage_class ? { storageClassName: pv.storage_class } : {}),
             },
           }));
+        }
+      } else if (pvcList.length) {
+        // Non-StatefulSet (Deployment/DaemonSet): emit standalone PVCs and reference them as pod volumes
+        podSpec.volumes = pvcList.map(p => ({
+          name: p.name,
+          persistentVolumeClaim: { claimName: `${name}-${p.name}` },
+        }));
+        for (const p of pvcList) {
+          docs.push(`apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ${_yStr(`${name}-${p.name}`)}
+  namespace: ${_yStr(ns)}
+  labels:
+${_yObj(labels, 2)}
+spec:
+  accessModes: [${p.accessMode}]
+  resources:
+    requests:
+      storage: ${p.size_gb}Gi${p.storageClass ? `
+  storageClassName: ${_yStr(p.storageClass)}` : ""}`);
         }
       }
       spec.template = {
@@ -9056,8 +10624,8 @@ function generateHelmValues(p) {
           },
         },
       };
-      if ((w.resources?.requests?.gpu_count || 0) > 0) {
-        v.resources.limits["nvidia.com/gpu"] = String(w.resources.requests.gpu_count);
+      if ((w.resources?.requests?.gpu?.count || 0) > 0) {
+        v.resources.limits["nvidia.com/gpu"] = String(w.resources.requests.gpu.count);
       }
       const svc = w.network?.service;
       if (svc && svc.type !== "None") {
@@ -9074,12 +10642,16 @@ function generateHelmValues(p) {
       if (w.persistent_volumes?.length) {
         v.persistence = {
           enabled: true,
-          volumes: w.persistent_volumes.map((pv, i) => ({
-            name: pv.name || `data-${i}`,
-            size: `${pv.size_gb}Gi`,
-            accessMode: _accessMode(pv.access_mode),
-            storageClass: pv.storage_class || "",
-          })),
+          volumes: w.persistent_volumes.map((pv, i) => {
+            const pvName = pv.name || `data-${i}`;
+            return {
+              name: pvName,
+              size: `${pv.size_gb}Gi`,
+              accessMode: _accessMode(pv.access_mode),
+              storageClass: pv.storage_class || "",
+              mountPath: pv.mount_path || `/data/${pvName}`,
+            };
+          }),
         };
       }
       if (w.scheduling?.anti_affinity === "spread-by-zone") {
@@ -9161,6 +10733,24 @@ helm install ${chartName} ./${chartName} -f overrides.yaml
 - Namespaces, NetworkPolicies, and Ingresses are static (no values overrides) — edit
   the template files directly to change them.
 - Set \`workloads.<name>.enabled: false\` to skip a workload without deleting the file.
+${(() => {
+  const localPvProvisioners = new Set();
+  for (const c of (p.clusters || [])) {
+    const lpv = c.addons?.local_pv;
+    if (lpv && lpv !== "None") localPvProvisioners.add(lpv);
+  }
+  if (!localPvProvisioners.size) return "";
+  return `\n## Local PV provisioner (prerequisite)\n\nClusters in this chart use local-disk PV provisioners. Install **before** \`helm install\`:\n\n` +
+    [...localPvProvisioners].map(p => {
+      const cmd = {
+        "OpenEBS-LocalPV": "helm install openebs openebs/openebs --namespace openebs --create-namespace",
+        "Longhorn-Local":  "helm install longhorn longhorn/longhorn --namespace longhorn-system --create-namespace",
+        "Local-Path-Provisioner": "kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/master/deploy/local-path-storage.yaml",
+      }[p];
+      const sc = ({"OpenEBS-LocalPV":"openebs-hostpath","Longhorn-Local":"longhorn-static","Local-Path-Provisioner":"local-path"})[p];
+      return `- **${p}** (StorageClass: \`${sc}\`)\n  \`\`\`\n  ${cmd}\n  \`\`\``;
+    }).join("\n");
+})()}
 ` });
 
   files.push({ path: `${chartName}/.helmignore`, content:
@@ -9200,6 +10790,13 @@ app.kubernetes.io/instance: {{ .Release.Name }}
           content: _helmServiceTpl(w),
         });
       }
+      // For non-StatefulSet kinds, emit standalone PVCs (StatefulSet uses volumeClaimTemplates).
+      if (w.persistent_volumes?.length && (w.kind || "Deployment") !== "StatefulSet") {
+        files.push({
+          path: `${chartName}/templates/${slug(w.name)}-pvc.yaml`,
+          content: _helmPvcTpl(w),
+        });
+      }
     }
     // Cluster-wide static templates
     if ((c.namespaces || []).length) {
@@ -9222,6 +10819,32 @@ app.kubernetes.io/instance: {{ .Release.Name }}
     }
   }
   return { chartName, files };
+}
+
+function _helmPvcTpl(w) {
+  const name = slug(w.name);
+  return `{{- $w := index .Values.workloads "${name}" }}
+{{- if (and $w $w.enabled $w.persistence $w.persistence.enabled (ne ($w.kind | default "Deployment") "StatefulSet")) }}
+{{- range $w.persistence.volumes }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ${name}-{{ .name }}
+  namespace: {{ $w.namespace | default "default" }}
+  labels:
+    app: ${name}
+spec:
+  accessModes: [ {{ .accessMode | default "ReadWriteOnce" | quote }} ]
+  resources:
+    requests:
+      storage: {{ .size | quote }}
+  {{- if .storageClass }}
+  storageClassName: {{ .storageClass | quote }}
+  {{- end }}
+{{- end }}
+{{- end }}
+`;
 }
 
 function _helmDeploymentTpl(w, chartName) {
@@ -9289,6 +10912,23 @@ spec:
               protocol: {{ .protocol | default "TCP" }}
             {{- end }}
           {{- end }}
+          {{- with $w.persistence }}
+          {{- if .enabled }}
+          volumeMounts:
+            {{- range .volumes }}
+            - name: {{ .name }}
+              mountPath: {{ .mountPath | quote }}
+            {{- end }}
+          {{- end }}
+          {{- end }}
+      {{- if and $w.persistence $w.persistence.enabled (ne ($w.kind | default "Deployment") "StatefulSet") }}
+      volumes:
+        {{- range $w.persistence.volumes }}
+        - name: {{ .name }}
+          persistentVolumeClaim:
+            claimName: ${name}-{{ .name }}
+        {{- end }}
+      {{- end }}
       {{- with $w.topologySpread }}
       {{- if .enabled }}
       topologySpreadConstraints:
@@ -9984,6 +11624,9 @@ function restoreFocus(saved) {
     target = document.querySelector(`[data-focus-key="${CSS.escape(saved.key)}"]`);
   } catch (e) { return; }
   if (!target) return;
+  // Tell our auto-select-on-focus hook to skip — this is a programmatic restore,
+  // not a user-initiated focus, so we want to preserve the saved selection.
+  target._suppressNextSelectAll = true;
   target.focus();
   if (saved.sel && typeof target.setSelectionRange === "function") {
     try { target.setSelectionRange(saved.sel.start, saved.sel.end, saved.sel.dir || "none"); } catch (e) {}

@@ -133,6 +133,47 @@
       "framework": "Kafka",
       "version": "3.7",
       "notes": "처리량은 파티션 수와 broker 대수에 비례."
+    },
+    "mysql-8": {
+      "language": "Other",
+      "framework": "MySQL",
+      "version": "8.0",
+      "max_connections": 151,
+      "notes": "기본 max_connections=151. InnoDB 버퍼풀이 메모리의 ~70%. HA: Group Replication(MGR) 또는 Galera. ProxySQL/HAProxy로 라우팅 권장."
+    },
+    "mariadb-11": {
+      "language": "Other",
+      "framework": "MariaDB",
+      "version": "11",
+      "max_connections": 151,
+      "notes": "MySQL 호환 fork. Galera 클러스터 기본 지원. innodb_buffer_pool_size 메모리의 ~70%."
+    },
+    "mongodb-7": {
+      "language": "Other",
+      "framework": "MongoDB",
+      "version": "7",
+      "max_connections": 65536,
+      "notes": "WiredTiger 캐시가 (RAM-1)×50% 또는 256MB 중 큰 값. HA: replica set 3노드(primary+secondary+arbiter)."
+    },
+    "vllm-0.5": {
+      "language": "Python",
+      "framework": "vLLM",
+      "version": "0.5",
+      "concurrency": { "model": "async-await", "workers": 1 },
+      "notes": "GPU 메모리에 모델 로드 (7B≈14GB FP16, 13B≈26GB, 70B≈140GB FP16 또는 ~35GB INT4). Tensor parallelism으로 다중 GPU 활용. PagedAttention으로 throughput 최적. NVLink 권장."
+    },
+    "elasticsearch-8": {
+      "language": "Java",
+      "framework": "Elasticsearch",
+      "version": "8",
+      "concurrency": { "model": "thread-pool", "heap_gb": 4 },
+      "notes": "JVM heap은 메모리의 ~50% (≤32GB). HA: master(3)+data(3)+coord 분리. shard/replica 설계 필수."
+    },
+    "rabbitmq-3.13": {
+      "language": "Other",
+      "framework": "RabbitMQ",
+      "version": "3.13",
+      "notes": "Erlang 기반. HA: quorum queue 또는 classic mirrored. 클러스터 노드 수 홀수 권장."
     }
   }
 }

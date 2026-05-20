@@ -12,6 +12,16 @@
       "pattern": "^[a-z0-9][a-z0-9-]*$"
     },
     "name": { "type": "string" },
+    "locked": {
+      "type": "boolean",
+      "default": false,
+      "description": "true면 인스펙터에서 편집 불가, 삭제 시 추가 확인. UI에서 🔒 표시."
+    },
+    "hide_from_dep_graph": {
+      "type": "boolean",
+      "default": false,
+      "description": "true면 Dependency 그래프 뷰에서 이 워크로드 노드와 관련된 edge를 제외 (시각화 옵션 — 다른 동작·검증·export에는 영향 없음)."
+    },
     "category": {
       "enum": [
         "Frontend",
@@ -138,7 +148,19 @@
         "properties": {
           "size_gb": { "type": "number", "exclusiveMinimum": 0 },
           "storage_class": { "type": "string" },
-          "access_mode": { "enum": ["RWO", "ROX", "RWX"], "default": "RWO" }
+          "access_mode": { "enum": ["RWO", "ROX", "RWX"], "default": "RWO" },
+          "name": {
+            "type": "string",
+            "description": "PVC 이름 (선택). 비우면 data-{idx}로 자동. YAML/Helm에서 volumeMount name과 일치."
+          },
+          "mount_path": {
+            "type": "string",
+            "description": "컨테이너 내 마운트 경로 (선택). 비우면 /data/{name} 사용."
+          },
+          "target_storage_id": {
+            "type": "string",
+            "description": "이 PVC가 바인딩되는 site의 storage 엔티티 id (선택). 지정 시 storage_class는 해당 storage의 csi_driver/이름에서 자동 시드. 다이어그램에서 storage→workload 연결 표시에 사용."
+          }
         }
       }
     },

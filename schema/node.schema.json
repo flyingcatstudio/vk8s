@@ -85,7 +85,8 @@
               "name": { "type": "string" },
               "ip": { "type": "string" },
               "vlan": { "type": "integer" },
-              "purpose": { "enum": ["mgmt", "pod", "storage", "external"] }
+              "purpose": { "enum": ["mgmt", "pod", "storage", "external"] },
+              "speed_gbps": { "type": "number", "exclusiveMinimum": 0 }
             }
           }
         }

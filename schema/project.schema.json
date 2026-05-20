@@ -65,6 +65,11 @@
         "updated_at": { "type": "string", "format": "date-time" },
         "author": { "type": "string" }
       }
+    },
+    "line_styles": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "다이어그램 연결선별 스타일 오버라이드. key=lineId (예: l4:abc->cluster:def), value={ color, style }."
     }
   },
   "allOf": [

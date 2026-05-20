@@ -12,6 +12,11 @@
       "pattern": "^[a-z0-9][a-z0-9-]*$"
     },
     "name": { "type": "string" },
+    "locked": {
+      "type": "boolean",
+      "default": false,
+      "description": "true면 인스펙터에서 편집 불가, 삭제 시 추가 확인. UI에서 🔒 표시."
+    },
     "environment_tag": {
       "type": "string",
       "description": "예: cloud-prod, onprem-gpu, onprem-dr"
@@ -92,6 +97,11 @@
         "service_mesh": {
           "enum": ["Istio", "Linkerd", "None"],
           "default": "None"
+        },
+        "local_pv": {
+          "enum": ["None", "OpenEBS-LocalPV", "Longhorn-Local", "Local-Path-Provisioner"],
+          "default": "None",
+          "description": "노드 로컬 디스크 기반 PV 프로비저너. app-replicated stateful 워크로드(Patroni, MongoDB replica set, Kafka 등)에 적합. 외부 SAN/NAS 없이 노드 디스크를 직결로 사용."
         }
       }
     },
