@@ -1898,11 +1898,21 @@ function nextNodeIp(cluster, project) {
 
 //============ Catalog loader ============
 async function loadCatalog() {
-  const results = await Promise.all(CATALOG_FILES.map(async p => {
-    const res = await fetch(p);
-    if (!res.ok) throw new Error(`Failed to load ${p}: ${res.status}`);
-    return [p, await res.json()];
-  }));
+  // Production builds inline the catalog as window.__VK8S_CATALOG__ (see build.js).
+  // Dev (python3 -m http.server etc.) falls back to fetch.
+  const inlined = (typeof window !== "undefined") && window.__VK8S_CATALOG__ && window.__VK8S_CATALOG__.files;
+  let results;
+  if (inlined && CATALOG_FILES.every(p => inlined[p] != null)) {
+    results = CATALOG_FILES.map(p => [p, inlined[p]]);
+    console.log("Catalog source: inlined (build-time)");
+  } else {
+    results = await Promise.all(CATALOG_FILES.map(async p => {
+      const res = await fetch(p);
+      if (!res.ok) throw new Error(`Failed to load ${p}: ${res.status}`);
+      return [p, await res.json()];
+    }));
+    console.log("Catalog source: fetch (runtime)");
+  }
   const map = Object.fromEntries(results);
   state.catalog.gpuModels = map["data/gpu-models.json"].models;
   state.catalog.runtime   = map["data/runtime-profiles.json"].profiles;
@@ -13472,7 +13482,11 @@ async function init() {
   try {
     await loadCatalog();
   } catch (e) {
-    alert("Catalog 로드 실패: " + e.message + "\n로컬 file:// 으로 열면 fetch 차단됩니다. 정적 서버로 실행하세요. (예: python3 -m http.server)");
+    const isFile = location.protocol === "file:";
+    const hint = isFile
+      ? "로컬 file:// 으로 열면 fetch가 차단됩니다. 정적 서버로 실행하세요 (예: python3 -m http.server). 또는 빌드된 dist/ 버전을 사용하세요 — dist는 카탈로그가 인라인되어 file://에서도 동작합니다."
+      : "배포본에 카탈로그(data/*.json)가 포함되지 않았거나 네트워크 차단된 상태입니다. 새로고침(Ctrl+Shift+R)으로 캐시 무시 후 재시도해 보세요. 문제가 계속되면 빌드를 다시 배포하세요 (인라인 카탈로그 포함).";
+    alert("Catalog 로드 실패: " + e.message + "\n\n" + hint);
     console.error(e);
     return;
   }
