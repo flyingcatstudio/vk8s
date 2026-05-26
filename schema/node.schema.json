@@ -35,9 +35,9 @@
       "description": "이 노드가 속한 Site의 id"
     },
     "purpose": {
-      "enum": ["compute", "bastion", "storage", "edge"],
+      "enum": ["compute", "bastion", "storage", "edge", "management", "ci-runner"],
       "default": "compute",
-      "description": "운영 목적. compute=일반 워크로드, bastion=SSH 점프 호스트, storage=SDS 전용 (Ceph 등), edge=엣지 노드"
+      "description": "운영 목적. compute=일반 워크로드, bastion=SSH 점프 호스트, storage=SDS 전용 (Ceph 등), edge=엣지 노드, management=모니터링·운영 콘솔 등 관리 머신, ci-runner=빌드/배포 러너. management/bastion/ci-runner 노드는 architecture 뷰의 상단 'Ops/Mgmt' 레인에 별도로 그려짐."
     },
     "cluster_roles": {
       "type": "array",

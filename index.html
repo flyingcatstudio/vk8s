@@ -1306,7 +1306,7 @@ const HELP = {
     cat: "기타",
     title: "Capacity View — 스케줄링 시뮬레이션",
     body: "각 워커 노드의 실제 활용도를 보여줍니다. 워크로드의 모든 replica를 first-fit 알고리즘으로 노드에 배치 후, 노드별 CPU/Mem/GPU/VRAM/PSU 점유율을 계산.",
-    reco: "어떤 노드가 가장 빡빡한지, 어떤 pod이 안 들어가는지 한눈에 파악. anti-affinity / nodeSelector는 현재 미반영(다음 버전).",
+    reco: "어떤 노드가 가장 빡빡한지, 어떤 pod이 안 들어가는지 한눈에 파악. node_selector·tolerations·anti_affinity·DaemonSet도 시뮬레이션과 K8s YAML/Helm export에 모두 반영됩니다.",
   },
   "view.dependency": {
     cat: "기타",
@@ -1563,8 +1563,8 @@ const HELP = {
   "node.purpose": {
     cat: "노드",
     title: "Node Purpose",
-    body: "노드의 운영 목적. compute=일반 워크로드, bastion=SSH 점프 호스트(외부 접근 단일 진입점), storage=Ceph/Rook 등 SDS 전용, edge=CDN 엣지 / 5G MEC 등.",
-    reco: "대부분 compute. 보안 정책상 SSH 접근 단일 노드 만들 때 bastion 지정.",
+    body: "노드의 운영 목적. compute=일반 워크로드, bastion=SSH 점프 호스트(외부 접근 단일 진입점), storage=Ceph/Rook 등 SDS 전용, edge=CDN 엣지/5G MEC, management=모니터링/운영 콘솔/Ansible-AWX 등 관리 머신, ci-runner=GitLab Runner/Jenkins agent 등 빌드/배포 러너.",
+    reco: "대부분 compute. 보안 정책상 SSH 접근 단일 노드 만들 때 bastion. 관리/운영 전용 머신은 management, CI/CD 러너는 ci-runner — 이 셋은 architecture 뷰의 상단 'Ops/Mgmt' 레인에 묶여 표시됩니다.",
   },
   "workload.pvc": {
     cat: "워크로드",
@@ -2809,6 +2809,53 @@ function deleteNamespace(clusterId, name) {
   emit(); saveSoon();
 }
 
+// Rename a namespace and cascade the new name to every reference site:
+//   - workloads' .namespace
+//   - network_policies' .namespace
+//   - network_policies[].ingress[].from_namespaces[]
+//   - network_policies[].egress[].to_namespaces[]
+// Returns { ok: true } on success or { ok: false, error } with a human-readable reason.
+function renameNamespace(clusterId, oldName, newName) {
+  const c = state.project.clusters.find(x => x.id === clusterId);
+  if (!c || !c.namespaces) return { ok: false, error: "cluster를 찾을 수 없습니다" };
+  if (oldName === newName) return { ok: true, unchanged: true };
+  if (oldName === "default") {
+    return { ok: false, error: "'default' namespace는 K8s 기본이라 이름을 바꿀 수 없습니다" };
+  }
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(newName)) {
+    return { ok: false, error: "이름 형식 오류: 소문자·숫자·-만 허용, 첫 글자는 영숫자 (DNS-1123)" };
+  }
+  if (newName.length > 63) {
+    return { ok: false, error: "이름은 63자 이하여야 합니다 (DNS-1123)" };
+  }
+  if (c.namespaces.some(n => n.name === newName)) {
+    return { ok: false, error: `'${newName}'은 이미 이 cluster에 존재합니다` };
+  }
+  const ns = c.namespaces.find(n => n.name === oldName);
+  if (!ns) return { ok: false, error: `namespace '${oldName}'를 찾을 수 없습니다` };
+  ns.name = newName;
+  // Cascade to workloads
+  for (const w of (c.workloads || [])) {
+    if (w.namespace === oldName) w.namespace = newName;
+  }
+  // Cascade to network policies (own namespace + cross-NS references)
+  for (const np of (c.network_policies || [])) {
+    if (np.namespace === oldName) np.namespace = newName;
+    if (np.ingress) {
+      for (const r of np.ingress) {
+        if (r.from_namespaces) r.from_namespaces = r.from_namespaces.map(n => n === oldName ? newName : n);
+      }
+    }
+    if (np.egress) {
+      for (const r of np.egress) {
+        if (r.to_namespaces) r.to_namespaces = r.to_namespaces.map(n => n === oldName ? newName : n);
+      }
+    }
+  }
+  emit(); saveSoon();
+  return { ok: true };
+}
+
 function updateNamespaceField(clusterId, name, path, value) {
   const c = state.project.clusters.find(x => x.id === clusterId);
   if (!c || !c.namespaces) return;
@@ -3638,8 +3685,8 @@ function runValidator(project) {
     const workerNodes = nodes.filter(n => roleOf(n).includes("worker"));
     const totalCpu = workerNodes.reduce((a, n) => a + (n.spec?.vcpu || 0), 0);
     const totalMem = workerNodes.reduce((a, n) => a + (n.spec?.memory_gb || 0), 0);
-    const wlCpu = wls.reduce((a, w) => a + (w.resources?.requests?.cpu || 0) * (w.replicas || 1), 0);
-    const wlMem = wls.reduce((a, w) => a + (w.resources?.requests?.memory_gb || 0) * (w.replicas || 1), 0);
+    const wlCpu = wls.reduce((a, w) => a + (w.resources?.requests?.cpu || 0) * (w.replicas ?? 1), 0);
+    const wlMem = wls.reduce((a, w) => a + (w.resources?.requests?.memory_gb || 0) * (w.replicas ?? 1), 0);
     if (wls.length && totalCpu > 0 && wlCpu > totalCpu) {
       F("WORKLOAD_CPU_NOT_SCHEDULABLE", "error",
         `${c.name}: 워크로드 CPU ${wlCpu.toFixed(1)}c > 가용 ${totalCpu}c`, { kind: "cluster", id: c.id });
@@ -3668,7 +3715,7 @@ function runValidator(project) {
           aa + (g.count || 0) * (gpuModels[g.model]?.vram_gb || 0), 0), 0);
 
       if (vramMode) {
-        const totalNeededVram = vramReq * (w.replicas || 1);
+        const totalNeededVram = vramReq * (w.replicas ?? 1);
         if (totalAvailGpu === 0) {
           F("WORKLOAD_GPU_NO_NODE", "error",
             `${w.name}: GPU 요구하나 클러스터에 GPU 없음`, { kind: "workload", id: w.id });
@@ -3677,7 +3724,7 @@ function runValidator(project) {
             `${w.name}: VRAM ${totalNeededVram}GB 요구, ${totalAvailVram}GB 가용`, { kind: "workload", id: w.id });
         }
       } else {
-        const totalNeeded = (gReq.count || 0) * (w.replicas || 1);
+        const totalNeeded = (gReq.count || 0) * (w.replicas ?? 1);
         if (totalNeeded > 0 && totalAvailGpu === 0) {
           F("WORKLOAD_GPU_NO_NODE", "error",
             `${w.name}: GPU 요구하나 클러스터에 GPU 없음`, { kind: "workload", id: w.id });
@@ -3696,7 +3743,7 @@ function runValidator(project) {
           const modelVramAvail = workerNodes.reduce((a, n) =>
             a + (n.spec?.gpu || []).reduce((aa, g) =>
               aa + (g.model === gReq.model ? (g.count || 0) * (gpuModels[g.model]?.vram_gb || 0) : 0), 0), 0);
-          const modelVramNeeded = vramReq * (w.replicas || 1);
+          const modelVramNeeded = vramReq * (w.replicas ?? 1);
           if (modelVramNeeded > modelVramAvail) {
             F("WORKLOAD_GPU_MODEL_VRAM_INSUFFICIENT", "error",
               `${w.name}: ${gReq.model} VRAM ${modelVramNeeded}GB 요구, ${modelVramAvail}GB 가용`, { kind: "workload", id: w.id });
@@ -3708,9 +3755,22 @@ function runValidator(project) {
     // Workload-level rules
     for (const w of wls) {
       // SPOF
-      if ((w.replicas || 1) === 1 && ["API", "WAS", "DB", "Cache", "Queue"].includes(w.category)) {
+      if ((w.replicas ?? 1) === 1 && ["API", "WAS", "DB", "Cache", "Queue"].includes(w.category)) {
         F("SPOF_RISK", "warn",
           `${w.name}: replicas=1, ${w.category} (SPOF 위험)`, { kind: "workload", id: w.id });
+      }
+      // replicas_max sanity:
+      //   - max cannot be 0 (schema enforces minimum=1, but check defensively).
+      //   - max must be ≥ replicas when both are explicit (min may legitimately be 0).
+      const _minRep = w.replicas ?? 1;
+      if (w.replicas_max != null && w.replicas_max < 1) {
+        F("WORKLOAD_REPLICAS_MAX_INVALID", "error",
+          `${w.name}: replicas_max(${w.replicas_max})는 0일 수 없습니다`,
+          { kind: "workload", id: w.id }, "workload.replicas");
+      } else if (w.replicas_max != null && w.replicas_max < _minRep) {
+        F("WORKLOAD_REPLICAS_MAX_LT_MIN", "error",
+          `${w.name}: replicas_max(${w.replicas_max}) < replicas(${_minRep}) — max는 min 이상이어야 합니다`,
+          { kind: "workload", id: w.id }, "workload.replicas");
       }
       // JVM heap > memory request → OOM 보장
       const heap = w.runtime?.concurrency?.heap_gb;
@@ -4163,6 +4223,13 @@ function renderTree() {
   }
   actions.appendChild(el("button", { class: "add-btn", onclick: openAddNode }, ["＋ Add Node"]));
   actions.appendChild(el("button", { class: "add-btn", onclick: openAddCluster }, ["＋ Add Cluster"]));
+  // Workloads are cluster-scoped; this is a shortcut from the global tree so users
+  // don't have to navigate into a Cluster Inspector first.
+  actions.appendChild(el("button", {
+    class: "add-btn",
+    title: "워크로드 추가 (cluster를 선택)",
+    onclick: () => openAddWorkload(null),
+  }, ["＋ Add Workload"]));
   actions.appendChild(el("button", {
     class: "add-btn",
     title: "Paste cluster from clipboard",
@@ -4474,6 +4541,61 @@ function makeBarLine(label, valueText, pct) {
   ]);
 }
 
+// Two-tone bar: shows both REQUEST and LIMIT(max) usage on the same track.
+//   - Lighter underlay extends to pctMax (worst-case headroom check).
+//   - Solid overlay extends to pctReq (baseline guaranteed allocation).
+// Bar severity color is driven by pctMax (the limit-based overflow check),
+// so anything that bursts past capacity goes red even when requests still fit.
+function makeBarLineDual(label, valueText, pctReq, pctMax) {
+  const pReq = Math.max(0, Math.min(100, pctReq));
+  const pMax = Math.max(0, Math.min(100, pctMax));
+  return el("div", { class: "field" }, [
+    el("div", { class: "topo-bar-label" }, [
+      el("span", {}, [label]),
+      el("span", { class: "val" }, [valueText]),
+    ]),
+    el("div", { class: "bar", style: { position: "relative" } }, [
+      // Max layer — underlay, lighter
+      el("div", {
+        class: "bar-fill",
+        dataset: { level: clsLevel(pMax) },
+        style: { width: pMax + "%", opacity: 0.45 },
+      }),
+      // Request layer — full opacity, anchored at left
+      el("div", {
+        class: "bar-fill",
+        dataset: { level: clsLevel(pReq) },
+        style: { width: pReq + "%", position: "absolute", top: 0, left: 0 },
+      }),
+    ]),
+  ]);
+}
+
+// Resolve a workload's effective limit for cpu / memory_gb.
+// Convention (matches workload Resources tab placeholder): empty limit → 2× request.
+function workloadLimit(w, key) {
+  const reqs = w.resources?.requests || {};
+  const lims = w.resources?.limits || {};
+  if (lims[key] != null) return lims[key];
+  return (reqs[key] || 0) * 2;
+}
+
+// Replica count helpers. `replicas` is the baseline (= min) and may be **0** —
+// scale-to-zero is valid for on-demand workloads (e.g. GitLab Runner, KEDA jobs).
+// `replicas_max` is the upper bound; it cannot be 0. When unset, the effective max
+// is max(min, 1). HPA.max also acts as an implicit cap when set.
+function replicasMin(w) {
+  const r = w.replicas;
+  return Math.max(0, typeof r === "number" ? r : 1);
+}
+function replicasMax(w) {
+  const min = replicasMin(w);
+  const explicit = w.replicas_max || 0;
+  const hpaMax = w.hpa?.max || 0;
+  // Max must be ≥ 1 (cannot be zero) AND ≥ min.
+  return Math.max(1, min, explicit, hpaMax);
+}
+
 function renderNodeInspector(root, id) {
   const n = state.project.nodes.find(x => x.id === id);
   if (!n) return;
@@ -4538,7 +4660,7 @@ function renderNodeInspector(root, id) {
     lbl("Purpose", "node.purpose"),
     el("select", {
       onchange: e => updateNodeField(id, "purpose", e.target.value),
-    }, ["compute", "bastion", "storage", "edge"].map(p =>
+    }, ["compute", "bastion", "storage", "edge", "management", "ci-runner"].map(p =>
       el("option", { value: p, selected: p === (n.purpose || "compute") ? "" : null }, [p]))),
   ]));
 
@@ -5297,8 +5419,8 @@ function renderClusterInspector(root, id) {
     const list = el("div", { class: "row-list" });
     for (const w of workloads) {
       const reqs = w.resources?.requests || {};
-      const totalCpu = (reqs.cpu || 0) * (w.replicas || 1);
-      const totalMem = (reqs.memory_gb || 0) * (w.replicas || 1);
+      const totalCpu = (reqs.cpu || 0) * (w.replicas ?? 1);
+      const totalMem = (reqs.memory_gb || 0) * (w.replicas ?? 1);
       list.appendChild(el("div", { class: "row" }, [
         el("span", { class: "icon" }, ["◇"]),
         el("span", { class: "name", style: { cursor: "pointer" }, onclick: () => selectEntity("workload", w.id) }, [w.name]),
@@ -5892,8 +6014,12 @@ function renderWorkloadInspector(root, id) {
   const found = findWorkload(id);
   if (!found) return;
   const { workload: w, cluster } = found;
-  const totalCpu = (w.resources?.requests?.cpu || 0) * (w.replicas || 1);
-  const totalMem = (w.resources?.requests?.memory_gb || 0) * (w.replicas || 1);
+  const _rMin = replicasMin(w);
+  const _rMax = replicasMax(w);
+  const totalCpu = (w.resources?.requests?.cpu || 0) * _rMin;
+  const totalCpuMax = workloadLimit(w, "cpu") * _rMax;
+  const totalMem = (w.resources?.requests?.memory_gb || 0) * _rMin;
+  const totalMemMax = workloadLimit(w, "memory_gb") * _rMax;
   const gpuReq = w.resources?.requests?.gpu;
 
   const wlLocked = isWorkloadLocked(w);
@@ -5968,14 +6094,32 @@ function renderWorkloadInspector(root, id) {
     if (!cnsNames.includes(currentNs)) cnsNames.push(currentNs);
     root.appendChild(el("div", { class: "field-row" }, [
       el("div", { class: "field" }, [
-        lbl("Replicas", "workload.replicas"),
+        lbl("Replicas (min)", "workload.replicas"),
         el("input", {
           "data-focus-key": `workload.${id}.replicas`,
           type: "text", inputmode: "numeric", pattern: "[0-9]*",
           value: w.replicas != null ? w.replicas : 1,
+          // min may be 0 (scale-to-zero workloads like GitLab Runner / KEDA jobs).
           oninput: e => {
             const v = parseIntInput(e.target.value);
-            if (v != null && v >= 1) updateWorkloadField(id, "replicas", v);
+            if (v != null && v >= 0) updateWorkloadField(id, "replicas", v);
+          },
+        }),
+      ]),
+      el("div", { class: "field" }, [
+        lbl("Replicas (max)", "workload.replicas"),
+        el("input", {
+          "data-focus-key": `workload.${id}.replicas_max`,
+          type: "text", inputmode: "numeric", pattern: "[0-9]*",
+          value: w.replicas_max != null ? w.replicas_max : "",
+          placeholder: `(default: ${Math.max(1, w.replicas != null ? w.replicas : 1)})`,
+          // max must be ≥ 1 — cannot be zero (a workload with a defined upper bound must
+          // be able to run at least one pod when triggered).
+          oninput: e => {
+            const raw = e.target.value;
+            if (raw === "") return updateWorkloadField(id, "replicas_max", undefined);
+            const v = parseIntInput(raw);
+            if (v != null && v >= 1) updateWorkloadField(id, "replicas_max", v);
           },
         }),
       ]),
@@ -6163,12 +6307,25 @@ function renderWorkloadInspector(root, id) {
     }
 
     root.appendChild(el("div", { class: "section-title" }, ["Cluster total"]));
-    const totalGpuLine = gpuReq.vram_gb
-      ? `${(gpuReq.vram_gb * (w.replicas || 1)).toFixed(0)} GB VRAM${gpuReq.model ? ` (${gpuReq.model})` : " (any)"}`
-      : gpuReq.count ? `${gpuReq.count * (w.replicas || 1)} GPUs` : "no GPU";
+    const showRange = _rMax > _rMin;
+    const fmtR = (lo, hi) => showRange ? `${lo} ~ ${hi}` : `${lo}`;
+    const cpuRangeTxt = fmtR(totalCpu, totalCpuMax.toFixed(1).replace(/\.?0+$/, ""));
+    const memRangeTxt = fmtR(totalMem, totalMemMax.toFixed(1).replace(/\.?0+$/, ""));
+    let gpuRangeTxt;
+    if (gpuReq.vram_gb) {
+      const vramMin = gpuReq.vram_gb * _rMin;
+      const vramMax = gpuReq.vram_gb * _rMax;
+      gpuRangeTxt = `${fmtR(vramMin.toFixed(0), vramMax.toFixed(0))} GB VRAM${gpuReq.model ? ` (${gpuReq.model})` : " (any)"}`;
+    } else if (gpuReq.count) {
+      gpuRangeTxt = `${fmtR(gpuReq.count * _rMin, gpuReq.count * _rMax)} GPUs`;
+    } else {
+      gpuRangeTxt = "no GPU";
+    }
     root.appendChild(el("div", { class: "compat-result" }, [
-      el("div", {}, [`${totalCpu} vCPU · ${totalMem} GB RAM · ${totalGpuLine}`]),
-      el("div", { style: { color: "var(--text2)" } }, [`(per pod × ${w.replicas} replicas)`]),
+      el("div", {}, [`${cpuRangeTxt} vCPU · ${memRangeTxt} GB RAM · ${gpuRangeTxt}`]),
+      el("div", { style: { color: "var(--text2)" } }, [showRange
+        ? `(per pod · replicas ${_rMin} ~ ${_rMax}, min = req, max = limit×max_replicas)`
+        : `(per pod × ${_rMin} replicas)`]),
     ]));
 
     // Persistent Volumes
@@ -7942,6 +8099,53 @@ function renderTopologyDiagram(root, p) {
   root.appendChild(legend);
 }
 
+//============ Scheduling simulation helpers ============
+
+// Does a node's labels satisfy every key/value pair in the workload's nodeSelector?
+function nodeMatchesSelector(node, selector) {
+  if (!selector || !Object.keys(selector).length) return true;
+  const labels = node.labels || {};
+  for (const [k, v] of Object.entries(selector)) {
+    if (labels[k] !== v) return false;
+  }
+  return true;
+}
+
+// Does a workload's tolerations cover every NoSchedule/NoExecute taint on this node?
+// K8s rule: each taint with effect NoSchedule or NoExecute must be tolerated.
+// PreferNoSchedule is soft and never blocks placement.
+function nodeAcceptsWorkloadTaints(node, tolerations) {
+  const blocking = (node.taints || []).filter(t => t.effect === "NoSchedule" || t.effect === "NoExecute");
+  if (!blocking.length) return true;
+  const tols = tolerations || [];
+  for (const t of blocking) {
+    const ok = tols.some(tol => {
+      // effect on toleration is optional — empty means "matches any effect".
+      if (tol.effect && tol.effect !== t.effect) return false;
+      const op = tol.operator || "Equal";
+      if (op === "Exists") {
+        // Exists matches any taint with the same key (or any key if tol.key is empty).
+        return !tol.key || tol.key === t.key;
+      }
+      // Equal: key must match (or be empty to match all) AND value must match.
+      if (tol.key && tol.key !== t.key) return false;
+      return (tol.value || "") === (t.value || "");
+    });
+    if (!ok) return false;
+  }
+  return true;
+}
+
+// Filter workers down to ones a given workload is allowed to schedule on.
+// node_selector and tolerations are both honored (default to "any" when absent).
+function eligibleWorkersFor(workload, workers) {
+  const sel = workload.scheduling?.node_selector || {};
+  const tols = workload.scheduling?.tolerations || [];
+  return workers.filter(n =>
+    nodeMatchesSelector(n, sel) && nodeAcceptsWorkloadTaints(n, tols)
+  );
+}
+
 //============ Scheduling simulation (first-fit) ============
 function simulateScheduling(project) {
   const gpuModels = state.catalog.gpuModels;
@@ -7980,23 +8184,53 @@ function simulateScheduling(project) {
       const reqs = w.resources?.requests || {};
       const cpuReq = reqs.cpu || 0;
       const memReq = reqs.memory_gb || 0;
-      const gpuModel = reqs.gpu?.model;                     // optional model filter
-      const vramReq = reqs.gpu?.vram_gb || 0;               // VRAM-based primary
-      const gpuCountReq = reqs.gpu?.count || 0;             // legacy count fallback
-      const vramMode = vramReq > 0;                         // VRAM-mode flag
+      const gpuModel = reqs.gpu?.model;
+      const vramReq = reqs.gpu?.vram_gb || 0;
+      const gpuCountReq = reqs.gpu?.count || 0;
+      const vramMode = vramReq > 0;
+      const cpuMax = workloadLimit(w, "cpu");
+      const memMax = workloadLimit(w, "memory_gb");
 
-      for (let i = 0; i < (w.replicas || 1); i++) {
+      // Selector + toleration filter once per workload.
+      const eligibleAll = eligibleWorkersFor(w, workers);
+      const isDaemonSet = w.kind === "DaemonSet";
+      // DaemonSet creates one pod per eligible worker; other kinds use the user-set replicas.
+      const replicaCount = isDaemonSet ? eligibleAll.length : (w.replicas ?? 1);
+
+      const aa = w.scheduling?.anti_affinity || "none";
+      const zoneOf = (n) => n?.labels?.["topology.kubernetes.io/zone"] || n?.site_id || null;
+      const placedByNode = new Map(); // this workload's per-node placement count (for anti-affinity)
+
+      for (let i = 0; i < replicaCount; i++) {
+        // Order the candidate pool by anti-affinity preference (still bound to eligibleAll).
+        let pool = eligibleAll;
+        if (isDaemonSet) {
+          // Strict: one pod per node, even without explicit anti-affinity.
+          pool = pool.filter(n => !placedByNode.has(n.id));
+        } else if (aa === "spread-by-node") {
+          pool = [...pool].sort((a, b) =>
+            (placedByNode.get(a.id) || 0) - (placedByNode.get(b.id) || 0));
+        } else if (aa === "spread-by-zone") {
+          const zoneCounts = new Map();
+          for (const [nid, count] of placedByNode) {
+            const node = workers.find(x => x.id === nid);
+            const z = zoneOf(node);
+            zoneCounts.set(z, (zoneCounts.get(z) || 0) + count);
+          }
+          pool = [...pool].sort((a, b) =>
+            (zoneCounts.get(zoneOf(a)) || 0) - (zoneCounts.get(zoneOf(b)) || 0));
+        }
+
+        // First-fit through the ordered pool.
         let placedNode = null;
-        for (const n of workers) {
+        for (const n of pool) {
           const r = remaining.get(n.id);
           if (!r) continue;
           if (r.cpu < cpuReq || r.mem < memReq) continue;
           if (vramMode) {
-            // VRAM-based: workload consumes VRAM from a model-specific pool, or any pool if no model.
             const availVram = gpuModel ? (r.vramByModel.get(gpuModel) || 0) : r.vram;
             if (availVram < vramReq) continue;
           } else {
-            // Legacy count-based.
             if (r.gpu < gpuCountReq) continue;
             if (gpuModel && (r.gpuByModel.get(gpuModel) || 0) < gpuCountReq) continue;
           }
@@ -8004,9 +8238,7 @@ function simulateScheduling(project) {
           r.cpu -= cpuReq; r.mem -= memReq;
           if (vramMode) {
             r.vram -= vramReq;
-            if (gpuModel) {
-              r.vramByModel.set(gpuModel, (r.vramByModel.get(gpuModel) || 0) - vramReq);
-            }
+            if (gpuModel) r.vramByModel.set(gpuModel, (r.vramByModel.get(gpuModel) || 0) - vramReq);
           } else {
             r.gpu -= gpuCountReq; r.vram -= (vramReq || 0);
             if (gpuModel && gpuCountReq > 0) {
@@ -8018,39 +8250,59 @@ function simulateScheduling(project) {
           placedNode = n.id;
           break;
         }
+
         if (placedNode) {
+          placedByNode.set(placedNode, (placedByNode.get(placedNode) || 0) + 1);
           if (!placements.has(placedNode)) placements.set(placedNode, []);
           placements.get(placedNode).push({
-            workloadId: w.id, workloadName: w.name, replicaIdx: i,
-            cpuReq, memReq,
+            workloadId: w.id, workloadName: w.name,
+            namespace: w.namespace || "default", kind: w.kind || "Deployment",
+            replicaIdx: i,
+            cpuReq, memReq, cpuMax, memMax,
             gpuReq: vramMode ? 0 : gpuCountReq,
             vramReq: vramMode ? vramReq : 0,
             gpuModel, vramMode,
           });
         } else {
-          // Collect per-node fail reasons against the live remaining state.
+          // Build per-worker fail reasons. Distinguish selector/taint blocks (workload
+          // can never run here) from resource shortages (could run if freed).
           const perNode = [];
           for (const n of workers) {
             const r = remaining.get(n.id);
             if (!r) continue;
             const fails = [];
-            if (r.cpu < cpuReq) fails.push({ dim: "cpu", have: r.cpu, need: cpuReq, unit: "c" });
-            if (r.mem < memReq) fails.push({ dim: "mem", have: r.mem, need: memReq, unit: "GB" });
-            if (vramMode) {
-              const availVram = gpuModel ? (r.vramByModel.get(gpuModel) || 0) : r.vram;
-              if (availVram < vramReq) {
-                fails.push({ dim: gpuModel ? `${gpuModel} VRAM` : "VRAM", have: availVram, need: vramReq, unit: "GB" });
+            const matchesSel = nodeMatchesSelector(n, w.scheduling?.node_selector);
+            const acceptsTaint = nodeAcceptsWorkloadTaints(n, w.scheduling?.tolerations);
+            if (!matchesSel) {
+              fails.push({ dim: "nodeSelector", have: 0, need: 1, unit: "match" });
+            }
+            if (!acceptsTaint) {
+              fails.push({ dim: "taint", have: 0, need: 1, unit: "tolerate" });
+            }
+            if (matchesSel && acceptsTaint) {
+              if (r.cpu < cpuReq) fails.push({ dim: "cpu", have: r.cpu, need: cpuReq, unit: "c" });
+              if (r.mem < memReq) fails.push({ dim: "mem", have: r.mem, need: memReq, unit: "GB" });
+              if (vramMode) {
+                const availVram = gpuModel ? (r.vramByModel.get(gpuModel) || 0) : r.vram;
+                if (availVram < vramReq) {
+                  fails.push({ dim: gpuModel ? `${gpuModel} VRAM` : "VRAM", have: availVram, need: vramReq, unit: "GB" });
+                }
+              } else {
+                if (r.gpu < gpuCountReq) fails.push({ dim: "gpu", have: r.gpu, need: gpuCountReq, unit: "" });
+                if (gpuModel && (r.gpuByModel.get(gpuModel) || 0) < gpuCountReq) {
+                  fails.push({ dim: gpuModel, have: r.gpuByModel.get(gpuModel) || 0, need: gpuCountReq, unit: "" });
+                }
               }
-            } else {
-              if (r.gpu < gpuCountReq) fails.push({ dim: "gpu", have: r.gpu, need: gpuCountReq, unit: "" });
-              if (gpuModel && (r.gpuByModel.get(gpuModel) || 0) < gpuCountReq) {
-                fails.push({ dim: gpuModel, have: r.gpuByModel.get(gpuModel) || 0, need: gpuCountReq, unit: "" });
+              if (isDaemonSet && placedByNode.has(n.id)) {
+                fails.push({ dim: "DaemonSet-dup", have: 1, need: 0, unit: "" });
               }
             }
             perNode.push({ nodeId: n.id, nodeName: n.name, fails });
           }
           unscheduled.push({
-            workloadId: w.id, workloadName: w.name, replicaIdx: i,
+            workloadId: w.id, workloadName: w.name,
+            namespace: w.namespace || "default", kind: w.kind || "Deployment",
+            replicaIdx: i,
             clusterId: c.id, clusterName: c.name,
             reqs: {
               cpu: cpuReq, mem: memReq,
@@ -8084,32 +8336,221 @@ function renderCapacity() {
   }
   const gpuModels = state.catalog.gpuModels;
   const sim = simulateScheduling(p);
-  const totalPods = clusters.reduce((a, c) => a + (c.workloads || []).reduce((aa, w) => aa + (w.replicas || 1), 0), 0);
-  const placedPods = totalPods - sim.unscheduled.length;
+  // DaemonSet plans 1 pod per eligible worker, not w.replicas — so derive totals from
+  // the simulator's own output instead of summing replicas directly.
+  const placedPods = [...sim.placements.values()].reduce((a, arr) => a + arr.length, 0);
+  const totalPods = placedPods + sim.unscheduled.length;
+
+  // View-local toggle: per-namespace breakdown vs per-node simulation.
+  if (state.ui.capacityNsBreakdown == null) state.ui.capacityNsBreakdown = false;
+  const nsMode = state.ui.capacityNsBreakdown;
+
+  // Toolbar with the toggle.
+  const toolbar = el("div", {
+    style: { display: "flex", alignItems: "center", gap: "12px", marginBottom: "12px", flexWrap: "wrap" },
+  });
+  toolbar.appendChild(el("span", {
+    style: { fontSize: "11px", color: "var(--text2)", letterSpacing: "0.05em", textTransform: "uppercase", fontWeight: 600 },
+  }, ["View"]));
+  const mkModeTab = (id, label) => el("button", {
+    class: "view-tab" + ((id === "ns" ? nsMode : !nsMode) ? " active" : ""),
+    style: { padding: "4px 10px", fontSize: "11px" },
+    onclick: () => { state.ui.capacityNsBreakdown = (id === "ns"); emit(); },
+  }, [label]);
+  toolbar.appendChild(mkModeTab("node", "Cluster (scheduling)"));
+  toolbar.appendChild(mkModeTab("ns", "Per-namespace (quota)"));
+  root.appendChild(toolbar);
 
   // Top summary
   const summary = el("div", { class: "next-hint" }, [
     el("span", { class: "icon" }, ["⎈"]),
     el("div", { class: "body" }, [
       el("div", { class: "head" }, [
-        "Scheduling simulation (first-fit) ", helpIcon("view.capacity"),
+        nsMode ? "Namespace 별 요청 합산 vs ResourceQuota" : "Scheduling simulation (first-fit) ",
+        helpIcon("view.capacity"),
       ]),
-      el("div", { class: "lead" }, [
-        `${placedPods}/${totalPods} pods placed`,
-        sim.unscheduled.length
-          ? el("span", { style: { color: "var(--red)", marginLeft: "10px" } }, [`⊗ ${sim.unscheduled.length} unschedulable`])
-          : el("span", { style: { color: "var(--green)", marginLeft: "10px" } }, ["✓ all placed"]),
-      ]),
+      el("div", { class: "lead" }, nsMode
+        ? [
+            `${clusters.length} cluster · ${clusters.reduce((a, c) => a + (c.namespaces || []).length, 0)} namespaces`,
+            el("span", { style: { color: "var(--text3)", marginLeft: "10px", fontSize: "11px" } },
+              ["ns 옆 'set quota'를 눌러 한도 설정 — 한도 미설정 시 cluster total 대비 비율 표시"]),
+          ]
+        : [
+            `${placedPods}/${totalPods} pods placed`,
+            sim.unscheduled.length
+              ? el("span", { style: { color: "var(--red)", marginLeft: "10px" } }, [`⊗ ${sim.unscheduled.length} unschedulable`])
+              : el("span", { style: { color: "var(--green)", marginLeft: "10px" } }, ["✓ all placed"]),
+          ]),
     ]),
   ]);
   root.appendChild(summary);
 
   for (const c of clusters) {
-    root.appendChild(renderCapacityCluster(c, sim, p, gpuModels));
+    root.appendChild(nsMode
+      ? renderCapacityNsCluster(c, p, gpuModels)
+      : renderCapacityCluster(c, sim, p, gpuModels));
   }
-  if (sim.unscheduled.length) {
+  // Unschedulable card belongs to per-node simulation mode only.
+  if (!nsMode && sim.unscheduled.length) {
     root.appendChild(renderUnscheduled(sim.unscheduled));
   }
+}
+
+// Per-namespace usage card (used when capacityNsBreakdown toggle is on).
+// Aggregates each workload's requested CPU/Memory/GPU × replicas into its namespace bucket,
+// and compares to ns.resource_quota when set (otherwise against cluster worker totals).
+function renderCapacityNsCluster(c, project, gpuModels) {
+  // 1) Aggregate by namespace.
+  //    Each cell tracks two end-points of the consumption range:
+  //      • `cpu`     = baseline = sum(min_replicas × cpu_request)   — guaranteed at idle
+  //      • `cpuMax`  = peak     = sum(max_replicas × cpu_limit)     — absolute worst case
+  //    Same convention for mem/vram. GPU is measured as VRAM (GB) only.
+  const byNs = new Map();
+  for (const w of c.workloads || []) {
+    const ns = w.namespace || "default";
+    const reqs = w.resources?.requests || {};
+    const rMin = replicasMin(w);
+    const rMax = replicasMax(w);
+    const cur = byNs.get(ns) || {
+      name: ns,
+      cpu: 0, cpuMax: 0,
+      mem: 0, memMax: 0,
+      vram: 0, vramMax: 0,
+      podsMin: 0, podsMax: 0, wlCount: 0,
+    };
+    cur.cpu    += (reqs.cpu || 0) * rMin;
+    cur.cpuMax += workloadLimit(w, "cpu") * rMax;
+    cur.mem    += (reqs.memory_gb || 0) * rMin;
+    cur.memMax += workloadLimit(w, "memory_gb") * rMax;
+    // VRAM (single dimension — no separate request/limit in K8s GPU model).
+    let perPodVram = 0;
+    if (reqs.gpu?.vram_gb) {
+      perPodVram = reqs.gpu.vram_gb || 0;
+    } else if (reqs.gpu?.count && reqs.gpu?.model) {
+      perPodVram = (reqs.gpu.count || 0) * (gpuModels[reqs.gpu.model]?.vram_gb || 0);
+    }
+    cur.vram    += perPodVram * rMin;
+    cur.vramMax += perPodVram * rMax;
+    cur.podsMin += rMin;
+    cur.podsMax += rMax;
+    cur.wlCount += 1;
+    byNs.set(ns, cur);
+  }
+  // Include declared namespaces even when empty (so quotas are visible).
+  for (const ns of (c.namespaces || [])) {
+    if (!byNs.has(ns.name)) {
+      byNs.set(ns.name, {
+        name: ns.name, cpu: 0, cpuMax: 0, mem: 0, memMax: 0,
+        vram: 0, vramMax: 0, podsMin: 0, podsMax: 0, wlCount: 0,
+      });
+    }
+  }
+
+  // 2) Cluster worker totals (used as reference when a quota is missing).
+  const workers = (c.node_ids || []).map(id => project.nodes.find(n => n.id === id))
+    .filter(n => n && (n.cluster_roles || []).includes("worker"));
+  const totCpu  = workers.reduce((a, n) => a + (n.spec?.vcpu || 0), 0);
+  const totMem  = workers.reduce((a, n) => a + (n.spec?.memory_gb || 0), 0);
+  const totVram = workers.reduce((a, n) => a + (n.spec?.gpu || []).reduce((aa, g) =>
+    aa + (g.count || 0) * (gpuModels[g.model]?.vram_gb || 0), 0), 0);
+
+  const card = el("div", { class: "topo-site" });
+  card.appendChild(el("div", { class: "topo-site-header" }, [
+    el("span", { class: "name" }, [c.name]),
+    el("span", {
+      class: "kind",
+      style: { background: "rgba(167,139,250,.15)", color: "var(--purple)" },
+    }, ["cluster"]),
+    el("span", { class: "region" }, [
+      `${byNs.size} namespaces · ${(c.workloads || []).length} workloads`,
+    ]),
+  ]));
+  card.appendChild(el("div", {
+    style: { padding: "8px 14px 0", fontSize: "11px", color: "var(--text2)", fontFamily: "JetBrains Mono" },
+  }, [`worker total: ${totCpu}c · ${totMem}GB${totVram ? ` · ${totVram}GB VRAM` : ""}`]));
+
+  // 3) Per-namespace rows (sorted by requested CPU desc).
+  const nsList = [...byNs.values()].sort((a, b) => b.cpu - a.cpu || a.name.localeCompare(b.name));
+  const wrap = el("div", { style: { padding: "8px 14px 12px" } });
+  for (const nsInfo of nsList) {
+    const nsDef = (c.namespaces || []).find(x => x.name === nsInfo.name);
+    const q = nsDef?.resource_quota || {};
+    const hasQuota = ["cpu", "memory_gb", "gpu", "max_pods"].some(k => q[k] != null);
+
+    const row = el("div", {
+      style: { padding: "10px 0", borderTop: "1px solid var(--border)" },
+    });
+    const head = el("div", {
+      style: { display: "flex", alignItems: "baseline", gap: "10px", marginBottom: "6px" },
+    });
+    head.appendChild(el("span", { style: { fontWeight: 600, color: "var(--text)" } }, [nsInfo.name]));
+    // Pod count: show min~max range when they differ (HPA / replicas_max set).
+    const podsLabel = nsInfo.podsMin === nsInfo.podsMax
+      ? `${nsInfo.wlCount}w · ${nsInfo.podsMin}p`
+      : `${nsInfo.wlCount}w · ${nsInfo.podsMin}~${nsInfo.podsMax}p`;
+    head.appendChild(el("span", {
+      style: { fontSize: "10px", color: "var(--text3)", fontFamily: "JetBrains Mono" },
+    }, [podsLabel]));
+    if (q.max_pods != null) {
+      // Quota check is against peak (max replicas) — worst case must still fit.
+      const over = nsInfo.podsMax > q.max_pods;
+      head.appendChild(el("span", {
+        style: { fontSize: "10px", color: over ? "var(--red)" : "var(--text3)", fontFamily: "JetBrains Mono" },
+      }, [`pods ${nsInfo.podsMax}/${q.max_pods}${over ? " ▲" : ""}`]));
+    }
+    head.appendChild(el("span", { style: { flex: 1 } }, []));
+    head.appendChild(el("button", {
+      style: {
+        fontSize: "10px", color: hasQuota ? "var(--purple)" : "var(--text2)",
+        background: hasQuota ? "rgba(167,139,250,.10)" : "var(--surface2)",
+        border: "1px solid " + (hasQuota ? "rgba(167,139,250,.25)" : "var(--border)"),
+        borderRadius: "4px", padding: "2px 8px", cursor: "pointer", fontFamily: "JetBrains Mono",
+      },
+      onclick: e => { e.stopPropagation(); openEditNamespace(c.id, nsInfo.name); },
+    }, [hasQuota ? "⚙ edit quota" : "+ set quota"]));
+    row.appendChild(head);
+
+    const bars = el("div", {
+      style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 16px" },
+    });
+    // Each bar shows the consumption range:
+    //   underlay (lighter) = max · limit  — absolute peak (HPA scaled-out + bursting)
+    //   overlay  (solid)   = min · req    — baseline (always committed)
+    // Severity color follows the peak (pctMax) so overflow is visible even when the baseline still fits.
+    // CPU
+    {
+      const limit = q.cpu;
+      const denom = limit != null ? limit : totCpu;
+      const pctReq = denom > 0 ? (nsInfo.cpu    / denom * 100) : 0;
+      const pctMax = denom > 0 ? (nsInfo.cpuMax / denom * 100) : 0;
+      const refTxt = limit != null ? `${limit}c quota` : `${totCpu}c cluster`;
+      const txt = `${nsInfo.cpu.toFixed(1)} (min·req) · ${nsInfo.cpuMax.toFixed(1)} (max·limit) / ${refTxt}`;
+      bars.appendChild(makeBarLineDual("CPU", txt, pctReq, pctMax));
+    }
+    // Memory
+    {
+      const limit = q.memory_gb;
+      const denom = limit != null ? limit : totMem;
+      const pctReq = denom > 0 ? (nsInfo.mem    / denom * 100) : 0;
+      const pctMax = denom > 0 ? (nsInfo.memMax / denom * 100) : 0;
+      const refTxt = limit != null ? `${limit}GB quota` : `${totMem}GB cluster`;
+      const txt = `${nsInfo.mem.toFixed(0)} (min·req) · ${nsInfo.memMax.toFixed(0)} (max·limit) / ${refTxt}`;
+      bars.appendChild(makeBarLineDual("Memory", txt, pctReq, pctMax));
+    }
+    // VRAM — GPU axis. Dual when peak differs from baseline (replicas_max > replicas).
+    if (nsInfo.vram > 0 || nsInfo.vramMax > 0) {
+      const pctMin = totVram > 0 ? (nsInfo.vram    / totVram * 100) : 0;
+      const pctMax = totVram > 0 ? (nsInfo.vramMax / totVram * 100) : 0;
+      const txt = (nsInfo.vramMax > nsInfo.vram)
+        ? `${nsInfo.vram.toFixed(0)} (min) · ${nsInfo.vramMax.toFixed(0)} (max) GB of ${totVram}GB`
+        : `${nsInfo.vram.toFixed(0)}GB of ${totVram}GB`;
+      bars.appendChild(makeBarLineDual("VRAM", txt, pctMin, pctMax));
+    }
+    row.appendChild(bars);
+    wrap.appendChild(row);
+  }
+  card.appendChild(wrap);
+  return card;
 }
 
 function renderCapacityCluster(c, sim, project, gpuModels) {
@@ -8129,22 +8570,185 @@ function renderCapacityCluster(c, sim, project, gpuModels) {
     ]),
   ]));
 
+  // ── Cluster capacity totals (above workloads) ──
+  // Sums across all worker nodes. A first-fit simulator tends to stuff everything on the
+  // first node and leave others empty, which is misleading for capacity planning. The
+  // cluster total view side-steps that artifact: what matters is whether the total demand
+  // fits inside the total supply.
+  if (workers.length) {
+    const totCpu  = workers.reduce((a, n) => a + (n.spec?.vcpu || 0), 0);
+    const totMem  = workers.reduce((a, n) => a + (n.spec?.memory_gb || 0), 0);
+    const totVram = workers.reduce((a, n) =>
+      a + (n.spec?.gpu || []).reduce((aa, g) =>
+        aa + (g.count || 0) * (gpuModels[g.model]?.vram_gb || 0), 0), 0);
+    const totPsu   = workers.reduce((a, n) => a + (n.spec?.power?.psu_max_w || 0), 0);
+    const totPower = workers.reduce((a, n) => a + computeNodePowerW(n, gpuModels), 0);
+
+    let usedCpuReq = 0, usedCpuMax = 0, usedMemReq = 0, usedMemMax = 0, usedVram = 0;
+    let placedPods = 0;
+    for (const wkr of workers) {
+      const placed = sim.placements.get(wkr.id) || [];
+      placedPods += placed.length;
+      usedCpuReq += placed.reduce((a, p) => a + p.cpuReq, 0);
+      usedCpuMax += placed.reduce((a, p) => a + (p.cpuMax != null ? p.cpuMax : p.cpuReq * 2), 0);
+      usedMemReq += placed.reduce((a, p) => a + p.memReq, 0);
+      usedMemMax += placed.reduce((a, p) => a + (p.memMax != null ? p.memMax : p.memReq * 2), 0);
+      usedVram   += placed.reduce((a, p) => {
+        if (p.vramMode) return a + (p.vramReq || 0);
+        return a + (p.gpuModel ? (gpuModels[p.gpuModel]?.vram_gb || 0) * (p.gpuReq || 0) : 0);
+      }, 0);
+    }
+    const totWorkers = workers.length;
+
+    const capBox = el("div", {
+      style: { padding: "10px 14px", borderBottom: "1px solid var(--border)" },
+    });
+    capBox.appendChild(el("div", {
+      style: {
+        fontSize: "10px", color: "var(--text2)",
+        textTransform: "uppercase", letterSpacing: "0.05em",
+        marginBottom: "6px", fontWeight: 600,
+      },
+    }, [`Cluster capacity — ${totWorkers} worker${totWorkers > 1 ? "s" : ""} · ${placedPods} pods placed`]));
+    capBox.appendChild(el("div", {
+      style: { fontSize: "11px", color: "var(--text3)", fontFamily: "JetBrains Mono", marginBottom: "8px" },
+    }, [`총 ${totCpu}c · ${totMem}GB${totVram ? ` · ${totVram}GB VRAM` : ""}${totPsu ? ` · PSU ${totPsu}W` : ""}`]));
+
+    const capBars = el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 16px" } });
+    {
+      const pctReq = totCpu > 0 ? usedCpuReq / totCpu * 100 : 0;
+      const pctMax = totCpu > 0 ? usedCpuMax / totCpu * 100 : 0;
+      capBars.appendChild(makeBarLineDual(
+        "CPU",
+        `${usedCpuReq.toFixed(1)} req · ${usedCpuMax.toFixed(1)} max / ${totCpu}c`,
+        pctReq, pctMax));
+    }
+    {
+      const pctReq = totMem > 0 ? usedMemReq / totMem * 100 : 0;
+      const pctMax = totMem > 0 ? usedMemMax / totMem * 100 : 0;
+      capBars.appendChild(makeBarLineDual(
+        "Memory",
+        `${usedMemReq.toFixed(0)} req · ${usedMemMax.toFixed(0)} max / ${totMem}GB`,
+        pctReq, pctMax));
+    }
+    if (totVram > 0) {
+      capBars.appendChild(makeBarLine("VRAM",
+        `${usedVram.toFixed(0)}/${totVram} GB`,
+        usedVram / totVram * 100));
+    }
+    if (totPsu > 0) {
+      capBars.appendChild(makeBarLine("PSU",
+        `${totPower}/${totPsu} W`,
+        totPower / totPsu * 100));
+    }
+    capBox.appendChild(capBars);
+    card.appendChild(capBox);
+  }
+
+  // ── Cluster-level workload section ──
+  // Workloads are declared against the cluster (K8s model). Each row shows where the
+  // simulator placed its replicas (inline), so the per-node breakdown stays attached to
+  // the workload entity instead of having its own card stack.
+  const wls = c.workloads || [];
+  if (wls.length) {
+    // Per-workload placement map: workloadId → { nodeName → count }.
+    // Built once from the simulator output so each row can inline its placement compactly.
+    const placementByWl = new Map();
+    for (const [nodeId, arr] of sim.placements) {
+      const node = (project.nodes || []).find(x => x.id === nodeId);
+      const nodeName = node?.name || nodeId;
+      for (const p of arr) {
+        if (!placementByWl.has(p.workloadId)) placementByWl.set(p.workloadId, new Map());
+        const m = placementByWl.get(p.workloadId);
+        m.set(nodeName, (m.get(nodeName) || 0) + 1);
+      }
+    }
+
+    const wlBox = el("div", {
+      style: {
+        padding: "10px 14px",
+        borderBottom: "1px solid var(--border)",
+        background: "var(--surface)",
+      },
+    });
+    wlBox.appendChild(el("div", {
+      style: {
+        fontSize: "10px", color: "var(--text2)",
+        textTransform: "uppercase", letterSpacing: "0.05em",
+        marginBottom: "6px", fontWeight: 600,
+      },
+    }, [`Workloads (declared at cluster — ${wls.length})`]));
+    const kindShort = (k) => ({
+      Deployment: "Deploy", StatefulSet: "SS", DaemonSet: "DS",
+      Job: "Job", CronJob: "Cron",
+    }[k] || k || "Deploy");
+    for (const w of wls) {
+      const rMin = replicasMin(w), rMax = replicasMax(w);
+      const repTxt = rMax > rMin ? `× ${rMin}~${rMax}` : `× ${rMin}`;
+      const reqs = w.resources?.requests || {};
+      const cpu = reqs.cpu || 0, mem = reqs.memory_gb || 0;
+      const vramPerPod = reqs.gpu?.vram_gb
+        || ((reqs.gpu?.count || 0) * (gpuModels[reqs.gpu?.model]?.vram_gb || 0));
+      const detailParts = [];
+      if (cpu) detailParts.push(`${(cpu * rMin).toFixed(1)}c`);
+      if (mem) detailParts.push(`${(mem * rMin).toFixed(0)}GB`);
+      if (vramPerPod) detailParts.push(`${(vramPerPod * rMin).toFixed(0)}GB VRAM`);
+
+      // Inline placement: which node(s) the simulator placed this workload's pods on.
+      const pmap = placementByWl.get(w.id);
+      const placedHere = pmap ? [...pmap.entries()] : [];
+      const placedTotal = placedHere.reduce((a, [, n]) => a + n, 0);
+      // Expected pod count factored in DaemonSet semantics (sim already did this).
+      const expected = w.kind === "DaemonSet"
+        ? eligibleWorkersFor(w, workers).length
+        : rMin;
+      const placeTxt = placedHere.length
+        ? `→ ${placedHere.map(([nm, n]) => `${nm}×${n}`).join(", ")}${placedTotal < expected ? ` · ⊗ ${expected - placedTotal} unscheduled` : ""}`
+        : (expected > 0 ? `→ ⊗ ${expected} unscheduled` : "");
+
+      wlBox.appendChild(el("div", {
+        style: {
+          display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap",
+          padding: "3px 0", cursor: "pointer", fontSize: "11px", color: "var(--text2)",
+        },
+        onclick: () => selectEntity("workload", w.id),
+      }, [
+        el("span", {}, [`◇ ${w.namespace || "default"}/${w.name}`]),
+        el("span", {
+          style: { color: "var(--text3)", fontFamily: "JetBrains Mono", fontSize: "10px" },
+        }, [` ${repTxt} · ${kindShort(w.kind)}`]),
+        el("span", {
+          style: {
+            color: placedTotal < expected ? "var(--red)" : "var(--text3)",
+            fontFamily: "JetBrains Mono", fontSize: "10px", marginLeft: "8px",
+          },
+        }, [placeTxt]),
+        el("span", {
+          style: { color: "var(--text3)", marginLeft: "auto", fontFamily: "JetBrains Mono", fontSize: "10px" },
+        }, [detailParts.length ? `min req: ${detailParts.join(" · ")}` : ""]),
+      ]));
+    }
+    card.appendChild(wlBox);
+  }
+
   if (!workers.length) {
     card.appendChild(el("div", { class: "topo-empty-site" }, ["worker 노드 없음 — 워크로드 스케줄 불가"]));
     return card;
   }
-
-  const list = el("div", { style: { display: "flex", flexDirection: "column", gap: "12px" } });
-  for (const n of workers) list.appendChild(renderCapacityNode(n, sim, gpuModels));
-  card.appendChild(list);
+  // (Per-node breakdown removed: first-fit makes node-level numbers misleading; the
+  // cluster-total bars above represent the real capacity question, and per-replica
+  // placement is shown inline on each workload row in the WORKLOADS section.)
   return card;
 }
 
 function renderCapacityNode(n, sim, gpuModels) {
   const placed = sim.placements.get(n.id) || [];
-  const usedCpu = placed.reduce((a, p) => a + p.cpuReq, 0);
-  const usedMem = placed.reduce((a, p) => a + p.memReq, 0);
-  const usedGpu = placed.reduce((a, p) => a + (p.gpuReq || 0), 0);
+  const usedCpuReq = placed.reduce((a, p) => a + p.cpuReq, 0);
+  const usedCpuMax = placed.reduce((a, p) => a + (p.cpuMax != null ? p.cpuMax : p.cpuReq * 2), 0);
+  const usedMemReq = placed.reduce((a, p) => a + p.memReq, 0);
+  const usedMemMax = placed.reduce((a, p) => a + (p.memMax != null ? p.memMax : p.memReq * 2), 0);
+  // VRAM-only GPU accounting: explicit vram_gb for VRAM-mode workloads, or derived
+  // from count × per-card VRAM for legacy count-mode workloads (when model is known).
   const usedVram = placed.reduce((a, p) => {
     if (p.vramMode) return a + (p.vramReq || 0);
     return a + (p.gpuModel ? (gpuModels[p.gpuModel]?.vram_gb || 0) * (p.gpuReq || 0) : 0);
@@ -8153,7 +8757,6 @@ function renderCapacityNode(n, sim, gpuModels) {
   const totCpu = n.spec?.vcpu || 0;
   const totMem = n.spec?.memory_gb || 0;
   const gpus = n.spec?.gpu || [];
-  const totGpu = gpus.reduce((a, g) => a + (g.count || 0), 0);
   const totVram = gpus.reduce((a, g) => a + (g.count || 0) * (gpuModels[g.model]?.vram_gb || 0), 0);
   const psuMax = n.spec?.power?.psu_max_w || 0;
   const power = computeNodePowerW(n, gpuModels);
@@ -8172,47 +8775,42 @@ function renderCapacityNode(n, sim, gpuModels) {
   const bars = el("div", {
     style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 16px", marginTop: "10px" },
   });
-  bars.appendChild(makeBarLine("CPU", `${usedCpu.toFixed(1)}/${totCpu}c`, totCpu > 0 ? usedCpu / totCpu * 100 : 0));
-  bars.appendChild(makeBarLine("Memory", `${usedMem.toFixed(0)}/${totMem} GB`, totMem > 0 ? usedMem / totMem * 100 : 0));
-  if (totGpu > 0) {
-    bars.appendChild(makeBarLine("GPU", `${usedGpu}/${totGpu}`, totGpu > 0 ? usedGpu / totGpu * 100 : 0));
-    if (totVram > 0) bars.appendChild(makeBarLine("VRAM", `${usedVram}/${totVram} GB`, usedVram / totVram * 100));
+  // CPU — req (guaranteed) + max (limit, worst-case). Severity color driven by max.
+  {
+    const pctReq = totCpu > 0 ? usedCpuReq / totCpu * 100 : 0;
+    const pctMax = totCpu > 0 ? usedCpuMax / totCpu * 100 : 0;
+    const txt = `${usedCpuReq.toFixed(1)} req · ${usedCpuMax.toFixed(1)} max / ${totCpu}c`;
+    bars.appendChild(makeBarLineDual("CPU", txt, pctReq, pctMax));
+  }
+  // Memory — same dual treatment
+  {
+    const pctReq = totMem > 0 ? usedMemReq / totMem * 100 : 0;
+    const pctMax = totMem > 0 ? usedMemMax / totMem * 100 : 0;
+    const txt = `${usedMemReq.toFixed(0)} req · ${usedMemMax.toFixed(0)} max / ${totMem}GB`;
+    bars.appendChild(makeBarLineDual("Memory", txt, pctReq, pctMax));
+  }
+  // GPU is tracked by VRAM only — workloads consume VRAM from the node's GPU pool,
+  // GPU count is not a scheduling axis (operationally we allocate by VRAM, not card count).
+  if (totVram > 0) {
+    bars.appendChild(makeBarLine("VRAM", `${usedVram}/${totVram} GB`, usedVram / totVram * 100));
   }
   if (n.source === "onprem" && psuMax > 0) {
     bars.appendChild(makeBarLine("PSU", `${power}/${psuMax} W`, power / psuMax * 100));
   }
   card.appendChild(bars);
 
+  // Pod count summary only — workload list lives at the cluster level (above).
+  // Per-workload placement appears inline on each cluster-level workload row.
   if (placed.length) {
-    const podBox = el("div", {
-      style: { marginTop: "10px", padding: "8px 10px", background: "var(--bg)", borderRadius: "5px" },
-    });
-    podBox.appendChild(el("div", {
-      style: { fontSize: "10px", color: "var(--text2)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "6px", fontWeight: 600 },
-    }, [`${placed.length} pods placed`]));
-    // Group by workload
-    const byWl = new Map();
-    for (const p of placed) {
-      const e = byWl.get(p.workloadId) || { name: p.workloadName, count: 0, cpu: 0, mem: 0, gpu: 0, vram: 0, gpuModel: p.gpuModel };
-      e.count += 1; e.cpu += p.cpuReq; e.mem += p.memReq; e.gpu += (p.gpuReq || 0); e.vram += (p.vramReq || 0);
-      byWl.set(p.workloadId, e);
-    }
-    for (const [wlId, info] of byWl) {
-      const gpuPart = info.vram > 0
-        ? ` · ${info.vram.toFixed(0)} GB${info.gpuModel ? ` (${info.gpuModel})` : ""}`
-        : info.gpu ? ` · ${info.gpu} GPU${info.gpuModel ? ` (${info.gpuModel})` : ""}` : "";
-      const row = el("div", {
-        style: { fontSize: "11px", padding: "3px 0", display: "flex", gap: "8px", cursor: "pointer", color: "var(--text2)" },
-        onclick: e => { e.stopPropagation(); selectEntity("workload", wlId); },
-      }, [
-        el("span", {}, [`◇ ${info.name} × ${info.count}`]),
-        el("span", { style: { color: "var(--text3)", marginLeft: "auto", fontFamily: "JetBrains Mono", fontSize: "10px" } }, [
-          `${info.cpu.toFixed(1)}c · ${info.mem.toFixed(0)}GB${gpuPart}`,
-        ]),
-      ]);
-      podBox.appendChild(row);
-    }
-    card.appendChild(podBox);
+    const distinctWls = new Set(placed.map(p => p.workloadId)).size;
+    card.appendChild(el("div", {
+      style: {
+        marginTop: "10px", padding: "6px 10px", background: "var(--bg)", borderRadius: "5px",
+        fontSize: "10px", color: "var(--text2)", fontFamily: "JetBrains Mono",
+        textAlign: "center",
+      },
+      title: "워크로드는 cluster 소속. 어떤 워크로드의 어느 replica가 이 노드에 배정됐는지는 위쪽 cluster 워크로드 목록의 placement 표시에서 확인",
+    }, [`${placed.length} pods · ${distinctWls} workloads (sim)`]));
   } else {
     card.appendChild(el("div", {
       style: { marginTop: "10px", color: "var(--text3)", fontSize: "11px", fontStyle: "italic", textAlign: "center", padding: "6px" },
@@ -8426,9 +9024,28 @@ function renderArchitecture() {
     return node;
   };
 
-  // Classification
-  const platformNs = new Set(["kube-system", "ingress-nginx", "cert-manager",
-    "monitoring", "logging", "velero", "external-secrets", "argocd", "istio-system"]);
+  // Classification — platform namespaces split into sub-roles so the (관리/Mgmt) row
+  // can color-group monitoring vs logging vs gitops vs CI rather than dumping them all
+  // into one grey blob. namespace remains the source of truth — these are purely
+  // visual sub-groupings (no schema change, no extra field on workloads).
+  const PLATFORM_NS_ROLES = [
+    { role: "runtime",     label: "Runtime",     color: "#5d6d7e", namespaces: ["kube-system"] },
+    { role: "gateway",     label: "Gateway/Mesh",color: "#7d3c98", namespaces: ["ingress-nginx", "istio-system"] },
+    { role: "security",    label: "Security",    color: "#922b21", namespaces: ["cert-manager", "external-secrets"] },
+    { role: "monitoring",  label: "Monitoring",  color: "#cd5c5c", namespaces: ["monitoring"] },
+    { role: "logging",     label: "Logging",     color: "#b87a2e", namespaces: ["logging"] },
+    { role: "gitops",      label: "GitOps",      color: "#1e6091", namespaces: ["argocd", "fluxcd", "flux-system"] },
+    { role: "ci",          label: "CI",          color: "#0e7c66", namespaces: ["tekton-pipelines", "jenkins", "gitlab", "gitlab-runner", "buildkit", "kaniko"] },
+    { role: "registry",    label: "Registry",    color: "#1e8449", namespaces: ["harbor"] },
+    { role: "backup",      label: "Backup",      color: "#5a3a00", namespaces: ["velero"] },
+  ];
+  const PLATFORM_OTHER = { role: "platform-other", label: "Platform", color: "#5d6d7e", namespaces: [] };
+  const nsRoleIndex = new Map();
+  for (const r of PLATFORM_NS_ROLES) {
+    for (const ns of r.namespaces) nsRoleIndex.set(ns, r);
+  }
+  const platformNs = new Set(nsRoleIndex.keys());
+  const platformRoleOf = (w) => nsRoleIndex.get(w.namespace || "default") || PLATFORM_OTHER;
   const isStateful = w => w.kind === "StatefulSet" || ["DB", "Cache", "Queue"].includes(w.category);
   const isPlatform = w => platformNs.has(w.namespace || "default");
 
@@ -8499,7 +9116,7 @@ function renderArchitecture() {
             if (splitC && lbZone && cZones.includes(lbZone)) {
               const zi = cZones.indexOf(lbZone);
               const N = cZones.length;
-              const rr = w.replicas || 1;
+              const rr = w.replicas ?? 1;
               entry.zoneReplicas = Math.floor(rr / N) + (zi < rr % N ? 1 : 0);
             }
             children.push(entry);
@@ -8516,6 +9133,15 @@ function renderArchitecture() {
   const envRows = new Map(); // rowKey → { tag, zone, items[] }
   const mgmtRow = [];
   const dbRow = [];
+
+  // Ops/Mgmt lane (top): standalone management/bastion/CI-runner *nodes* that sit outside
+  // env workload flow. These are surfaced as node-kind items, distinct from namespace-based
+  // platform workloads (which still land in the existing mgmtRow).
+  const OPS_PURPOSES = new Set(["management", "bastion", "ci-runner"]);
+  const opsRow = [];
+  for (const n of (p.nodes || [])) {
+    if (OPS_PURPOSES.has(n.purpose)) opsRow.push({ kind: "node", item: n });
+  }
 
   const ensureRow = (tag, zone) => {
     const key = zone ? `${tag}|${zone}` : tag;
@@ -8560,7 +9186,7 @@ function renderArchitecture() {
       if (splitThisCluster) {
         // Distribute replicas across zones (ceil for first few, floor for rest)
         const N = zones.length;
-        const r = w.replicas || 1;
+        const r = w.replicas ?? 1;
         for (let zi = 0; zi < N; zi++) {
           const perZone = Math.floor(r / N) + (zi < r % N ? 1 : 0);
           if (perZone <= 0) continue;
@@ -8602,6 +9228,8 @@ function renderArchitecture() {
   }
   if (mgmtRow.length) rows.push({ label: "(관리/Mgmt)", items: mgmtRow, tag: "_mgmt" });
   if (dbRow.length) rows.push({ label: "(DB/Storage)", items: dbRow, tag: "_db" });
+  // Ops/Mgmt lane sits at the very top — cross-cutting nodes above all env rows.
+  if (opsRow.length) rows.unshift({ label: "(Ops · Mgmt/CI)", items: opsRow, tag: "_ops" });
 
   // ---- Switches per row ----
   // Split rows: only switches from sites whose zone matches this row's zone.
@@ -8609,7 +9237,7 @@ function renderArchitecture() {
   // Mgmt/db: all switches.
   const rowSwitches = new Map();
   for (const r of rows) {
-    if (r.tag === "_mgmt" || r.tag === "_db") continue;
+    if (r.tag === "_mgmt" || r.tag === "_db" || r.tag === "_ops") continue;
     const switches = [];
     const seen = new Set();
     if (r.zone) {
@@ -8653,6 +9281,7 @@ function renderArchitecture() {
   if (allSwitches.length) {
     rowSwitches.set("_mgmt", allSwitches);
     rowSwitches.set("_db", allSwitches);
+    rowSwitches.set("_ops", allSwitches);
   }
 
   if (!rows.length) {
@@ -8684,26 +9313,49 @@ function renderArchitecture() {
     }
     return BOX_W;
   };
-  // For mgmt/db rows: group items by their owning cluster (items w/o cluster → "shared" tail group).
-  // Other rows: single passthrough group preserving the existing layout.
+  // Group rules per row tag:
+  //   _mgmt → split by platform sub-role (Monitoring / Logging / GitOps / CI / ...)
+  //           so the row visually separates operational concerns instead of dumping
+  //           every platform pod into one stripe.
+  //   _db   → group by owning cluster (DB/Storage stays as before).
+  //   other → single passthrough.
   const getRowGroups = (r) => {
-    if (r.tag !== "_mgmt" && r.tag !== "_db") {
-      return [{ key: r.tag, label: null, items: r.items }];
-    }
-    const byCluster = new Map();
-    const shared = { key: "_shared", label: "외부", items: [] };
-    for (const it of r.items) {
-      if (it.cluster) {
-        const cid = it.cluster.id;
-        if (!byCluster.has(cid)) byCluster.set(cid, { key: cid, label: it.cluster.name, items: [] });
-        byCluster.get(cid).items.push(it);
-      } else {
-        shared.items.push(it);
+    if (r.tag === "_mgmt") {
+      const byRole = new Map();
+      for (const it of r.items) {
+        const role = it.kind === "workload"
+          ? platformRoleOf(it.item)
+          : PLATFORM_OTHER;
+        if (!byRole.has(role.role)) {
+          byRole.set(role.role, { key: role.role, label: role.label, items: [], roleColor: role.color });
+        }
+        byRole.get(role.role).items.push(it);
       }
+      // Preserve the curated role order; PLATFORM_OTHER appended last if present.
+      const ordered = [];
+      for (const r2 of PLATFORM_NS_ROLES) {
+        if (byRole.has(r2.role)) ordered.push(byRole.get(r2.role));
+      }
+      if (byRole.has(PLATFORM_OTHER.role)) ordered.push(byRole.get(PLATFORM_OTHER.role));
+      return ordered;
     }
-    const groups = [...byCluster.values()].sort((a, b) => (a.label || "").localeCompare(b.label || ""));
-    if (shared.items.length) groups.push(shared);
-    return groups;
+    if (r.tag === "_db") {
+      const byCluster = new Map();
+      const shared = { key: "_shared", label: "외부", items: [] };
+      for (const it of r.items) {
+        if (it.cluster) {
+          const cid = it.cluster.id;
+          if (!byCluster.has(cid)) byCluster.set(cid, { key: cid, label: it.cluster.name, items: [] });
+          byCluster.get(cid).items.push(it);
+        } else {
+          shared.items.push(it);
+        }
+      }
+      const groups = [...byCluster.values()].sort((a, b) => (a.label || "").localeCompare(b.label || ""));
+      if (shared.items.length) groups.push(shared);
+      return groups;
+    }
+    return [{ key: r.tag, label: null, items: r.items }];
   };
   const groupWidth = g => {
     if (!g.items.length) return 0;
@@ -8763,6 +9415,21 @@ function renderArchitecture() {
     if (item.kind === "storage") {
       return { fill: "#1e8449", stroke: "#27ae60" };
     }
+    if (item.kind === "node") {
+      // Ops/Mgmt lane node — colored by node.purpose
+      const c = {
+        management: { fill: "#5d4e7a", stroke: "#a78bfa" }, // purple-grey (ops console)
+        bastion:    { fill: "#7d6608", stroke: "#d4ac0d" }, // amber (gateway/SSH)
+        "ci-runner":{ fill: "#1e6091", stroke: "#3498db" }, // teal (build/deploy)
+      };
+      return c[item.item.purpose] || { fill: "#5d6d7e", stroke: "#7f8c8d" };
+    }
+    // Platform workloads: color by sub-role (monitoring/logging/gitops/ci/...) instead of
+    // category — operationally the role matters more here than the architectural type.
+    if (item.kind === "workload" && isPlatform(item.item)) {
+      const role = platformRoleOf(item.item);
+      return { fill: role.color, stroke: "#34495e" };
+    }
     // workload by category
     const cat = item.item.category;
     const map = {
@@ -8807,6 +9474,10 @@ function renderArchitecture() {
     } else if (item.kind === "storage") {
       label = item.item.name; sub = item.item.kind;
       onclick = () => selectEntity("storage", item.item.id);
+    } else if (item.kind === "node") {
+      label = item.item.name;
+      sub = item.item.purpose || "node";
+      onclick = () => selectEntity("node", item.item.id);
     }
     const g = svg("g", { style: "cursor:pointer", onclick });
     g.appendChild(svg("rect", {
@@ -9322,8 +9993,108 @@ function renderDependency() {
   const layerNodes = [];
   for (let l = 0; l <= maxLayer; l++) layerNodes.push([]);
   for (const { w } of items) layerNodes[layer.get(w.id)].push(w.id);
-  // Sort within layer alphabetically for determinism
+  // Stable starting order (alphabetical) so barycenter ties are deterministic.
   for (const arr of layerNodes) arr.sort((a, b) => a.localeCompare(b));
+
+  // ---- Crossing minimization (Sugiyama barycenter heuristic) ----
+  // Reorder nodes within each layer so the mean index of their adjacent-layer neighbors
+  // lines up; iterate forward (use upstream layer) and backward (use downstream layer)
+  // sweeps. Back-edge endpoints in non-adjacent layers are filtered out so they don't
+  // distort the layout. Sinks/sources fall back to the opposite side's mean.
+  const inAdj = new Map();
+  for (const { w } of items) inAdj.set(w.id, []);
+  for (const e of edges) {
+    if (inAdj.has(e.to)) inAdj.get(e.to).push(e.from);
+  }
+  const indexInLayer = new Map();
+  const refreshIndex = (L) => {
+    const arr = layerNodes[L];
+    for (let i = 0; i < arr.length; i++) indexInLayer.set(arr[i], i);
+  };
+  for (let l = 0; l <= maxLayer; l++) refreshIndex(l);
+  const meanIdx = (neighbors, refLayer) => {
+    if (refLayer < 0 || refLayer > maxLayer) return null;
+    let sum = 0, count = 0;
+    for (const n of neighbors) {
+      if (layer.get(n) !== refLayer) continue;
+      const idx = indexInLayer.get(n);
+      if (idx != null) { sum += idx; count++; }
+    }
+    return count > 0 ? sum / count : null;
+  };
+  // Count current crossings between two adjacent layers (counts pairs of edges that cross).
+  const countCrossings = (Lupper, Llower) => {
+    // Each edge from layer Lupper to layer Llower contributes (i_src, i_tgt) pairs.
+    const pairs = [];
+    for (const e of edges) {
+      if (layer.get(e.from) === Lupper && layer.get(e.to) === Llower) {
+        const a = indexInLayer.get(e.from), b = indexInLayer.get(e.to);
+        if (a != null && b != null) pairs.push([a, b]);
+      }
+    }
+    let cross = 0;
+    for (let i = 0; i < pairs.length; i++) {
+      for (let j = i + 1; j < pairs.length; j++) {
+        const [a1, b1] = pairs[i], [a2, b2] = pairs[j];
+        if ((a1 < a2 && b1 > b2) || (a1 > a2 && b1 < b2)) cross++;
+      }
+    }
+    return cross;
+  };
+  const totalCrossings = () => {
+    let t = 0;
+    for (let L = 0; L < maxLayer; L++) t += countCrossings(L, L + 1);
+    return t;
+  };
+
+  const SWEEPS = 24;
+  let bestSnapshot = layerNodes.map(a => a.slice());
+  let bestCross = totalCrossings();
+  for (let s = 0; s < SWEEPS; s++) {
+    const forward = (s % 2) === 0;
+    if (forward) {
+      for (let L = 1; L <= maxLayer; L++) {
+        const arr = layerNodes[L];
+        arr.sort((a, b) => {
+          let bcA = meanIdx(inAdj.get(a) || [], L - 1);
+          let bcB = meanIdx(inAdj.get(b) || [], L - 1);
+          if (bcA == null) bcA = meanIdx(out.get(a) || [], L + 1);
+          if (bcB == null) bcB = meanIdx(out.get(b) || [], L + 1);
+          if (bcA == null && bcB == null) return 0;
+          if (bcA == null) return 1;
+          if (bcB == null) return -1;
+          return bcA - bcB;
+        });
+        refreshIndex(L);
+      }
+    } else {
+      for (let L = maxLayer - 1; L >= 0; L--) {
+        const arr = layerNodes[L];
+        arr.sort((a, b) => {
+          let bcA = meanIdx(out.get(a) || [], L + 1);
+          let bcB = meanIdx(out.get(b) || [], L + 1);
+          if (bcA == null) bcA = meanIdx(inAdj.get(a) || [], L - 1);
+          if (bcB == null) bcB = meanIdx(inAdj.get(b) || [], L - 1);
+          if (bcA == null && bcB == null) return 0;
+          if (bcA == null) return 1;
+          if (bcB == null) return -1;
+          return bcA - bcB;
+        });
+        refreshIndex(L);
+      }
+    }
+    const cur = totalCrossings();
+    if (cur < bestCross) {
+      bestCross = cur;
+      bestSnapshot = layerNodes.map(a => a.slice());
+      if (cur === 0) break;
+    }
+  }
+  // Restore the best ordering seen across all sweeps (sweeps can oscillate).
+  for (let L = 0; L <= maxLayer; L++) {
+    layerNodes[L] = bestSnapshot[L];
+    refreshIndex(L);
+  }
 
   // ---- Layout constants ----
   const BOX_W = 140, BOX_H = 50;
@@ -9348,8 +10119,13 @@ function renderDependency() {
   });
 
   // ---- Color by category (mirror architecture view) ----
-  const platformNs = new Set(["kube-system", "ingress-nginx", "cert-manager",
-    "monitoring", "logging", "velero", "external-secrets", "argocd", "istio-system"]);
+  const platformNs = new Set([
+    "kube-system", "ingress-nginx", "cert-manager",
+    "monitoring", "logging", "velero", "external-secrets", "istio-system",
+    // GitOps / CI/CD platform namespaces (extension)
+    "argocd", "fluxcd", "flux-system", "tekton-pipelines",
+    "jenkins", "gitlab", "gitlab-runner", "harbor", "buildkit", "kaniko",
+  ]);
   const colorOf = (w) => {
     if (platformNs.has(w.namespace || "default")) return { fill: "#5d6d7e", stroke: "#7f8c8d" };
     const map = {
@@ -9419,11 +10195,28 @@ function renderDependency() {
   });
   const vbHeight = vbMaxY - vbMinY;
 
+  // ---- Pan / Zoom (view-local, manipulates the SVG viewBox) ----
+  // Natural extent = the full graph bounding box. Stored separately so a Fit/reset can
+  // always return to it even after the user has panned away.
+  const naturalVB = { x: 0, y: vbMinY, w: totalW, h: vbHeight };
+  // Persisted current viewport. Reset if previous viewBox is geometrically broken or
+  // points entirely outside the new natural extent (e.g., when workloads were added).
+  if (!state.ui.depViewBox || state.ui.depViewBox.w <= 0 || state.ui.depViewBox.h <= 0) {
+    state.ui.depViewBox = { ...naturalVB };
+  }
+  const vb = state.ui.depViewBox;
+
   const root_svg = svg("svg", {
     width: "100%",
-    viewBox: `${0} ${vbMinY} ${totalW} ${vbHeight}`,
-    style: "background:var(--bg);border:1px solid var(--border);border-radius:8px;",
+    viewBox: `${vb.x} ${vb.y} ${vb.w} ${vb.h}`,
+    preserveAspectRatio: "xMidYMid meet",
+    style: "background:var(--bg);border:1px solid var(--border);border-radius:8px;height:min(72vh,720px);min-height:420px;cursor:grab;touch-action:none;",
   });
+
+  // Helpers to push viewBox state → DOM. Stays local to this render so closures over
+  // `vb` and `root_svg` are stable; subsequent renders re-bind a fresh closure.
+  const applyVB = () => root_svg.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+  const zoomPct = () => Math.round((naturalVB.w / vb.w) * 100);
 
   // Arrow markers
   const defs = svg("defs");
@@ -9571,6 +10364,118 @@ function renderDependency() {
     el("span", { style: { flex: 1 } }, []),
     ...diagramExportButtons(() => root_svg, "dependency"),
   ]));
+
+  // ---- Zoom / pan controls (in their own row above the SVG) ----
+  const zoomPctSpan = el("span", {
+    style: { fontFamily: "JetBrains Mono", fontSize: "11px", color: "var(--text2)", minWidth: "42px", textAlign: "center" },
+  }, [`${zoomPct()}%`]);
+  const refreshZoomPct = () => { zoomPctSpan.textContent = `${zoomPct()}%`; };
+
+  const zoomAt = (factor, cx, cy) => {
+    // Cursor-anchored zoom by changing viewBox dimensions while keeping
+    // the world-space point under (cx, cy) fixed in screen space.
+    const ratioX = (cx - vb.x) / vb.w;
+    const ratioY = (cy - vb.y) / vb.h;
+    vb.w = Math.max(20, Math.min(naturalVB.w * 20, vb.w * factor));
+    vb.h = Math.max(20, Math.min(naturalVB.h * 20, vb.h * factor));
+    vb.x = cx - ratioX * vb.w;
+    vb.y = cy - ratioY * vb.h;
+    applyVB(); refreshZoomPct();
+  };
+  const zoomFromCenter = (factor) => {
+    zoomAt(factor, vb.x + vb.w / 2, vb.y + vb.h / 2);
+  };
+  const fit = () => {
+    Object.assign(vb, naturalVB);
+    applyVB(); refreshZoomPct();
+  };
+
+  const zoomBtn = (label, title, onClick) => el("button", {
+    style: {
+      padding: "3px 9px", fontSize: "12px", lineHeight: 1,
+      background: "var(--surface2)", border: "1px solid var(--border)",
+      color: "var(--text2)", borderRadius: "4px", cursor: "pointer",
+      fontFamily: "JetBrains Mono", fontWeight: 600,
+    },
+    title,
+    onclick: onClick,
+  }, [label]);
+  const zoomBar = el("div", {
+    style: { display: "flex", alignItems: "center", gap: "4px", marginBottom: "8px" },
+  }, [
+    el("span", {
+      style: { fontSize: "11px", color: "var(--text3)", marginRight: "6px", letterSpacing: "0.05em", textTransform: "uppercase", fontWeight: 600 },
+    }, ["Zoom"]),
+    zoomBtn("−", "축소 (Ctrl+Scroll 또는 −)",   () => zoomFromCenter(1.2)),
+    zoomBtn("+", "확대 (Ctrl+Scroll 또는 +)",   () => zoomFromCenter(1 / 1.2)),
+    zoomPctSpan,
+    zoomBtn("⊡ Fit", "전체 보기로 초기화",      () => fit()),
+    el("span", {
+      style: { fontSize: "10px", color: "var(--text3)", marginLeft: "8px", fontStyle: "italic" },
+    }, ["휠로 커서 위치 기준 확대 · 빈 영역 드래그로 이동"]),
+  ]);
+  wrap.appendChild(zoomBar);
+
+  // Wheel: cursor-anchored zoom. SVG.createSVGPoint + getScreenCTM gives user-space coords.
+  root_svg.addEventListener("wheel", e => {
+    e.preventDefault();
+    const pt = root_svg.createSVGPoint();
+    pt.x = e.clientX; pt.y = e.clientY;
+    const ctm = root_svg.getScreenCTM();
+    if (!ctm) return;
+    const u = pt.matrixTransform(ctm.inverse());
+    // wheel down (positive deltaY) → zoom out (bigger viewBox)
+    // Sensitivity = half of the original step (was ±12%/tick → now ±6%/tick).
+    const factor = e.deltaY > 0 ? 1.06 : 1 / 1.06;
+    zoomAt(factor, u.x, u.y);
+  }, { passive: false });
+
+  // Drag-pan: only when the press is on the SVG background, not on a clickable node group.
+  // Window listeners are attached on mousedown and removed on mouseup so they don't
+  // accumulate across re-renders.
+  const isOnNode = (target) => {
+    let n = target;
+    while (n && n !== root_svg) {
+      if (n.tagName === "g" && n.getAttribute && /cursor:\s*pointer/i.test(n.getAttribute("style") || "")) return true;
+      n = n.parentNode;
+    }
+    return false;
+  };
+  root_svg.addEventListener("mousedown", e => {
+    if (e.button !== 0) return;
+    if (isOnNode(e.target)) return;
+    const ctm = root_svg.getScreenCTM();
+    if (!ctm) return;
+    const state = {
+      startX: e.clientX, startY: e.clientY,
+      vbX0: vb.x, vbY0: vb.y,
+      scaleX: 1 / ctm.a, scaleY: 1 / ctm.d,
+      dragged: false,
+    };
+    root_svg.style.cursor = "grabbing";
+    const onMove = ev => {
+      const dx = ev.clientX - state.startX;
+      const dy = ev.clientY - state.startY;
+      if (Math.abs(dx) + Math.abs(dy) > 3) state.dragged = true;
+      vb.x = state.vbX0 - dx * state.scaleX;
+      vb.y = state.vbY0 - dy * state.scaleY;
+      applyVB();
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      root_svg.style.cursor = "grab";
+      if (state.dragged) {
+        // Suppress the trailing click so a pan doesn't accidentally open the inspector.
+        const swallow = ev => { ev.stopPropagation(); ev.preventDefault(); window.removeEventListener("click", swallow, true); };
+        window.addEventListener("click", swallow, true);
+        setTimeout(() => window.removeEventListener("click", swallow, true), 60);
+      }
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  });
+
   wrap.appendChild(root_svg);
 
   // Legend
@@ -9601,7 +10506,7 @@ function analyzeBottlenecks(p) {
     const pool = w.runtime?.connection_pool_per_replica;
     if (!pool) continue;
     for (const d of (w.depends_on || [])) {
-      const v = pool * (w.replicas || 1);
+      const v = pool * (w.replicas ?? 1);
       dbPoolDemand.set(d.target_workload_id, (dbPoolDemand.get(d.target_workload_id) || 0) + v);
     }
   }
@@ -9614,7 +10519,7 @@ function analyzeBottlenecks(p) {
   return items.map(({ w, c }) => {
     const tp = w.traffic_profile || {};
     const rt = w.runtime || {};
-    const replicas = w.replicas || 1;
+    const replicas = w.replicas ?? 1;
     const issues = [];
     const breakdowns = [];  // per-rule diagnostic
     let computeUtil = null, computeCap = null, computeInFlight = null;
@@ -9940,7 +10845,7 @@ function renderBottleneck() {
     hdr.appendChild(el("div", { style: { display: "flex", alignItems: "center", gap: "8px", minWidth: 0 } }, [
       el("strong", { style: { fontSize: "13px" } }, [r.w.name]),
       el("span", { style: { fontSize: "11px", color: "var(--text3)" } }, [
-        `×${r.w.replicas || 1}`,
+        `×${r.w.replicas ?? 1}`,
         r.w.namespace ? ` · ns:${r.w.namespace}` : "",
         r.w.category ? ` · ${r.w.category}` : "",
       ]),
@@ -10476,11 +11381,40 @@ ${_yObj(spec, 1)}`);
           labelSelector: { matchLabels: { app: appLabel } },
         }];
       }
+      // nodeSelector — workload pins to nodes matching all label key/value pairs.
+      if (w.scheduling?.node_selector && Object.keys(w.scheduling.node_selector).length) {
+        podSpec.nodeSelector = { ...w.scheduling.node_selector };
+      }
+      // tolerations — workload can land on tainted nodes that match.
+      if (w.scheduling?.tolerations?.length) {
+        podSpec.tolerations = w.scheduling.tolerations.map(t => {
+          const out = {};
+          if (t.key) out.key = t.key;
+          if (t.operator) out.operator = t.operator;
+          if (t.value) out.value = t.value;
+          if (t.effect) out.effect = t.effect;
+          return out;
+        });
+      }
+      // podAntiAffinity for spread-by-node — preferred, matches the simulator's soft behavior.
+      if (w.scheduling?.anti_affinity === "spread-by-node") {
+        podSpec.affinity = {
+          podAntiAffinity: {
+            preferredDuringSchedulingIgnoredDuringExecution: [{
+              weight: 100,
+              podAffinityTerm: {
+                labelSelector: { matchLabels: { app: appLabel } },
+                topologyKey: "kubernetes.io/hostname",
+              },
+            }],
+          },
+        };
+      }
 
-      const spec = {
-        replicas: w.replicas || 1,
-        selector: { matchLabels: { app: appLabel } },
-      };
+      // DaemonSet has no `spec.replicas` — K8s creates one pod per matching node automatically.
+      const spec = (kind === "DaemonSet")
+        ? { selector: { matchLabels: { app: appLabel } } }
+        : { replicas: w.replicas ?? 1, selector: { matchLabels: { app: appLabel } } };
       if (kind === "StatefulSet") {
         spec.serviceName = name;
         if (w.persistent_volumes?.length) {
@@ -10617,7 +11551,7 @@ function generateHelmValues(p) {
         enabled: true,
         namespace: w.namespace || "default",
         kind: w.kind || "Deployment",
-        replicaCount: w.replicas || 1,
+        replicaCount: w.replicas ?? 1,
         image: {
           repository: w.helm?.image_repo || `registry.example.com/${name}`,
           tag: w.helm?.image_tag || "latest",
@@ -10669,6 +11603,15 @@ function generateHelmValues(p) {
           enabled: true, topologyKey: "topology.kubernetes.io/zone",
           maxSkew: 1, whenUnsatisfiable: "DoNotSchedule",
         };
+      }
+      if (w.scheduling?.node_selector && Object.keys(w.scheduling.node_selector).length) {
+        v.nodeSelector = { ...w.scheduling.node_selector };
+      }
+      if (w.scheduling?.tolerations?.length) {
+        v.tolerations = w.scheduling.tolerations.map(t => ({ ...t }));
+      }
+      if (w.scheduling?.anti_affinity === "spread-by-node") {
+        v.podAntiAffinity = { enabled: true, topologyKey: "kubernetes.io/hostname" };
       }
       out.workloads[name] = v;
     }
@@ -10870,7 +11813,9 @@ metadata:
     app: ${name}
     {{- include "${chartName}.labels" . | nindent 4 }}
 spec:
+  {{- if ne ($w.kind | default "Deployment") "DaemonSet" }}
   replicas: {{ $w.replicaCount | default 1 }}
+  {{- end }}
   selector:
     matchLabels:
       app: ${name}
@@ -10948,6 +11893,27 @@ spec:
           labelSelector:
             matchLabels:
               app: ${name}
+      {{- end }}
+      {{- end }}
+      {{- with $w.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $w.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $w.podAntiAffinity }}
+      {{- if .enabled }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: ${name}
+                topologyKey: {{ .topologyKey | default "kubernetes.io/hostname" | quote }}
       {{- end }}
       {{- end }}
 {{- end }}
@@ -11217,7 +12183,7 @@ function generateCapacityReport(p) {
     lines.push("| Workload | Namespace | Category | Replicas | CPU req | Mem req | RPS |");
     lines.push("|---|---|---|---|---|---|---|");
     for (const w of wls) {
-      lines.push(`| ${w.name} | ${w.namespace || "default"} | ${w.category || "—"} | ${w.replicas || 1} | ${w.resources?.requests?.cpu ?? "—"} | ${w.resources?.requests?.memory_gb ?? "—"} GB | ${w.traffic_profile?.target_rps ?? "—"} |`);
+      lines.push(`| ${w.name} | ${w.namespace || "default"} | ${w.category || "—"} | ${w.replicas ?? 1} | ${w.resources?.requests?.cpu ?? "—"} | ${w.resources?.requests?.memory_gb ?? "—"} GB | ${w.traffic_profile?.target_rps ?? "—"} |`);
     }
     lines.push("");
   }
@@ -11963,22 +12929,55 @@ function openAddCluster() {
 }
 
 //============ Add Workload modal ============
+// Workloads are cluster-scoped: every workload belongs to exactly one cluster.
+// When clusterId is null (e.g. from the global "+ Add Workload" in the tree footer),
+// the modal exposes a cluster picker as the first field. With a single cluster the
+// picker collapses to a read-only label.
 function openAddWorkload(clusterId) {
-  const c = (state.project.clusters || []).find(x => x.id === clusterId);
-  if (!c) return;
+  const clusters = state.project.clusters || [];
+  if (clusters.length === 0) {
+    alert("먼저 cluster를 추가하세요. 워크로드는 cluster에 소속됩니다.");
+    return;
+  }
+  let c = clusters.find(x => x.id === clusterId) || clusters[0];
 
   const root = el("div");
   root.appendChild(el("h2", {}, ["Add Workload"]));
-  root.appendChild(el("div", { style: { color: "var(--text2)", fontSize: "12px", marginBottom: "12px" } }, [
-    `Cluster: `, el("strong", {}, [c.name]),
-  ]));
+
+  // Namespace dropdown — refreshes when the target cluster changes (different
+  // clusters have different namespaces).
+  const nsSel = el("select", {});
+  const refreshNamespaceOptions = () => {
+    const names = (c.namespaces || []).map(n => n.name);
+    if (!names.includes("default")) names.unshift("default");
+    const cur = nsSel.value || "default";
+    nsSel.innerHTML = "";
+    for (const n of names) nsSel.appendChild(el("option", { value: n, selected: n === cur ? "" : null }, [n]));
+    if (!names.includes(cur)) nsSel.value = names[0] || "default";
+  };
+
+  // Cluster picker / readonly label
+  const clusterField = el("div", { class: "field" }, [lbl("Cluster", "workload.cluster")]);
+  if (clusters.length === 1) {
+    clusterField.appendChild(el("div", { class: "field-readonly" }, [c.name]));
+  } else {
+    const clusterSel = el("select", {
+      onchange: e => {
+        c = clusters.find(x => x.id === e.target.value) || clusters[0];
+        refreshNamespaceOptions();
+        // Reset auto-generated name with the new cluster's workload count.
+        nameInput.value = `service-${(c.workloads?.length || 0) + 1}`;
+      },
+    }, clusters.map(cl => el("option", {
+      value: cl.id, selected: cl.id === c.id ? "" : null,
+    }, [`${cl.name}${cl.environment_tag ? ` · ${cl.environment_tag}` : ""}`])));
+    clusterField.appendChild(clusterSel);
+  }
+  root.appendChild(clusterField);
 
   const nameInput = el("input", { value: `service-${(c.workloads?.length || 0) + 1}` });
   const catSel = el("select", {}, ["API","Frontend","WAS","DB","Cache","Queue","ML-Inference","ML-Training","Video","Batch","Other"].map(v => el("option", { value: v }, [v])));
-  // namespace dropdown
-  const nsNames = (c.namespaces || []).map(n => n.name);
-  if (!nsNames.includes("default")) nsNames.unshift("default");
-  const nsSel = el("select", {}, nsNames.map(n => el("option", { value: n }, [n])));
+  refreshNamespaceOptions();
   const replicasInput = el("input", { type: "number", min: "1", value: "2" });
   const cpuInput = el("input", { type: "number", min: "0", step: "0.1", value: "0.5" });
   const memInput = el("input", { type: "number", min: "0", step: "0.5", value: "1" });
@@ -12027,7 +13026,7 @@ function openAddWorkload(clusterId) {
   const actions = el("div", { class: "modal-actions" }, [
     el("button", { class: "btn-ghost", onclick: closeModal }, ["Cancel"]),
     el("button", { class: "btn", onclick: () => {
-      addWorkload(clusterId, {
+      addWorkload(c.id, {
         name: nameInput.value.trim() || "service",
         category: catSel.value,
         namespace: nsSel.value || "default",
@@ -12055,6 +13054,26 @@ function openEditNamespace(clusterId, name) {
   const rq = ns.resource_quota;
   const root = el("div");
   root.appendChild(el("h2", {}, [`Namespace: ${ns.name}`]));
+
+  // Name (editable). Rename cascades to workloads + network policies; 'default' is locked.
+  const isDefault = ns.name === "default";
+  const nsNameInput = el("input", {
+    type: "text",
+    value: ns.name,
+    pattern: "^[a-z0-9][a-z0-9-]*$",
+    disabled: isDefault ? "" : null,
+    title: isDefault ? "'default'는 K8s 기본 namespace라 이름을 바꿀 수 없습니다." : "",
+  });
+  root.appendChild(el("div", { class: "section-title" }, ["Name"]));
+  root.appendChild(el("div", { class: "field" }, [
+    nsNameInput,
+    el("div", {
+      style: { fontSize: "10px", color: "var(--text3)", marginTop: "4px", fontFamily: "JetBrains Mono" },
+    }, [isDefault
+      ? "'default'는 변경 불가."
+      : "소문자·숫자·- 만 (DNS-1123). 변경 시 워크로드·NetworkPolicy의 참조도 자동 갱신됩니다."]),
+  ]));
+
   root.appendChild(el("div", { class: "section-title" }, ["Resource Quota"]));
 
   const cpuInput = el("input", { type: "number", min: "0", value: rq.cpu || "", placeholder: "(no limit)" });
@@ -12074,16 +13093,27 @@ function openEditNamespace(clusterId, name) {
   root.appendChild(el("div", { class: "modal-actions" }, [
     el("button", { class: "btn-ghost", onclick: closeModal }, ["Cancel"]),
     el("button", { class: "btn", onclick: () => {
+      // 1) Handle rename first (if requested). On failure, don't close the modal.
+      let finalName = name;
+      const requested = (nsNameInput.value || "").trim();
+      if (!isDefault && requested && requested !== name) {
+        const result = renameNamespace(clusterId, name, requested);
+        if (!result.ok) {
+          alert("이름 변경 실패: " + result.error);
+          return;
+        }
+        finalName = requested;
+      }
+      // 2) Save quota under the (possibly new) name.
       const newRq = {};
       if (cpuInput.value) newRq.cpu = parseFloat(cpuInput.value);
       if (memInput.value) newRq.memory_gb = parseFloat(memInput.value);
       if (gpuInput.value) newRq.gpu = parseInt(gpuInput.value);
       if (podsInput.value) newRq.max_pods = parseInt(podsInput.value);
       if (Object.keys(newRq).length) {
-        updateNamespaceField(clusterId, name, "resource_quota", newRq);
+        updateNamespaceField(clusterId, finalName, "resource_quota", newRq);
       } else {
-        // Empty: delete the field
-        const updated = state.project.clusters.find(x => x.id === clusterId).namespaces.find(n => n.name === name);
+        const updated = state.project.clusters.find(x => x.id === clusterId).namespaces.find(n => n.name === finalName);
         if (updated) delete updated.resource_quota;
         emit(); saveSoon();
       }
@@ -13467,11 +14497,11 @@ async function init() {
     if (file) importProjectFromFile(file);
     e.target.value = "";
   });
-  // Modal background click closes
-  $("#modal").addEventListener("click", e => { if (e.target.id === "modal") closeModal(); });
-  // Keyboard
+  // Modal stays open until an explicit action (Close/Cancel/primary button) is clicked —
+  // backdrop click and Escape do NOT close, so accidental mouse drifts during edits don't
+  // discard input. Each modal's in-card buttons remain the only dismissal path.
+  // Keyboard shortcuts (Escape removed deliberately)
   document.addEventListener("keydown", e => {
-    if (e.key === "Escape") closeModal();
     if ((e.metaKey || e.ctrlKey) && e.key === "s") { e.preventDefault(); saveSoon(); }
     if (e.key === "Delete" && state.ui.selectedId && document.activeElement.tagName !== "INPUT") {
       deleteEntity(state.ui.selectedKind, state.ui.selectedId);
