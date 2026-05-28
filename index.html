@@ -679,7 +679,14 @@
     align-items: center;
     gap: 6px;
     color: var(--text2);
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
+    border: 1px solid transparent;
+    user-select: none;
   }
+  .findings-summary .count:hover { background: var(--surface2); color: var(--text); }
+  .findings-summary .count[data-active="true"] { background: var(--surface2); border-color: var(--border2); color: var(--text); }
   .findings-summary .count .icon { font-size: 14px; }
   .findings-summary .count[data-sev="error"] .icon { color: var(--red); }
   .findings-summary .count[data-sev="warn"] .icon  { color: var(--yellow); }
@@ -1086,6 +1093,7 @@ const state = {
     selectedKind: null, selectedId: null, view: "topology", topologyMode: "grid",
     topologyLayers: { compute: true, network: false, services: false, ingress: false, sites: true },
     archGroupByZone: true,
+    colorBy: "category",   // "category" | "namespace" — node color basis (session-only, not saved)
     exportTab: "yaml",
     exportSelectedFile: null,
   },
@@ -1879,11 +1887,13 @@ function nextNodeIp(cluster, project) {
   if (!cluster?.network?.node_subnet) return null;
   const c = parseCidr(cluster.network.node_subnet);
   if (!c) return null;
+  // Avoid every IP already used by ANY node in this subnet across the whole project (not just
+  // this cluster's nodes), so a pasted/cloned cluster sharing the subnet doesn't reissue the
+  // same .11/.12/… as the source. Nodes in other subnets are unaffected.
   const used = new Set();
-  for (const nid of cluster.node_ids || []) {
-    const n = project.nodes.find(x => x.id === nid);
+  for (const n of (project.nodes || [])) {
     const ip = n?.network?.ip;
-    if (ip) used.add(ip);
+    if (ip && ipInCidr(ip, cluster.network.node_subnet)) used.add(ip);
   }
   // Reserve first 10 (gateway/dhcp/etc) + last (broadcast for /24).
   // Try .11 onward, skip used, fall within subnet, not all-ones.
@@ -2599,6 +2609,7 @@ const VK8S_CLIP_MARKER = "_vk8s_clip";
 
 async function copyEntityToClipboard(kind, id) {
   let data;
+  const extra = {};
   if (kind === "workload") {
     const f = findWorkload(id);
     if (!f) return;
@@ -2607,8 +2618,18 @@ async function copyEntityToClipboard(kind, id) {
     const c = (state.project?.clusters || []).find(x => x.id === id);
     if (!c) return;
     data = JSON.parse(JSON.stringify(c));
+    // Bundle every object *within* the cluster: its assigned nodes (full) + the sites those
+    // nodes live in (shell only — name/kind/region/capacity), so paste can rebuild a fully
+    // scheduled clone, including across projects where the original nodes/sites don't exist.
+    const nodes = (c.node_ids || [])
+      .map(nid => (state.project.nodes || []).find(n => n.id === nid)).filter(Boolean);
+    const siteIds = new Set(nodes.map(n => n.site_id).filter(Boolean));
+    extra.nodes = JSON.parse(JSON.stringify(nodes));
+    extra.sites = [...siteIds]
+      .map(sid => (state.project.sites || []).find(s => s.id === sid)).filter(Boolean)
+      .map(s => ({ id: s.id, name: s.name, kind: s.kind, cloud_provider: s.cloud_provider, region: s.region, capacity: s.capacity }));
   } else { return; }
-  const envelope = { [VK8S_CLIP_MARKER]: 1, kind, data };
+  const envelope = { [VK8S_CLIP_MARKER]: 1, kind, data, ...extra };
   const text = JSON.stringify(envelope, null, 2);
   // In-memory backup so paste works even if clipboard permission denied
   state.ui.clipboard = envelope;
@@ -2681,10 +2702,8 @@ async function pasteClusterIntoProject() {
   copy.id = slug(copy.name || "cluster") + "-" + uid();
   copy.name = newName;
   delete copy.locked;
-  // Cluster's node_ids and workload IDs need handling. Strategy:
-  // - node_ids: cleared (target nodes don't exist in destination context)
-  // - workloads: keep but regenerate ids; remap depends_on within the cluster
-  copy.node_ids = [];
+  // Workloads: keep but regenerate ids; remap depends_on within the cluster.
+  copy.node_ids = [];   // rebuilt below from the bundled nodes
   const idMap = new Map();
   if (Array.isArray(copy.workloads)) {
     for (const w of copy.workloads) {
@@ -2702,10 +2721,49 @@ async function pasteClusterIntoProject() {
       }
     }
   }
+  // Push the cluster first so assignNodeToCluster can attach the rebuilt nodes to it.
   state.project.clusters.push(copy);
+
+  // Recreate the bundled nodes (the cluster's compute) into existing-or-new sites, then assign
+  // them to the new cluster. Sites are reused by id, then by name, else recreated as a shell.
+  const bundledNodes = Array.isArray(envelope.nodes) ? envelope.nodes : [];
+  const bundledSites = Array.isArray(envelope.sites) ? envelope.sites : [];
+  const siteMap = new Map();
+  const resolveSiteId = (oldSiteId) => {
+    if (siteMap.has(oldSiteId)) return siteMap.get(oldSiteId);
+    let target = (state.project.sites || []).find(s => s.id === oldSiteId);
+    if (!target) {
+      const shell = bundledSites.find(s => s.id === oldSiteId);
+      if (shell) {
+        target = (state.project.sites || []).find(s => s.name === shell.name)
+          || addSite({ name: shell.name, kind: shell.kind, cloud_provider: shell.cloud_provider, region: shell.region, capacity: shell.capacity }, true);
+      }
+    }
+    if (!target) target = (state.project.sites || [])[0] || addSite({ name: "Imported Site", kind: "onprem" }, true);
+    siteMap.set(oldSiteId, target.id);
+    return target.id;
+  };
+  const nodeNameExists = name => (state.project.nodes || []).some(nd => nd.name === name);
+  for (const bn of bundledNodes) {
+    const node = JSON.parse(JSON.stringify(bn));
+    const role0 = (Array.isArray(node.cluster_roles) && node.cluster_roles.length) ? node.cluster_roles[0] : "worker";
+    const base = (node.name || "node").replace(/\s*#\d+\s*$/, "").trim() || "node";
+    let k = 1; while (nodeNameExists(`${base} #${k}`)) k++;
+    node.id = slug(node.model || node.name || "node") + "-" + uid();
+    node.name = `${base} #${k}`;
+    node.site_id = resolveSiteId(bn.site_id);
+    delete node.locked;
+    if (node.network) node.network.ip = "";   // re-allocated on assignment
+    state.project.nodes.push(node);
+    const site = state.project.sites.find(s => s.id === node.site_id);
+    if (site && !(site.node_ids || (site.node_ids = [])).includes(node.id)) site.node_ids.push(node.id);
+    assignNodeToCluster(node.id, copy.id, role0, true);
+  }
+
   selectEntity("cluster", copy.id);
   emit(); saveSoon();
-  flashStatus(`Pasted as '${newName}'`);
+  const nodeNote = bundledNodes.length ? ` (+${bundledNodes.length} nodes)` : "";
+  flashStatus(`Pasted as '${newName}'${nodeNote}`);
 }
 
 function flashStatus(msg) {
@@ -4232,7 +4290,7 @@ function renderTree() {
   }, ["＋ Add Workload"]));
   actions.appendChild(el("button", {
     class: "add-btn",
-    title: "Paste cluster from clipboard",
+    title: "클립보드의 클러스터 붙여넣기 (워크로드 + 노드 함께 복제)",
     onclick: pasteClusterIntoProject,
   }, ["📥 Paste Cluster"]));
   root.appendChild(actions);
@@ -5057,7 +5115,7 @@ function renderClusterInspector(root, id) {
       onclick: () => toggleClusterLock(id),
     }, [cLocked ? "🔒" : "🔓"]),
     el("button", {
-      class: "duplicate", title: "Copy cluster to clipboard",
+      class: "duplicate", title: "클러스터 복사 (워크로드 + 노드 포함)",
       onclick: () => copyEntityToClipboard("cluster", id),
     }, ["📋"]),
     el("button", {
@@ -8996,6 +9054,122 @@ function renderNamespaceCluster(c) {
   return card;
 }
 
+//============ Unified node color standard (shared by Architecture & Dependency) ============
+// One source of truth so a workload is the same colour on every screen and in exports.
+// Two modes (toggled via state.ui.colorBy):
+//   "category"  → fixed palette keyed on workload.category (API/WAS, DB/Cache, ML merged).
+//   "namespace" → deterministic golden-angle HSL keyed on the *normalised* namespace, so the
+//                 same namespace is the same colour everywhere and dev-monitoring == monitoring.
+const COLOR_CATEGORY = {
+  "Frontend": { fill: "#7d3c98", stroke: "#9b59b6" },
+  "API/WAS":  { fill: "#1e6091", stroke: "#2980b9" },
+  "ML":       { fill: "#922b21", stroke: "#c0392b" },
+  "Video":    { fill: "#943126", stroke: "#cd5c5c" },
+  "DB/Cache": { fill: "#1f618d", stroke: "#3498db" },
+  "Queue":    { fill: "#117a65", stroke: "#1abc9c" },
+  "Batch":    { fill: "#1e8449", stroke: "#27ae60" },
+  "Other":    { fill: "#5d6d7e", stroke: "#7f8c8d" },
+};
+// Map a raw workload.category onto a canonical legend key (synonyms collapse to one colour).
+const categoryKeyOf = (cat) => {
+  if (cat === "API" || cat === "WAS") return "API/WAS";
+  if (cat === "DB" || cat === "Cache") return "DB/Cache";
+  if (cat === "ML-Inference" || cat === "ML-Training") return "ML";
+  return COLOR_CATEGORY[cat] ? cat : "Other";
+};
+// Environment prefixes/suffixes stripped before classifying a namespace, so dev-monitoring,
+// monitoring-prod, stg_logging … all collapse to their base name. Deliberately excludes short
+// ambiguous tokens (pre/prd/tst/sbx) that could mangle real namespace names. Editable.
+const NS_ENV_AFFIXES = ["dev", "develop", "development", "prod", "production",
+  "stg", "stage", "staging", "test", "qa", "uat", "sit", "perf", "demo", "sandbox", "preprod"];
+function nsNormalize(ns) {
+  let s = String(ns == null || ns === "" ? "default" : ns).toLowerCase().trim();
+  for (const e of NS_ENV_AFFIXES) {        // strip one leading "<env>-" / "<env>_"
+    for (const sep of ["-", "_"]) {
+      const pre = e + sep;
+      if (s.startsWith(pre) && s.length > pre.length) { s = s.slice(pre.length); break; }
+    }
+  }
+  for (const e of NS_ENV_AFFIXES) {        // strip one trailing "-<env>" / "_<env>"
+    for (const sep of ["-", "_"]) {
+      const suf = sep + e;
+      if (s.endsWith(suf) && s.length > suf.length) { s = s.slice(0, -suf.length); break; }
+    }
+  }
+  return s || "default";
+}
+// Deterministic colour for a normalised namespace string (golden-angle hue, fixed L/S so white
+// box text stays legible across all hues — including the yellow band).
+function nsColor(normNs) {
+  let h = 0;
+  for (let i = 0; i < normNs.length; i++) h = (h * 31 + normNs.charCodeAt(i)) >>> 0;
+  const hue = Math.round((h * 137.508) % 360);
+  return { fill: `hsl(${hue} 50% 36%)`, stroke: `hsl(${hue} 60% 56%)` };
+}
+// The colour + legend key for a workload under the current mode.
+function workloadColorClass(w) {
+  if ((state.ui.colorBy || "category") === "namespace") {
+    const key = nsNormalize(w.namespace);
+    return { key, label: key, ...nsColor(key) };
+  }
+  const key = categoryKeyOf(w.category);
+  return { key, label: key, ...COLOR_CATEGORY[key] };
+}
+// Legend entries for a set of workloads under the current mode: present-only, de-duplicated,
+// stable order (category = palette order; namespace = alphabetical). Used for both the on-screen
+// chip row and the legend baked into exports, so they always match.
+function legendEntriesFor(workloads) {
+  const mode = state.ui.colorBy || "category";
+  const seen = new Map();
+  for (const w of workloads) {
+    const c = workloadColorClass(w);
+    if (!seen.has(c.key)) seen.set(c.key, c);
+  }
+  const entries = [...seen.values()];
+  if (mode === "category") {
+    const order = Object.keys(COLOR_CATEGORY);
+    entries.sort((a, b) => order.indexOf(a.key) - order.indexOf(b.key));
+  } else {
+    entries.sort((a, b) => a.label.localeCompare(b.label));
+  }
+  return entries;
+}
+// A small "색상: [category | namespace]" segmented toggle for diagram headers. onAfter() runs
+// after the mode flips (re-render). Session-only — not persisted to project JSON.
+function colorByToggle() {
+  const mk = (mode, text) => el("button", {
+    style: {
+      padding: "3px 9px", fontSize: "11px", lineHeight: 1, cursor: "pointer",
+      fontFamily: "JetBrains Mono", fontWeight: 600,
+      background: (state.ui.colorBy || "category") === mode ? "var(--surface2)" : "transparent",
+      border: "1px solid var(--border)",
+      color: (state.ui.colorBy || "category") === mode ? "var(--text)" : "var(--text3)",
+      borderRadius: "4px",
+    },
+    onclick: () => { state.ui.colorBy = mode; emit(); },
+  }, [text]);
+  return el("span", { style: { display: "inline-flex", alignItems: "center", gap: "4px" } }, [
+    el("span", { style: { fontSize: "11px", color: "var(--text3)", marginRight: "2px" } }, ["색상"]),
+    mk("category", "category"),
+    mk("namespace", "namespace"),
+  ]);
+}
+// On-screen legend chip row (always visible, independent of pan/zoom). Mirrors the export legend.
+function legendChipRow(entries) {
+  return el("div", {
+    style: { fontSize: "11px", color: "var(--text2)", marginTop: "10px", display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" },
+  }, [
+    el("span", { style: { color: "var(--text3)", marginRight: "2px", fontSize: "10px", textTransform: "uppercase", letterSpacing: "0.05em" } },
+      [(state.ui.colorBy || "category") === "namespace" ? "namespace" : "category"]),
+    ...entries.map(e => el("span", {
+      style: { display: "inline-flex", alignItems: "center", gap: "5px", padding: "1px 8px 1px 4px", borderRadius: "3px" },
+    }, [
+      el("span", { style: { width: "12px", height: "12px", borderRadius: "3px", background: e.fill, border: `1px solid ${e.stroke}`, display: "inline-block" } }, []),
+      el("span", {}, [e.label]),
+    ])),
+  ]);
+}
+
 //============ Render: Architecture (switch-bus diagram, Korean style) ============
 function renderArchitecture() {
   const root = $("#viewBody");
@@ -9045,9 +9219,11 @@ function renderArchitecture() {
     for (const ns of r.namespaces) nsRoleIndex.set(ns, r);
   }
   const platformNs = new Set(nsRoleIndex.keys());
-  const platformRoleOf = (w) => nsRoleIndex.get(w.namespace || "default") || PLATFORM_OTHER;
+  // Normalise the namespace before role lookup so dev-monitoring / monitoring-prod group under
+  // Monitoring, etc. (nsRoleIndex keys are already base names like "monitoring").
+  const platformRoleOf = (w) => nsRoleIndex.get(nsNormalize(w.namespace)) || PLATFORM_OTHER;
   const isStateful = w => w.kind === "StatefulSet" || ["DB", "Cache", "Queue"].includes(w.category);
-  const isPlatform = w => platformNs.has(w.namespace || "default");
+  const isPlatform = w => platformNs.has(nsNormalize(w.namespace));
 
   // ---- Zone derivation ----
   // Zone = node.labels["topology.kubernetes.io/zone"] || node.site_id
@@ -9086,6 +9262,26 @@ function renderArchitecture() {
   }
   const groupByZone = state.ui.archGroupByZone !== false;
 
+  // ---- Cluster filter ----
+  // Optional single-cluster focus (mirrors the Dependency view's cluster tabs). Blank = all.
+  // Reset a stale selection if that cluster was removed.
+  if (state.ui.archCluster && !(p.clusters || []).find(c => c.id === state.ui.archCluster)) {
+    state.ui.archCluster = "";
+  }
+  const archClusterId = state.ui.archCluster || "";
+  const shownClusters = archClusterId ? (p.clusters || []).filter(c => c.id === archClusterId) : (p.clusters || []);
+  const shownClusterIds = new Set(shownClusters.map(c => c.id));
+  // Storages/external services referenced by the shown clusters' workloads — used to keep the
+  // DB/Storage row focused when a single cluster is selected (else shared infra adds noise).
+  const refStorageIds = new Set();
+  for (const c of shownClusters) {
+    for (const w of (c.workloads || [])) {
+      for (const pv of (w.persistent_volumes || [])) {
+        if (pv.target_storage_id) refStorageIds.add(pv.target_storage_id);
+      }
+    }
+  }
+
   // ---- Pre-compute L4 → workload routing (via cluster.ingress_rules.paths) ----
   // Only "compute" (non-platform, non-stateful) workloads become L4 children.
   // childWorkloadIds: set of workload IDs that should NOT appear as siblings.
@@ -9101,6 +9297,7 @@ function renderArchitecture() {
       for (const cid of (lb.target_cluster_ids || [])) {
         const c = p.clusters.find(x => x.id === cid);
         if (!c) continue;
+        if (archClusterId && !shownClusterIds.has(c.id)) continue;  // single-cluster focus
         const cZones = clusterZones.get(c.id) || [];
         const splitC = groupByZone && cZones.length >= 2;
         for (const r of (c.ingress_rules || [])) {
@@ -9149,7 +9346,7 @@ function renderArchitecture() {
     return envRows.get(key);
   };
 
-  for (const c of p.clusters) {
+  for (const c of shownClusters) {
     const tag = c.environment_tag || c.name;
     const zones = clusterZones.get(c.id) || [];
     const splitThisCluster = groupByZone && zones.length >= 2;
@@ -9200,14 +9397,19 @@ function renderArchitecture() {
     }
   }
 
-  // External services + storages → DB row (shared across zones — stays unsplit)
+  // External services + storages → DB row (shared across zones — stays unsplit).
+  // In single-cluster focus, external services aren't cluster-attributable (site-shared, no
+  // per-cluster link), so they're omitted; storages are kept only when this cluster's
+  // workloads actually mount them (via PVC target_storage_id).
   for (const s of p.sites || []) {
     for (const ex of (s.external_services || [])) {
+      if (archClusterId) continue;
       if (["database", "cache", "queue", "object_store", "backup"].includes(ex.kind)) {
         dbRow.push({ kind: "extsvc", item: ex });
       }
     }
     for (const st of (s.storages || [])) {
+      if (archClusterId && !refStorageIds.has(st.id)) continue;
       dbRow.push({ kind: "storage", item: st });
     }
   }
@@ -9250,7 +9452,7 @@ function renderArchitecture() {
       }
     } else {
       // unsplit: walk this env's clusters' sites
-      for (const c of p.clusters) {
+      for (const c of shownClusters) {
         if ((c.environment_tag || c.name) !== r.envTag) continue;
         const sitesUsed = new Set();
         for (const nid of (c.node_ids || [])) {
@@ -9286,7 +9488,12 @@ function renderArchitecture() {
 
   if (!rows.length) {
     root.appendChild(el("div", { class: "view-empty" }, [
-      el("h2", {}, ["워크로드가 없습니다"]),
+      el("h2", {}, [archClusterId ? "이 클러스터에는 표시할 워크로드가 없습니다" : "워크로드가 없습니다"]),
+      // Keep an escape hatch so a single-cluster filter can't strand the user on an empty view.
+      archClusterId ? el("button", {
+        class: "btn-ghost", style: { marginTop: "12px" },
+        onclick: () => { state.ui.archCluster = ""; emit(); },
+      }, ["← 전체 클러스터 보기"]) : null,
     ]));
     return;
   }
@@ -9294,12 +9501,26 @@ function renderArchitecture() {
   // Layout constants
   const SWITCH_W = 110, SWITCH_H = 36, SWITCH_VGAP = 4;
   const ROW_GAP = 50, BOX_W = 100, BOX_H = 56, BOX_GAP = 12, SUB_GAP = 8;
-  const GROUP_GAP = 32, GROUP_LABEL_H = 16; // mgmt/db row: gap between cluster groups + room for label
-  const GROUP_VGAP = 22; // vertical gap between stacked cluster groups (mgmt/db rows)
+  const GROUP_GAP = 32; // horizontal gap between labelled groups sharing a packed line (mgmt/db/env)
   const PAD_LEFT = 20, PAD_RIGHT = 30, PAD_TOP = 20;
   const STUB_LEN = 36;
   const SUB_DROP = 18;
   const SUB_TO_CHILD = 12;
+  // Env-row wrapping: when a single env row laid side-by-side would stretch wider than the
+  // available drawing area, we drop the single-line layout and pack its standalone compute
+  // boxes into multiple lines instead. Boxes are grouped by namespace (labelled) but packed
+  // to minimise the number of lines: small namespaces share a line, a large one wraps and its
+  // tail line still accepts following namespaces. Small projects stay under the budget and
+  // render exactly as before.
+  const LANE_LABEL_H = 16;   // height reserved above each wrapped line for its "ns:…" label(s)
+  const LANE_VGAP = 16;      // vertical gap below the L4 line before the wrapped lines begin
+  const SUBROW_VGAP = 12;    // vertical gap between wrapped lines
+  // "Wrap when the diagram would exceed ~80% of the drawing area." Budget is in SVG user units
+  // (≈ px at fit). rowAreaLeft (switch column) + PAD_RIGHT are fixed chrome, so the content of
+  // one line may use the rest. Floored so a transient 0-width read can't collapse to 1 box/line.
+  const containerW = Math.max(360, root.clientWidth || 1000);
+  const rowAreaLeftX = PAD_LEFT + SWITCH_W + 30;
+  const contentBudget = Math.max(BOX_W, 0.8 * containerW - rowAreaLeftX - PAD_RIGHT);
 
   const rowSwitchCount = r => Math.max(1, (rowSwitches.get(r.tag) || []).length);
   const rowSwitchStackH = r => {
@@ -9368,26 +9589,139 @@ function renderArchitecture() {
     const groups = getRowGroups(r);
     return groups.length > 1 && groups.some(g => g.label != null);
   };
+
+  // ---- Env-row namespace packing (wide env rows) ----
+  // _mgmt/_db already wrap (stacked groups); _ops is a flat node lane. Only the regular
+  // environment rows can overflow horizontally, so packing applies to those.
+  const isEnvRow = r => r.tag !== "_mgmt" && r.tag !== "_db" && r.tag !== "_ops";
+  // Footprint of a side-by-side run of plain boxes (no L4 children among them).
+  const boxRunWidth = n => n > 0 ? n * BOX_W + (n - 1) * BOX_GAP : 0;
+  // Width of just the L4 items laid side-by-side (each may carry a wider child subtree).
+  const l4LineWidth = items => {
+    if (!items.length) return 0;
+    let w = 0;
+    for (const it of items) w += itemFootprint(it) + BOX_GAP;
+    return w - BOX_GAP;
+  };
+  // Pack labelled groups of plain boxes into lines no wider than contentBudget. Each group
+  // (a namespace for env rows; a platform sub-role / cluster for mgmt·db rows) keeps its label
+  // on its first segment, but multiple groups share a line and a group's tail line accepts the
+  // next group — minimising the number of lines. A group larger than one line wraps.
+  // Balanced line count: pack to a per-line cap of ceil(N / linesNeeded) rather than greedily
+  // filling to the budget, so a count that just clears a line multiple (6 → 3+3 not 5+1,
+  // 11 → 4+4+3 not 5+5+1) never leaves a line with a single box.
+  const packGroupsToLines = (groups) => {
+    groups = groups.filter(g => g.items && g.items.length);
+    if (!groups.length) return [];
+    const N = groups.reduce((a, g) => a + g.items.length, 0);
+    const perLineMax = Math.max(1, Math.floor((contentBudget + BOX_GAP) / (BOX_W + BOX_GAP)));
+    const linesNeeded = Math.max(1, Math.ceil(N / perLineMax));
+    const cap = Math.ceil(N / linesNeeded);   // ≤ perLineMax, so a full cap-line still fits the budget
+    const lines = [];
+    let cur = { segments: [], width: 0, count: 0 };
+    const pushCur = () => { if (cur.segments.length) { lines.push(cur); cur = { segments: [], width: 0, count: 0 }; } };
+    // Largest run of n boxes that fits the current line under both the balance cap and the budget.
+    const fitCount = (n) => {
+      const gapBefore = cur.count > 0 ? GROUP_GAP : 0;
+      const byCap = cap - cur.count;
+      const byWidth = Math.floor((contentBudget - cur.width - gapBefore + BOX_GAP) / (BOX_W + BOX_GAP));
+      return Math.max(0, Math.min(n, byCap, byWidth));
+    };
+    for (const g of groups) {
+      const whole = g.items.length;
+      // Keep a small group (fits a line on its own) intact: if it won't fit in what's left of
+      // the current line, wrap to a fresh line before placing it.
+      if (cur.count > 0 && whole <= cap && boxRunWidth(whole) <= contentBudget && fitCount(whole) < whole) {
+        pushCur();
+      }
+      let firstSeg = true;   // first segment of this group overall → carries the label
+      let i = 0;
+      while (i < whole) {
+        let take = fitCount(whole - i);
+        if (take <= 0) {
+          if (cur.count === 0) take = 1;     // degenerate (budget < one box): force one
+          else { pushCur(); continue; }      // no room left → wrap and retry on a fresh line
+        }
+        const gapBefore = cur.count > 0 ? GROUP_GAP : 0;
+        cur.segments.push({ label: g.label, items: g.items.slice(i, i + take), showLabel: firstSeg });
+        cur.width += gapBefore + boxRunWidth(take);
+        cur.count += take;
+        i += take;
+        firstSeg = false;
+        if (i < whole) pushCur();            // group continues → force a new line
+      }
+    }
+    pushCur();
+    return lines;
+  };
+  // Env rows: group the standalone compute boxes by namespace, label "ns:<name>".
+  const packEnvLines = (items) => {
+    const byNs = new Map();
+    for (const it of items) {
+      const ns = (it.item && it.item.namespace) || "default";
+      if (!byNs.has(ns)) byNs.set(ns, []);
+      byNs.get(ns).push(it);
+    }
+    const groups = [...byNs.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([ns, list]) => ({ label: `ns:${ns}`, items: list }));
+    return packGroupsToLines(groups);
+  };
+  const envWrap = (r) => {
+    const l4Items = r.items.filter(it => it.kind === "l4");
+    const rest = r.items.filter(it => it.kind !== "l4");
+    return { l4Items, lines: packEnvLines(rest) };
+  };
+  // mgmt/db rows: pack their labelled groups (sub-role / cluster) horizontally too, instead of
+  // one group per vertical line (which stretched the management area into a tall 1-wide column).
+  const packStackedLines = (r) =>
+    packGroupsToLines(getRowGroups(r).map(g => ({ label: g.label ? `⎈ ${g.label}` : null, items: g.items })));
+  // Side-by-side width of the whole row, as the un-wrapped path would draw it.
+  const sideBySideWidth = (r) => {
+    const groups = getRowGroups(r);
+    let w = 0;
+    for (const g of groups) w += groupWidth(g) + GROUP_GAP;
+    return Math.max(BOX_W, w - GROUP_GAP);
+  };
+  // Wrap only env rows, and only once their single-line width would overflow the budget.
+  const envNeedsWrap = (r) => isEnvRow(r) && sideBySideWidth(r) > contentBudget;
+
+  const l4LineHeight = (l4Items) => {
+    if (!l4Items.length) return 0;
+    const hasSubs = l4Items.some(it => (l4Children.get(it.item.id) || []).length > 0);
+    return BOX_H + (hasSubs ? SUB_DROP + SUB_TO_CHILD + BOX_H + 8 : 0) + LANE_VGAP;
+  };
+  const wrappedLinesHeight = (lines) =>
+    lines.length ? lines.length * (LANE_LABEL_H + BOX_H) + (lines.length - 1) * SUBROW_VGAP : 0;
+
   const rowWidth = r => {
+    if (envNeedsWrap(r)) {
+      const { l4Items, lines } = envWrap(r);
+      const lineMax = Math.max(0, ...lines.map(l => l.width));
+      return Math.max(BOX_W, l4LineWidth(l4Items), lineMax);
+    }
     const groups = getRowGroups(r);
     if (!groups.length) return BOX_W;
     if (rowIsStacked(r)) {
-      return Math.max(BOX_W, ...groups.map(groupWidth));
+      const lines = packStackedLines(r);
+      return Math.max(BOX_W, 0, ...lines.map(l => l.width));
     }
     let w = 0;
     for (const g of groups) w += groupWidth(g) + GROUP_GAP;
     return Math.max(BOX_W, w - GROUP_GAP);
   };
   const rowHeight = r => {
-    const hasSubs = r.items.some(it => it.kind === "l4" && (l4Children.get(it.item.id) || []).length > 0);
     const stackH = rowSwitchStackH(r);
     const aboveBus = stackH / 2 + 30;
-    const groups = getRowGroups(r);
     let blockH;
+    if (envNeedsWrap(r)) {
+      const { l4Items, lines } = envWrap(r);
+      blockH = l4LineHeight(l4Items) + wrappedLinesHeight(lines);
+      return aboveBus + stackH / 2 + STUB_LEN + blockH + ROW_GAP;
+    }
+    const hasSubs = r.items.some(it => it.kind === "l4" && (l4Children.get(it.item.id) || []).length > 0);
     if (rowIsStacked(r)) {
-      const n = groups.length;
-      // Each group: label space + box height. Gaps between groups.
-      blockH = n * (GROUP_LABEL_H + BOX_H) + (n - 1) * GROUP_VGAP;
+      // Packed labelled lines (same metric as env wrapping): label band + boxes per line.
+      blockH = wrappedLinesHeight(packStackedLines(r));
     } else {
       blockH = BOX_H;
     }
@@ -9424,36 +9758,38 @@ function renderArchitecture() {
       };
       return c[item.item.purpose] || { fill: "#5d6d7e", stroke: "#7f8c8d" };
     }
-    // Platform workloads: color by sub-role (monitoring/logging/gitops/ci/...) instead of
-    // category — operationally the role matters more here than the architectural type.
-    if (item.kind === "workload" && isPlatform(item.item)) {
-      const role = platformRoleOf(item.item);
-      return { fill: role.color, stroke: "#34495e" };
-    }
-    // workload by category
-    const cat = item.item.category;
-    const map = {
-      Frontend:      { fill: "#7d3c98", stroke: "#9b59b6" },  // purple (web)
-      API:           { fill: "#1e6091", stroke: "#2980b9" },  // teal blue (was/agt)
-      WAS:           { fill: "#1e6091", stroke: "#2980b9" },
-      "ML-Inference":{ fill: "#922b21", stroke: "#c0392b" },  // red
-      "ML-Training": { fill: "#922b21", stroke: "#c0392b" },
-      Video:         { fill: "#943126", stroke: "#cd5c5c" },
-      DB:            { fill: "#1f618d", stroke: "#3498db" },
-      Cache:         { fill: "#1f618d", stroke: "#3498db" },
-      Queue:         { fill: "#117a65", stroke: "#1abc9c" },
-      Batch:         { fill: "#1e8449", stroke: "#27ae60" },  // green agent
-      Other:         { fill: "#5d6d7e", stroke: "#7f8c8d" },
-      Frontend:      { fill: "#7d3c98", stroke: "#9b59b6" },
-    };
-    return map[cat] || { fill: "#5d6d7e", stroke: "#7f8c8d" };
+    // Workloads: unified standard (category or namespace mode) — same colour on every screen.
+    return workloadColorClass(item.item);
   };
+
+  // ---- Pan / Zoom (view-local, manipulates the SVG viewBox) ----
+  // Natural extent = the full diagram bounding box. Stored separately so a Fit/reset can
+  // always return to it even after the user has panned/zoomed away.
+  const naturalVB = { x: 0, y: 0, w: totalW, h: totalH };
+  // Persisted current viewport. Architecture changes shape a lot (zone toggle, cluster/
+  // workload edits all move totalW/totalH), so reset if the previous box is geometrically
+  // broken, absurdly large, or has drifted entirely outside the new natural extent.
+  const prevVB = state.ui.archViewBox;
+  const vbBroken = !prevVB || prevVB.w <= 0 || prevVB.h <= 0
+    || prevVB.w > naturalVB.w * 25
+    || prevVB.h > naturalVB.h * 25
+    || prevVB.x > naturalVB.x + naturalVB.w
+    || prevVB.y > naturalVB.y + naturalVB.h
+    || prevVB.x + prevVB.w < naturalVB.x
+    || prevVB.y + prevVB.h < naturalVB.y;
+  if (vbBroken) state.ui.archViewBox = { ...naturalVB };
+  const vb = state.ui.archViewBox;
 
   const root_svg = svg("svg", {
     width: "100%",
-    viewBox: `0 0 ${totalW} ${totalH}`,
-    style: "background:var(--bg);border:1px solid var(--border);border-radius:8px;",
+    viewBox: `${vb.x} ${vb.y} ${vb.w} ${vb.h}`,
+    preserveAspectRatio: "xMidYMid meet",
+    style: "background:var(--bg);border:1px solid var(--border);border-radius:8px;height:min(72vh,720px);min-height:420px;cursor:grab;touch-action:none;",
   });
+
+  // Push viewBox state → DOM. Local to this render so closures over `vb`/`root_svg` stay stable.
+  const applyVB = () => root_svg.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+  const zoomPct = () => Math.round((naturalVB.w / vb.w) * 100);
 
   // Helper: draw a box with label/sub at given position
   const drawBox = (item, x, y) => {
@@ -9502,6 +9838,45 @@ function renderArchitecture() {
 
   // Track final positions of workload/storage boxes so we can draw PVC→storage lines after.
   const archPositions = new Map();
+
+  // Shared renderer for packed labelled lines (env namespace lanes + mgmt/db group flow):
+  // each line of box segments hangs off a left vertical rail; labels sit in the band above.
+  // topY = y of the first line's box tops. Returns nothing.
+  const renderPackedLines = (lines, topY, busLineY, trunkX, rowAreaLeft) => {
+    let cy = topY;
+    let trunkBottom = busLineY;
+    for (const line of lines) {
+      const subTrunkY = cy - 4;          // horizontal connector just above the boxes
+      let lx = rowAreaLeft;
+      let lastCx = lx;
+      for (let si = 0; si < line.segments.length; si++) {
+        const seg = line.segments[si];
+        if (si > 0) lx += GROUP_GAP;     // gap between groups sharing a line
+        if (seg.showLabel && seg.label) {
+          root_svg.appendChild(svg("text", {
+            x: lx, y: cy - LANE_LABEL_H + 11,
+            "text-anchor": "start", fill: "var(--text2)",
+            "font-size": "10", "font-family": "JetBrains Mono", "font-weight": "600",
+          }, [seg.label]));
+        }
+        for (const item of seg.items) {
+          const cx = lx + BOX_W / 2;
+          lastCx = cx;
+          root_svg.appendChild(svg("line", { x1: cx, y1: subTrunkY, x2: cx, y2: cy, stroke: "#34495e", "stroke-width": 1 }));
+          drawBox(item, lx, cy);
+          if (item.kind === "workload" || item.kind === "storage") {
+            archPositions.set(`${item.kind}:${item.item.id}`, { x: lx, y: cy, w: BOX_W, h: BOX_H });
+          }
+          lx += BOX_W + BOX_GAP;
+        }
+      }
+      root_svg.appendChild(svg("line", { x1: trunkX, y1: subTrunkY, x2: lastCx, y2: subTrunkY, stroke: "#34495e", "stroke-width": 1 }));
+      trunkBottom = subTrunkY;
+      cy += BOX_H + SUBROW_VGAP + LANE_LABEL_H;
+    }
+    // Left rail: vertical trunk from the bus down to the last line's sub-trunk.
+    root_svg.appendChild(svg("line", { x1: trunkX, y1: busLineY, x2: trunkX, y2: trunkBottom, stroke: "#34495e", "stroke-width": 1 }));
+  };
 
   // Per-row geometry: stack center = busY
   const rowGeom = rowTops.map((top, i) => {
@@ -9620,68 +9995,66 @@ function renderArchitecture() {
     const stacked = rowIsStacked(row);
 
     if (stacked) {
-      // Vertical trunk pattern: each cluster group on its own line, connected
-      // via a single vertical trunk that comes off the bus.
-      const maxGW = Math.max(...groups.map(groupWidth));
+      // Labelled groups (platform sub-roles / clusters) packed horizontally into lines off a
+      // left rail — multiple groups share a line so the management area no longer stretches
+      // into a tall 1-wide column. Wraps at the same width budget as env namespace lanes.
+      renderPackedLines(
+        packStackedLines(row),
+        boxY + LANE_LABEL_H,            // first line's box tops (label band above)
+        lineY, PAD_LEFT + SWITCH_W + 14, PAD_LEFT + SWITCH_W + 30,
+      );
+    } else if (envNeedsWrap(row)) {
+      // ---- Namespace packing (wide env rows) ----
+      // L4 items (with their child subtrees) stay on a side-by-side top line, exactly like
+      // the un-wrapped path. The remaining standalone compute boxes are packed into lines no
+      // wider than contentBudget, grouped by namespace (labelled) but sharing lines so the
+      // number of lines stays small. Each line hangs off a left rail.
+      const { l4Items, lines } = envWrap(row);
       const rowAreaLeft = PAD_LEFT + SWITCH_W + 30;
-      const trunkX = rowAreaLeft + maxGW / 2;
-      // Trunk goes from bus down to the last group's sub-trunk level
-      const lastGroupSubTrunkY = boxY + (groups.length - 1) * (GROUP_LABEL_H + BOX_H + GROUP_VGAP) + GROUP_LABEL_H - 4;
-      root_svg.appendChild(svg("line", {
-        x1: trunkX, y1: lineY, x2: trunkX, y2: lastGroupSubTrunkY,
-        stroke: "#34495e", "stroke-width": 1,
-      }));
+      const trunkX = PAD_LEFT + SWITCH_W + 14; // left rail the lines hang off
 
-      for (let gi = 0; gi < groups.length; gi++) {
-        const g = groups[gi];
-        if (!g.items.length) continue;
-        const gw = groupWidth(g);
-        const groupTopY = boxY + gi * (GROUP_LABEL_H + BOX_H + GROUP_VGAP);
-        const subTrunkY = groupTopY + GROUP_LABEL_H - 4;
-        const itemsTopY = groupTopY + GROUP_LABEL_H;
-
-        // Cluster label centered on trunk
-        if (g.label) {
-          root_svg.appendChild(svg("text", {
-            x: trunkX, y: groupTopY + GROUP_LABEL_H - 6,
-            "text-anchor": "middle", fill: "var(--text2)",
-            "font-size": "10", "font-family": "JetBrains Mono", "font-weight": "600",
-          }, [`⎈ ${g.label}`]));
-        }
-
-        // Items centered around trunkX
-        const itemsLeft = trunkX - gw / 2;
-        let bx = itemsLeft;
-        const itemCxs = [];
-        for (let i = 0; i < g.items.length; i++) {
-          const item = g.items[i];
-          const footprint = itemFootprint(item);
-          const cx = bx + footprint / 2;
-          const itemX = cx - BOX_W / 2;
-          itemCxs.push(cx);
-
-          // Short stub from sub-trunk down to box top
+      // --- Top line: L4 items + subtrees (same drawing as the side-by-side branch) ---
+      let bx = rowAreaLeft;
+      for (const item of l4Items) {
+        const subs = l4Children.get(item.item.id) || [];
+        const footprint = itemFootprint(item);
+        const cx = bx + footprint / 2;
+        const itemX = cx - BOX_W / 2;
+        root_svg.appendChild(svg("line", {
+          x1: cx, y1: lineY, x2: cx, y2: boxY, stroke: "#34495e", "stroke-width": 1,
+        }));
+        drawBox(item, itemX, boxY);
+        if (subs.length) {
+          const subsW = subs.length * BOX_W + (subs.length - 1) * SUB_GAP;
+          const subY = boxY + BOX_H + SUB_DROP;
+          const childY = subY + SUB_TO_CHILD;
+          const childStartX = cx - subsW / 2;
           root_svg.appendChild(svg("line", {
-            x1: cx, y1: subTrunkY, x2: cx, y2: itemsTopY,
-            stroke: "#34495e", "stroke-width": 1,
+            x1: cx, y1: boxY + BOX_H, x2: cx, y2: subY, stroke: "#34495e", "stroke-width": 1,
           }));
-
-          drawBox(item, itemX, itemsTopY);
-          if (item.kind === "workload" || item.kind === "storage") {
-            archPositions.set(`${item.kind}:${item.item.id}`, { x: itemX, y: itemsTopY, w: BOX_W, h: BOX_H });
+          if (subs.length > 1) {
+            root_svg.appendChild(svg("line", {
+              x1: childStartX + BOX_W / 2, y1: subY,
+              x2: childStartX + subsW - BOX_W / 2, y2: subY, stroke: "#34495e", "stroke-width": 1,
+            }));
           }
-
-          bx += footprint;
-          if (i < g.items.length - 1) bx += BOX_GAP;
+          for (let j = 0; j < subs.length; j++) {
+            const ccx = childStartX + j * (BOX_W + SUB_GAP) + BOX_W / 2;
+            root_svg.appendChild(svg("line", {
+              x1: ccx, y1: subY, x2: ccx, y2: childY, stroke: "#34495e", "stroke-width": 1,
+            }));
+            drawBox(subs[j], ccx - BOX_W / 2, childY);
+            if (subs[j].kind === "workload") {
+              archPositions.set(`workload:${subs[j].item.id}`, { x: ccx - BOX_W / 2, y: childY, w: BOX_W, h: BOX_H });
+            }
+          }
         }
-        // Horizontal sub-trunk across this group's items (only if 2+)
-        if (itemCxs.length > 1) {
-          root_svg.appendChild(svg("line", {
-            x1: itemCxs[0], y1: subTrunkY, x2: itemCxs[itemCxs.length - 1], y2: subTrunkY,
-            stroke: "#34495e", "stroke-width": 1,
-          }));
-        }
+        bx += footprint + BOX_GAP;
       }
+      const l4LineH = l4LineHeight(l4Items);
+
+      // --- Packed namespace lines hung off the same left rail ---
+      renderPackedLines(lines, boxY + l4LineH + LANE_LABEL_H, lineY, trunkX, rowAreaLeft);
     } else {
       // Side-by-side layout (env rows or single-group mgmt/db)
       let bx = PAD_LEFT + SWITCH_W + 30;
@@ -9778,6 +10151,8 @@ function renderArchitecture() {
   });
   // Detect any multi-zone cluster to know whether toggle has any effect
   const anyMultiZone = [...clusterZones.values()].some(zs => zs.length >= 2);
+  // Legend entries for the workloads actually shown (respects the cluster filter + colour mode).
+  const archLegendEntries = legendEntriesFor(shownClusters.flatMap(c => c.workloads || []));
   wrap.appendChild(el("div", {
     style: { display: "flex", alignItems: "center", gap: "12px", marginBottom: "10px", flexWrap: "wrap" },
   }, [
@@ -9796,22 +10171,150 @@ function renderArchitecture() {
         ? "Zone (topology.kubernetes.io/zone 또는 site_id)별로 행을 분리합니다. L4·Switch·Storage가 zone별로 묶입니다."
         : "Zone이 2개 이상인 클러스터가 있을 때만 효과가 있습니다.",
     }, [zoneToggle, "Group by zone"]),
-    ...diagramExportButtons(() => root_svg, "architecture"),
+    colorByToggle(),
+    ...diagramExportButtons(() => root_svg, "architecture", () => archLegendEntries),
   ]));
+
+  // ---- Cluster filter bar — "All" + one tab per cluster (mirrors the Dependency view) ----
+  if ((p.clusters || []).length > 1) {
+    const cbar = el("div", {
+      style: { display: "flex", gap: "4px", marginBottom: "10px", flexWrap: "wrap", alignItems: "center" },
+    });
+    cbar.appendChild(el("span", {
+      style: { fontSize: "11px", color: "var(--text2)", marginRight: "6px", letterSpacing: "0.05em", textTransform: "uppercase", fontWeight: 600 },
+    }, ["Cluster"]));
+    const mkTab = (id, label, count) => el("button", {
+      class: "view-tab" + (archClusterId === id ? " active" : ""),
+      style: { padding: "4px 10px", fontSize: "11px" },
+      onclick: () => { state.ui.archCluster = id; emit(); },
+    }, [
+      label,
+      el("span", { style: { color: "var(--text3)", marginLeft: "6px", fontFamily: "JetBrains Mono", fontSize: "10px" } }, [`(${count})`]),
+    ]);
+    const totalWls = (p.clusters || []).reduce((a, c) => a + (c.workloads || []).length, 0);
+    cbar.appendChild(mkTab("", "All", totalWls));
+    for (const c of (p.clusters || [])) {
+      cbar.appendChild(mkTab(c.id, c.name, (c.workloads || []).length));
+    }
+    wrap.appendChild(cbar);
+  }
+
+  // ---- Zoom / pan controls (own row above the SVG) ----
+  const zoomPctSpan = el("span", {
+    style: { fontFamily: "JetBrains Mono", fontSize: "11px", color: "var(--text2)", minWidth: "42px", textAlign: "center" },
+  }, [`${zoomPct()}%`]);
+  const refreshZoomPct = () => { zoomPctSpan.textContent = `${zoomPct()}%`; };
+
+  const zoomAt = (factor, cx, cy) => {
+    // Cursor-anchored zoom by changing viewBox dimensions while keeping the
+    // world-space point under (cx, cy) fixed in screen space.
+    const ratioX = (cx - vb.x) / vb.w;
+    const ratioY = (cy - vb.y) / vb.h;
+    vb.w = Math.max(20, Math.min(naturalVB.w * 20, vb.w * factor));
+    vb.h = Math.max(20, Math.min(naturalVB.h * 20, vb.h * factor));
+    vb.x = cx - ratioX * vb.w;
+    vb.y = cy - ratioY * vb.h;
+    applyVB(); refreshZoomPct();
+  };
+  const zoomFromCenter = (factor) => zoomAt(factor, vb.x + vb.w / 2, vb.y + vb.h / 2);
+  const fit = () => { Object.assign(vb, naturalVB); applyVB(); refreshZoomPct(); };
+
+  const zoomBtn = (label, title, onClick) => el("button", {
+    style: {
+      padding: "3px 9px", fontSize: "12px", lineHeight: 1,
+      background: "var(--surface2)", border: "1px solid var(--border)",
+      color: "var(--text2)", borderRadius: "4px", cursor: "pointer",
+      fontFamily: "JetBrains Mono", fontWeight: 600,
+    },
+    title,
+    onclick: onClick,
+  }, [label]);
+  wrap.appendChild(el("div", {
+    style: { display: "flex", alignItems: "center", gap: "4px", marginBottom: "8px" },
+  }, [
+    el("span", {
+      style: { fontSize: "11px", color: "var(--text3)", marginRight: "6px", letterSpacing: "0.05em", textTransform: "uppercase", fontWeight: 600 },
+    }, ["Zoom"]),
+    zoomBtn("−", "축소 (휠 아래로)", () => zoomFromCenter(1.2)),
+    zoomBtn("+", "확대 (휠 위로)",   () => zoomFromCenter(1 / 1.2)),
+    zoomPctSpan,
+    zoomBtn("⊡ Fit", "전체 보기로 초기화", () => fit()),
+    el("span", {
+      style: { fontSize: "10px", color: "var(--text3)", marginLeft: "8px", fontStyle: "italic" },
+    }, ["휠로 커서 위치 기준 확대 · 빈 영역 드래그로 이동"]),
+  ]));
+
+  // Wheel: cursor-anchored zoom. createSVGPoint + getScreenCTM → user-space coords.
+  root_svg.addEventListener("wheel", e => {
+    e.preventDefault();
+    const pt = root_svg.createSVGPoint();
+    pt.x = e.clientX; pt.y = e.clientY;
+    const ctm = root_svg.getScreenCTM();
+    if (!ctm) return;
+    const u = pt.matrixTransform(ctm.inverse());
+    const factor = e.deltaY > 0 ? 1.06 : 1 / 1.06;
+    zoomAt(factor, u.x, u.y);
+  }, { passive: false });
+
+  // Drag-pan: only when the press lands on the SVG background, not on a clickable box group.
+  // Window listeners are attached on mousedown and removed on mouseup so they don't
+  // accumulate across re-renders.
+  const isOnNode = (target) => {
+    let n = target;
+    while (n && n !== root_svg) {
+      if (n.tagName === "g" && n.getAttribute && /cursor:\s*pointer/i.test(n.getAttribute("style") || "")) return true;
+      n = n.parentNode;
+    }
+    return false;
+  };
+  root_svg.addEventListener("mousedown", e => {
+    if (e.button !== 0) return;
+    if (isOnNode(e.target)) return;
+    const ctm = root_svg.getScreenCTM();
+    if (!ctm) return;
+    const drag = {
+      startX: e.clientX, startY: e.clientY,
+      vbX0: vb.x, vbY0: vb.y,
+      scaleX: 1 / ctm.a, scaleY: 1 / ctm.d,
+      dragged: false,
+    };
+    root_svg.style.cursor = "grabbing";
+    const onMove = ev => {
+      const dx = ev.clientX - drag.startX;
+      const dy = ev.clientY - drag.startY;
+      if (Math.abs(dx) + Math.abs(dy) > 3) drag.dragged = true;
+      vb.x = drag.vbX0 - dx * drag.scaleX;
+      vb.y = drag.vbY0 - dy * drag.scaleY;
+      applyVB();
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      root_svg.style.cursor = "grab";
+      if (drag.dragged) {
+        // Suppress the trailing click so a pan doesn't accidentally open the inspector.
+        const swallow = ev => { ev.stopPropagation(); ev.preventDefault(); window.removeEventListener("click", swallow, true); };
+        window.addEventListener("click", swallow, true);
+        setTimeout(() => window.removeEventListener("click", swallow, true), 60);
+      }
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  });
+
   wrap.appendChild(root_svg);
 
-  // Legend
-  wrap.appendChild(el("div", {
-    style: { fontSize: "11px", color: "var(--text2)", marginTop: "10px", display: "flex", gap: "10px", flexWrap: "wrap" },
-  }, [
-    el("span", { style: { background: "#7d3c98", color: "#fff", padding: "2px 8px", borderRadius: "3px" } }, ["Frontend"]),
-    el("span", { style: { background: "#1e6091", color: "#fff", padding: "2px 8px", borderRadius: "3px" } }, ["API/WAS"]),
-    el("span", { style: { background: "#1e8449", color: "#fff", padding: "2px 8px", borderRadius: "3px" } }, ["Batch/Storage"]),
-    el("span", { style: { background: "#922b21", color: "#fff", padding: "2px 8px", borderRadius: "3px" } }, ["ML"]),
-    el("span", { style: { background: "#1f618d", color: "#fff", padding: "2px 8px", borderRadius: "3px" } }, ["DB/Cache"]),
-    el("span", { style: { background: "#5d6d7e", color: "#fff", padding: "2px 8px", borderRadius: "3px" } }, ["Mgmt"]),
-    el("span", { style: { background: "#1e3a5f", color: "#fff", padding: "2px 8px", borderRadius: "3px" } }, ["L4/Switch"]),
-  ]));
+  // Legend — unified workload colour classes (current mode) + fixed infra chips.
+  const legendRow = legendChipRow(archLegendEntries);
+  for (const inf of [{ label: "L4/Switch", fill: "#1e3a5f", stroke: "#34495e" }, { label: "Storage", fill: "#1e8449", stroke: "#27ae60" }]) {
+    legendRow.appendChild(el("span", {
+      style: { display: "inline-flex", alignItems: "center", gap: "5px", padding: "1px 8px 1px 4px", borderRadius: "3px" },
+    }, [
+      el("span", { style: { width: "12px", height: "12px", borderRadius: "3px", background: inf.fill, border: `1px solid ${inf.stroke}`, display: "inline-block" } }, []),
+      el("span", { style: { color: "var(--text3)" } }, [inf.label]),
+    ]));
+  }
+  wrap.appendChild(legendRow);
 
   root.appendChild(wrap);
 }
@@ -10118,30 +10621,8 @@ function renderDependency() {
     });
   });
 
-  // ---- Color by category (mirror architecture view) ----
-  const platformNs = new Set([
-    "kube-system", "ingress-nginx", "cert-manager",
-    "monitoring", "logging", "velero", "external-secrets", "istio-system",
-    // GitOps / CI/CD platform namespaces (extension)
-    "argocd", "fluxcd", "flux-system", "tekton-pipelines",
-    "jenkins", "gitlab", "gitlab-runner", "harbor", "buildkit", "kaniko",
-  ]);
-  const colorOf = (w) => {
-    if (platformNs.has(w.namespace || "default")) return { fill: "#5d6d7e", stroke: "#7f8c8d" };
-    const map = {
-      Frontend: { fill: "#7d3c98", stroke: "#9b59b6" },
-      API:      { fill: "#1e6091", stroke: "#2980b9" },
-      WAS:      { fill: "#1e6091", stroke: "#2980b9" },
-      "ML-Inference": { fill: "#922b21", stroke: "#c0392b" },
-      "ML-Training":  { fill: "#922b21", stroke: "#c0392b" },
-      Video:    { fill: "#943126", stroke: "#cd5c5c" },
-      DB:       { fill: "#1f618d", stroke: "#3498db" },
-      Cache:    { fill: "#1f618d", stroke: "#3498db" },
-      Queue:    { fill: "#117a65", stroke: "#1abc9c" },
-      Batch:    { fill: "#1e8449", stroke: "#27ae60" },
-    };
-    return map[w.category] || { fill: "#5d6d7e", stroke: "#7f8c8d" };
-  };
+  // ---- Node colour: unified standard (category / namespace mode), identical to Architecture ----
+  const colorOf = (w) => workloadColorClass(w);
 
   // ---- SVG ----
   const NS = "http://www.w3.org/2000/svg";
@@ -10350,6 +10831,8 @@ function renderDependency() {
     const wname = byId.get(tid)?.w?.name || tid;
     topFanIn = `fan-in 최다: ${wname} (${tn})`;
   }
+  // Legend entries for the shown workloads (respects the cluster filter + colour mode).
+  const depLegendEntries = legendEntriesFor(items.map(i => i.w));
   wrap.appendChild(el("div", {
     style: { display: "flex", alignItems: "baseline", gap: "12px", marginBottom: "10px", flexWrap: "wrap" },
   }, [
@@ -10362,7 +10845,8 @@ function renderDependency() {
     ]),
     topFanIn ? el("span", { style: { fontSize: "11px", color: "var(--text3)" } }, [topFanIn]) : null,
     el("span", { style: { flex: 1 } }, []),
-    ...diagramExportButtons(() => root_svg, "dependency"),
+    colorByToggle(),
+    ...diagramExportButtons(() => root_svg, "dependency", () => depLegendEntries),
   ]));
 
   // ---- Zoom / pan controls (in their own row above the SVG) ----
@@ -10478,7 +10962,7 @@ function renderDependency() {
 
   wrap.appendChild(root_svg);
 
-  // Legend
+  // Edge legend
   wrap.appendChild(el("div", {
     style: { fontSize: "11px", color: "var(--text2)", marginTop: "10px", display: "flex", gap: "10px", flexWrap: "wrap" },
   }, [
@@ -10486,6 +10970,8 @@ function renderDependency() {
     el("span", { style: { color: "var(--text3)" } }, ["→callee  (left = entry, right = sink)"]),
     el("span", { style: { marginLeft: "12px", color: "#e67e22" } }, ["⤺ back edge (cycle)"]),
   ]));
+  // Node colour legend (unified standard, current mode)
+  wrap.appendChild(legendChipRow(depLegendEntries));
 
   root.appendChild(wrap);
 }
@@ -11102,7 +11588,41 @@ function _zipStore(files) {
 }
 
 //============ Diagram SVG/PNG export helpers ============
-function _serializeSvg(svgEl) {
+// Build an SVG <g> legend (colour swatches + labels, wrapping within [leftX, rightX]). Returns
+// { g, height }. Coordinates are absolute world units so it can be appended below the diagram.
+function _legendSvgGroup(entries, modeLabel, leftX, rightX, topY, textColor, mutedColor) {
+  const NS = "http://www.w3.org/2000/svg";
+  const mk = (tag, attrs = {}, kids = []) => {
+    const n = document.createElementNS(NS, tag);
+    for (const [k, v] of Object.entries(attrs)) if (v != null) n.setAttribute(k, v);
+    for (const c of kids) n.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+    return n;
+  };
+  const PAD = 16, SW = 13, FS = 12, ROWH = 24, CHIP_TEXT_GAP = 6, CHIP_GAP = 14;
+  const estW = (label) => SW + CHIP_TEXT_GAP + label.length * 7.2 + CHIP_GAP;
+  const g = mk("g");
+  // Separator above the legend.
+  g.appendChild(mk("line", { x1: leftX, y1: topY, x2: rightX, y2: topY, stroke: mutedColor, "stroke-width": 1, "stroke-opacity": 0.4 }));
+  let y = topY + PAD;
+  g.appendChild(mk("text", { x: leftX + PAD, y: y + FS - 1, fill: mutedColor, "font-size": 11, "font-family": "JetBrains Mono", "font-weight": 600 }, [`색상 기준: ${modeLabel}`]));
+  y += ROWH;
+  let x = leftX + PAD;
+  const innerRight = rightX - PAD;
+  for (const e of entries) {
+    const w = estW(e.label);
+    if (x > leftX + PAD && x + w > innerRight) { x = leftX + PAD; y += ROWH; }
+    g.appendChild(mk("rect", { x, y, width: SW, height: SW, rx: 3, ry: 3, fill: e.fill, stroke: e.stroke, "stroke-width": 1 }));
+    g.appendChild(mk("text", { x: x + SW + CHIP_TEXT_GAP, y: y + SW - 1, fill: textColor, "font-size": FS, "font-family": "Pretendard, sans-serif" }, [e.label]));
+    x += w;
+  }
+  const height = (y + SW) + PAD - topY;
+  return { g, height };
+}
+// Serialize an SVG for export. Normalises the viewBox to the full content bounding box (so the
+// export is the whole diagram, not the current pan/zoom crop), bakes in a background rect, and —
+// when legendEntries are supplied — appends a colour legend below the diagram. Returns
+// { xml, width, height } so the PNG path knows the final pixel size.
+function _serializeSvg(svgEl, legendEntries) {
   const clone = svgEl.cloneNode(true);
   clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
   clone.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
@@ -11124,16 +11644,44 @@ function _serializeSvg(svgEl) {
       if (v && v.includes("var(--")) n.setAttribute(attr, replaceVars(v));
     }
   }
-  // Explicit width/height from viewBox (some renderers ignore viewBox alone)
-  const vb = clone.getAttribute("viewBox");
-  if (vb) {
-    const parts = vb.split(/\s+/).map(Number);
-    if (parts.length === 4) {
-      clone.setAttribute("width", parts[2]);
-      clone.setAttribute("height", parts[3]);
-    }
+  const bgColor = map["--bg"] || "#0d1117";
+  const textColor = map["--text"] || "#e6e6e6";
+  const mutedColor = map["--text3"] || "#8b949e";
+
+  // Content extent: prefer the live getBBox (full diagram, ignores pan/zoom) over the viewBox.
+  const M = 16;
+  let x0, y0, w0, h0;
+  let bbox = null;
+  try { bbox = svgEl.getBBox(); } catch (e) { bbox = null; }
+  if (bbox && bbox.width > 0 && bbox.height > 0) {
+    x0 = bbox.x - M; y0 = bbox.y - M; w0 = bbox.width + 2 * M; h0 = bbox.height + 2 * M;
+  } else {
+    const parts = (clone.getAttribute("viewBox") || "0 0 1200 800").split(/\s+/).map(Number);
+    [x0, y0, w0, h0] = parts.length === 4 ? parts : [0, 0, 1200, 800];
   }
-  return new XMLSerializer().serializeToString(clone);
+
+  // Append the colour legend below the content (if provided), expanding the height.
+  let legendH = 0;
+  if (legendEntries && legendEntries.length) {
+    const modeLabel = (state.ui.colorBy || "category") === "namespace" ? "namespace" : "category";
+    const { g, height } = _legendSvgGroup(legendEntries, modeLabel, x0, x0 + w0, y0 + h0, textColor, mutedColor);
+    legendH = height;
+    clone.appendChild(g);
+  }
+  const totalH = h0 + legendH;
+
+  // Background rect first (so SVG/PNG aren't transparent and legend text stays readable).
+  const bgRect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  bgRect.setAttribute("x", x0); bgRect.setAttribute("y", y0);
+  bgRect.setAttribute("width", w0); bgRect.setAttribute("height", totalH);
+  bgRect.setAttribute("fill", bgColor);
+  clone.insertBefore(bgRect, clone.firstChild);
+
+  clone.setAttribute("viewBox", `${x0} ${y0} ${w0} ${totalH}`);
+  clone.setAttribute("width", w0);
+  clone.setAttribute("height", totalH);
+  clone.removeAttribute("style");  // drop the CSS height:min(...) so width/height attrs win
+  return { xml: new XMLSerializer().serializeToString(clone), width: w0, height: totalH };
 }
 function _triggerDownload(blob, filename) {
   const url = URL.createObjectURL(blob);
@@ -11143,15 +11691,12 @@ function _triggerDownload(blob, filename) {
   document.body.removeChild(a);
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
-function _downloadSvg(svgEl, basename) {
-  const xml = _serializeSvg(svgEl);
+function _downloadSvg(svgEl, basename, legendEntries) {
+  const { xml } = _serializeSvg(svgEl, legendEntries);
   _triggerDownload(new Blob([xml], { type: "image/svg+xml;charset=utf-8" }), `${basename}.svg`);
 }
-function _downloadPng(svgEl, basename, scale = 2) {
-  const xml = _serializeSvg(svgEl);
-  const vb = svgEl.getAttribute("viewBox");
-  let w = 1200, h = 800;
-  if (vb) { const [, , vw, vh] = vb.split(/\s+/).map(Number); w = vw; h = vh; }
+function _downloadPng(svgEl, basename, scale = 2, legendEntries) {
+  const { xml, width: w, height: h } = _serializeSvg(svgEl, legendEntries);
   const blob = new Blob([xml], { type: "image/svg+xml;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const img = new Image();
@@ -11180,21 +11725,22 @@ function _todayStamp() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
-function diagramExportButtons(getSvg, kind) {
+function diagramExportButtons(getSvg, kind, getLegend) {
   const btnStyle = {
     background: "var(--surface2)", border: "1px solid var(--border)",
     color: "var(--text)", padding: "4px 10px", borderRadius: "4px",
     cursor: "pointer", fontSize: "11px", fontFamily: "inherit",
   };
   const base = () => `${slug(state.project?.name) || "vk8s"}-${kind}-${_todayStamp()}`;
+  const legend = () => (typeof getLegend === "function" ? getLegend() : null);
   return [
     el("button", {
-      style: btnStyle, title: "SVG 다운로드 (벡터, 무손실)",
-      onclick: () => { const s = getSvg(); if (s) _downloadSvg(s, base()); },
+      style: btnStyle, title: "SVG 다운로드 (벡터, 무손실 · 범례 포함)",
+      onclick: () => { const s = getSvg(); if (s) _downloadSvg(s, base(), legend()); },
     }, ["⬇ SVG"]),
     el("button", {
-      style: btnStyle, title: "PNG 다운로드 (2× 해상도)",
-      onclick: () => { const s = getSvg(); if (s) _downloadPng(s, base()); },
+      style: btnStyle, title: "PNG 다운로드 (2× 해상도 · 범례 포함)",
+      onclick: () => { const s = getSvg(); if (s) _downloadPng(s, base(), 2, legend()); },
     }, ["⬇ PNG"]),
   ];
 }
@@ -12546,16 +13092,42 @@ function renderFindings() {
   const placeholder = document.querySelector(".findings-summary span[style*='Phase 2']");
   if (placeholder) placeholder.style.display = "none";
 
+  // Reflect the active severity filter on the summary counts (highlight the selected one).
+  const filter = state.ui.findingsFilter || null;
+  for (const span of document.querySelectorAll(".findings-summary .count")) {
+    span.dataset.active = String(span.dataset.sev === filter);
+  }
+
   // Render expanded list if visible
   const list = $("#findingsList");
   if (list.style.display !== "none") {
     list.innerHTML = "";
-    if (!findings.length) {
-      list.appendChild(el("div", { style: { padding: "12px 16px", color: "var(--text2)", fontSize: "12px", textAlign: "center" } }, ["✓ 모든 검증 통과"]));
+    const sevLabel = { error: "errors", warn: "warnings", info: "info" };
+    const shown = filter ? findings.filter(f => f.sev === filter) : findings;
+
+    // Header: which subset is shown + a "전체 보기" link to clear the filter.
+    list.appendChild(el("div", {
+      style: { display: "flex", alignItems: "center", gap: "10px", padding: "6px 16px", borderBottom: "1px solid var(--border)", fontSize: "11px", color: "var(--text2)" },
+    }, [
+      el("span", { style: { fontWeight: 600 } }, [
+        filter ? `${sevLabel[filter]} · ${shown.length}건` : `전체 findings · ${findings.length}건`,
+      ]),
+      filter ? el("button", {
+        class: "toggle", style: { fontSize: "10px", padding: "2px 8px" },
+        onclick: () => setFindingsOpen(true, null),
+      }, ["전체 보기"]) : null,
+      el("span", { style: { flex: 1 } }, []),
+      el("span", { style: { color: "var(--text3)" } }, ["항목을 누르면 해당 대상으로 이동"]),
+    ]));
+
+    if (!shown.length) {
+      const msg = !findings.length ? "✓ 모든 검증 통과"
+        : `${filter ? sevLabel[filter] : ""} 항목이 없습니다`;
+      list.appendChild(el("div", { style: { padding: "12px 16px", color: "var(--text2)", fontSize: "12px", textAlign: "center" } }, [msg]));
     } else {
       // Sort: error → warn → info
       const sevOrder = { error: 0, warn: 1, info: 2 };
-      const sorted = [...findings].sort((a, b) => sevOrder[a.sev] - sevOrder[b.sev]);
+      const sorted = [...shown].sort((a, b) => sevOrder[a.sev] - sevOrder[b.sev]);
       for (const f of sorted) {
         const icon = f.sev === "error" ? "⊗" : f.sev === "warn" ? "▲" : "ⓘ";
         const color = f.sev === "error" ? "var(--red)" : f.sev === "warn" ? "var(--yellow)" : "var(--accent)";
@@ -14464,16 +15036,33 @@ function importProjectFromFile(file) {
 }
 
 //============ Findings strip toggle ============
+// Open/close the findings panel. `filter` (null|'error'|'warn'|'info') scopes the list to one
+// severity; null shows everything.
+function setFindingsOpen(open, filter = null) {
+  const btn = $("#btnFindings");
+  const list = $("#findingsList");
+  list.style.display = open ? "block" : "none";
+  btn.textContent = open ? "Findings ▴" : "Findings ▾";
+  document.getElementById("app").dataset.findingsExpanded = String(open);
+  state.ui.findingsFilter = open ? filter : null;
+  renderFindings();
+}
 function bindFindings() {
   const btn = $("#btnFindings");
   const list = $("#findingsList");
-  btn.addEventListener("click", () => {
-    const open = list.style.display !== "none";
-    list.style.display = open ? "none" : "block";
-    btn.textContent = open ? "Findings ▾" : "Findings ▴";
-    document.getElementById("app").dataset.findingsExpanded = String(!open);
-    renderFindings();
-  });
+  const isOpen = () => list.style.display !== "none";
+  // The "Findings ▾" button toggles the panel showing all severities.
+  btn.addEventListener("click", () => setFindingsOpen(!isOpen(), null));
+  // Clicking a severity count (errors / warnings / info) opens the panel filtered to that
+  // severity — or closes it if it's already open on the same filter (a second click).
+  for (const span of document.querySelectorAll(".findings-summary .count")) {
+    const sev = span.dataset.sev; // 'error' | 'warn' | 'info'
+    span.setAttribute("title", "클릭하면 해당 항목만 보기");
+    span.addEventListener("click", () => {
+      if (isOpen() && state.ui.findingsFilter === sev) setFindingsOpen(false);
+      else setFindingsOpen(true, sev);
+    });
+  }
 }
 
 //============ Init ============
