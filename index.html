@@ -2142,12 +2142,17 @@ function deleteEntity(kind, id) {
   } else if (kind === "cluster") {
     const c = (state.project.clusters || []).find(x => x.id === id);
     if (!c) return;
-    // unassign nodes from this cluster (clear roles)
-    for (const nid of c.node_ids || []) {
+    const removedNodeIds = c.node_ids || [];
+    // Remove the cluster first so the "still claimed?" check below ignores it.
+    state.project.clusters = state.project.clusters.filter(x => x.id !== id);
+    // Unassign its nodes (clear roles) — but skip any node another cluster still references, so
+    // a node shared across clusters (e.g. from imported/edited data) keeps its worker role and
+    // that other cluster's workloads don't suddenly become unschedulable.
+    for (const nid of removedNodeIds) {
+      if (state.project.clusters.some(o => (o.node_ids || []).includes(nid))) continue;
       const n = state.project.nodes.find(x => x.id === nid);
       if (n) n.cluster_roles = [];
     }
-    state.project.clusters = state.project.clusters.filter(x => x.id !== id);
   } else if (kind === "workload") {
     deleteWorkload(id);
     return;
@@ -2242,7 +2247,9 @@ function removeNodeFromCluster(nodeId, clusterId) {
   const n = state.project.nodes.find(x => x.id === nodeId);
   if (!c) return;
   c.node_ids = (c.node_ids || []).filter(nid => nid !== nodeId);
-  if (n) n.cluster_roles = [];
+  // Only clear roles if no other cluster still references this node (guards shared-node states).
+  const stillClaimed = (state.project.clusters || []).some(o => o.id !== clusterId && (o.node_ids || []).includes(nodeId));
+  if (n && !stillClaimed) n.cluster_roles = [];
   emit(); saveSoon();
 }
 
@@ -3704,7 +3711,16 @@ function runValidator(project) {
   // 4. Cluster checks
   for (const c of project.clusters || []) {
     const nodes = (c.node_ids || []).map(id => project.nodes.find(n => n.id === id)).filter(Boolean);
-    if (!nodes.length) continue;
+    if (!nodes.length) {
+      // A cluster with workloads but zero nodes can't schedule anything — surface it in the
+      // findings bar instead of silently skipping (otherwise it only shows in the Capacity view).
+      if ((c.workloads || []).length) {
+        F("CLUSTER_NO_NODES", "error",
+          `${c.name}: 노드가 없음 — 워크로드 ${c.workloads.length}개 전부 스케줄 불가 (노드를 할당하세요)`,
+          { kind: "cluster", id: c.id }, "node.cluster_roles");
+      }
+      continue;
+    }
     const roleOf = n => Array.isArray(n.cluster_roles) ? n.cluster_roles : [];
     const cp = nodes.filter(n => roleOf(n).includes("control-plane")).length;
     if (cp === 0) {
@@ -6821,14 +6837,55 @@ function renderWorkloadInspector(root, id) {
   }
   else if (state.ui.workloadTab === "deps") {
     const deps = w.depends_on || [];
+    // Build target candidates across ALL clusters (not just this one) so cross-cluster
+    // dependencies — common in real multi-cluster setups like mobis — can be expressed in the UI.
     const sameClusterWls = (cluster.workloads || []).filter(x => x.id !== w.id);
+    const otherClusterPairs = [];   // [{wx, c}]
+    for (const c of (state.project?.clusters || [])) {
+      if (c.id === cluster.id) continue;
+      for (const wx of (c.workloads || [])) otherClusterPairs.push({ wx, c });
+    }
+    otherClusterPairs.sort((a, b) => (a.c.name || "").localeCompare(b.c.name || "") || (a.wx.name || "").localeCompare(b.wx.name || ""));
+    // Index every workload by id for cross-cluster target resolution.
+    const wlIndex = new Map();
+    for (const c of (state.project?.clusters || [])) {
+      for (const wx of (c.workloads || [])) wlIndex.set(wx.id, { wx, c });
+    }
+    const hasAnyOther = sameClusterWls.length || otherClusterPairs.length;
     root.appendChild(el("div", { class: "section-title" }, [`Dependencies (${deps.length})`, helpIcon("workload.depends_on")]));
-    if (!sameClusterWls.length && !deps.length) {
-      root.appendChild(el("div", { class: "empty-hint" }, ["같은 클러스터에 다른 워크로드 없음."]));
+
+    // Dependency graph layer override: by default the Dependency view picks each workload's
+    // layer via longest-path (Auto). Setting L0 / L1 / … pins this workload to that column.
+    const curLayer = (typeof w.dep_layer === "number" && w.dep_layer >= 0) ? w.dep_layer : "";
+    root.appendChild(el("div", {
+      style: { display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px", fontSize: "11px", color: "var(--text2)" },
+    }, [
+      el("span", { style: { fontWeight: 600 } }, ["Dependency layer"]),
+      el("select", {
+        style: { padding: "3px 6px", fontSize: "11px" },
+        onchange: e => {
+          const v = e.target.value;
+          updateWorkloadField(id, "dep_layer", v === "" ? null : parseInt(v, 10));
+        },
+      }, [
+        el("option", { value: "", selected: curLayer === "" ? "" : null }, ["Auto"]),
+        ...[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map(L =>
+          el("option", { value: String(L), selected: curLayer === L ? "" : null }, [`L${L}`])),
+      ]),
+      el("span", { style: { color: "var(--text3)", fontStyle: "italic" } }, [
+        curLayer === "" ? "(자동 — longest-path)" : `Dependency 그래프에서 L${curLayer}에 고정`,
+      ]),
+    ]));
+
+    if (!hasAnyOther && !deps.length) {
+      root.appendChild(el("div", { class: "empty-hint" }, ["다른 워크로드 없음 — 다른 클러스터 워크로드도 자동으로 선택 후보에 포함됩니다."]));
     }
     for (let i = 0; i < deps.length; i++) {
       const d = deps[i];
-      const target = (cluster.workloads || []).find(x => x.id === d.target_workload_id);
+      const found = wlIndex.get(d.target_workload_id);
+      const target = found?.wx;                    // resolves across ALL clusters now
+      const isCross = found && found.c.id !== cluster.id;
+      const isUnknown = !!d.target_workload_id && !found;
       root.appendChild(el("div", {
         style: { background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: "5px", padding: "8px 10px", marginBottom: "6px" },
       }, [
@@ -6841,8 +6898,30 @@ function renderWorkloadInspector(root, id) {
                 const ns = [...deps]; ns[i] = { ...ns[i], target_workload_id: e.target.value };
                 updateWorkloadField(id, "depends_on", ns);
               },
-            }, sameClusterWls.map(wx =>
-              el("option", { value: wx.id, selected: wx.id === d.target_workload_id ? "" : null }, [wx.name]))),
+            }, (function() {
+              const opts = [];
+              // Same cluster first (so the common case stays one click), grouped by cluster.
+              if (sameClusterWls.length) {
+                const grp = el("optgroup", { label: `${cluster.name} (이 클러스터)` },
+                  sameClusterWls.map(wx => el("option", { value: wx.id, selected: wx.id === d.target_workload_id ? "" : null }, [wx.name])));
+                opts.push(grp);
+              }
+              // Group every other cluster.
+              const byC = new Map();
+              for (const p of otherClusterPairs) {
+                if (!byC.has(p.c.id)) byC.set(p.c.id, { name: p.c.name, items: [] });
+                byC.get(p.c.id).items.push(p.wx);
+              }
+              for (const g of byC.values()) {
+                opts.push(el("optgroup", { label: `${g.name}` },
+                  g.items.map(wx => el("option", { value: wx.id, selected: wx.id === d.target_workload_id ? "" : null }, [wx.name]))));
+              }
+              // Preserve an unknown (dangling) target_workload_id so the value isn't silently lost.
+              if (isUnknown) {
+                opts.unshift(el("option", { value: d.target_workload_id, selected: "" }, [`(unknown: ${d.target_workload_id})`]));
+              }
+              return opts;
+            })()),
           ]),
           el("div", { class: "field", style: { margin: 0 } }, [
             el("label", { style: { fontSize: "10px" } }, ["protocol"]),
@@ -6894,6 +6973,21 @@ function renderWorkloadInspector(root, id) {
             },
           }, ["✕ Delete"]),
         ]),
+        // Cross-cluster / unknown chip — sibling of the grid so it doesn't break the 4-col layout.
+        (isCross || isUnknown) ? el("div", {
+          style: { marginTop: "4px", display: "flex" },
+        }, [
+          el("span", {
+            style: {
+              fontSize: "10px", padding: "1px 7px", borderRadius: "3px",
+              background: isUnknown ? "rgba(248,113,113,.18)" : "rgba(167,139,250,.18)",
+              color: isUnknown ? "var(--red)" : "var(--purple)",
+              border: `1px solid ${isUnknown ? "var(--red)" : "var(--purple)"}`,
+              whiteSpace: "nowrap",
+            },
+            title: isUnknown ? "참조하는 워크로드를 찾을 수 없음 — 삭제되었거나 잘못된 id" : `cross-cluster → ${found.c.name}`,
+          }, [isUnknown ? "⚠ unknown target" : `↗ cross-cluster · ${found.c.name}`]),
+        ]) : null,
         el("div", { class: "field-row", style: { marginTop: "4px" } }, [
           el("div", { class: "field", style: { margin: 0 } }, [
             el("label", { style: { fontSize: "10px" } }, ["avg call ms"]),
@@ -6953,13 +7047,16 @@ function renderWorkloadInspector(root, id) {
         ]),
       ]));
     }
-    if (sameClusterWls.length) {
+    if (hasAnyOther) {
+      // Default the new dep's target to a same-cluster workload when possible; else fall back to
+      // the first workload in any other cluster so cross-cluster setups can still add deps here.
+      const defaultTarget = sameClusterWls[0] || otherClusterPairs[0]?.wx;
       root.appendChild(el("button", {
         class: "add-btn", style: { width: "100%", marginTop: "4px" },
         onclick: () => {
           const ns = [...deps, {
-            target_workload_id: sameClusterWls[0].id, protocol: "HTTP",
-            port: sameClusterWls[0].network?.service?.ports?.[0]?.port || 8080,
+            target_workload_id: defaultTarget.id, protocol: "HTTP",
+            port: defaultTarget.network?.service?.ports?.[0]?.port || 8080,
             avg_call_ms: 20, fanout_pct: 100, calls_per_request: 1,
           }];
           updateWorkloadField(id, "depends_on", ns);
@@ -10316,6 +10413,78 @@ function renderArchitecture() {
   }
   wrap.appendChild(legendRow);
 
+  // Cross-cluster references (filter mode only): show each in-scope workload that depends on a
+  // workload in ANOTHER cluster, plus the inverse (other clusters that depend on this cluster's
+  // workloads). Architecture doesn't draw dep edges, so this surfaces the cross-cluster traffic
+  // without changing the physical diagram. Click an entry to jump to its workload inspector.
+  if (archClusterId) {
+    const wlIndex = new Map();
+    for (const c of (p.clusters || [])) for (const w of (c.workloads || [])) wlIndex.set(w.id, { w, c });
+    const outRefs = [];   // shown cluster → other
+    const inRefs  = [];   // other → shown cluster
+    for (const c of shownClusters) {
+      for (const w of (c.workloads || [])) {
+        for (const d of (w.depends_on || [])) {
+          const ent = wlIndex.get(d.target_workload_id);
+          if (ent && ent.c.id !== c.id) outRefs.push({ from: w, to: ent.w, otherCluster: ent.c });
+        }
+      }
+    }
+    for (const c of (p.clusters || [])) {
+      if (c.id === archClusterId) continue;
+      for (const w of (c.workloads || [])) {
+        for (const d of (w.depends_on || [])) {
+          const ent = wlIndex.get(d.target_workload_id);
+          if (ent && ent.c.id === archClusterId) inRefs.push({ from: w, fromCluster: c, to: ent.w });
+        }
+      }
+    }
+    if (outRefs.length || inRefs.length) {
+      const refsBox = el("div", {
+        style: {
+          marginTop: "12px", padding: "10px 14px", borderRadius: "6px",
+          background: "rgba(167,139,250,0.06)", border: "1px solid rgba(167,139,250,0.35)",
+          fontSize: "11px", color: "var(--text2)",
+        },
+      });
+      refsBox.appendChild(el("div", { style: { fontWeight: 600, color: "var(--purple)", marginBottom: "6px" } },
+        [`↗ Cross-cluster references — out ${outRefs.length} · in ${inRefs.length}`]));
+      const chip = (label, onclick, title) => el("button", {
+        title,
+        style: {
+          padding: "3px 8px", fontSize: "11px", cursor: "pointer",
+          background: "var(--surface2)", border: "1px solid var(--border)",
+          color: "var(--text)", borderRadius: "4px", fontFamily: "inherit",
+          margin: "0 6px 4px 0",
+        },
+        onclick,
+      }, [label]);
+      if (outRefs.length) {
+        const row = el("div", { style: { marginBottom: "4px" } }, [
+          el("span", { style: { color: "var(--text3)", marginRight: "6px" } }, ["outbound:"]),
+        ]);
+        for (const r of outRefs) {
+          row.appendChild(chip(`${r.from.name} → ${r.otherCluster.name} / ${r.to.name}`,
+            () => selectEntity("workload", r.to.id),
+            "다른 클러스터의 타깃 워크로드로 이동"));
+        }
+        refsBox.appendChild(row);
+      }
+      if (inRefs.length) {
+        const row = el("div", {}, [
+          el("span", { style: { color: "var(--text3)", marginRight: "6px" } }, ["inbound:"]),
+        ]);
+        for (const r of inRefs) {
+          row.appendChild(chip(`${r.fromCluster.name} / ${r.from.name} → ${r.to.name}`,
+            () => selectEntity("workload", r.from.id),
+            "외부에서 이 클러스터를 호출하는 워크로드로 이동"));
+        }
+        refsBox.appendChild(row);
+      }
+      wrap.appendChild(refsBox);
+    }
+  }
+
   root.appendChild(wrap);
 }
 
@@ -10392,6 +10561,34 @@ function renderDependency() {
     }, [`ℹ ${hiddenByOptOut} workload(s) hidden by 'hide_from_dep_graph' option`]));
   }
 
+  // Cross-cluster ghost endpoints: when a cluster filter is active, surface workloads in OTHER
+  // clusters that are referenced by (outbound) or that reference (inbound) the in-scope workloads.
+  // Ghost items get rendered with a dashed border + cluster suffix; ghost↔ghost edges are skipped.
+  let ghostCount = 0;
+  if (selectedClusterId) {
+    const allWlIndex = new Map();
+    for (const c of allClusters) for (const w of (c.workloads || [])) allWlIndex.set(w.id, { w, c });
+    const addGhost = (id) => {
+      if (byId.has(id)) return;
+      const ent = allWlIndex.get(id);
+      if (!ent || ent.w.hide_from_dep_graph) return;
+      const ghost = { w: ent.w, c: ent.c, isGhost: true };
+      items.push(ghost); byId.set(ent.w.id, ghost); ghostCount++;
+    };
+    // Outbound ghosts: in-scope workload depends_on → other-cluster target.
+    for (const it of items.slice()) {
+      for (const d of (it.w.depends_on || [])) addGhost(d.target_workload_id);
+    }
+    // Inbound ghosts: other-cluster workload depends_on → in-scope target.
+    for (const ent of allWlIndex.values()) {
+      if (byId.has(ent.w.id)) continue;
+      for (const d of (ent.w.depends_on || [])) {
+        const tgt = byId.get(d.target_workload_id);
+        if (tgt && !tgt.isGhost) { addGhost(ent.w.id); break; }
+      }
+    }
+  }
+
   if (!items.length) {
     const selName = selectedClusterId ? allClusters.find(c => c.id === selectedClusterId)?.name : null;
     root.appendChild(el("div", { class: "view-empty" }, [
@@ -10413,33 +10610,32 @@ function renderDependency() {
     out.set(w.id, []);
     inDeg.set(w.id, 0);
   }
-  let crossClusterHidden = 0;
-  // Build a lookup for cross-cluster detection (only used when filter is active).
-  const allWorkloadCluster = new Map();
-  if (selectedClusterId) {
-    for (const c of allClusters) for (const w of (c.workloads || [])) allWorkloadCluster.set(w.id, c);
+  for (const it of items) {
+    out.set(it.w.id, []);   // re-init in case ghost addition added new ids after the initial loop
+    inDeg.set(it.w.id, 0);
   }
-  for (const { w } of items) {
-    for (const d of (w.depends_on || [])) {
+  for (const it of items) {
+    for (const d of (it.w.depends_on || [])) {
       const tgt = d.target_workload_id;
-      if (!byId.has(tgt)) {
-        if (selectedClusterId && allWorkloadCluster.has(tgt)) crossClusterHidden++;
-        continue;
-      }
+      const tgtIt = byId.get(tgt);
+      if (!tgtIt) continue;
+      // Skip edges between two ghosts (not relevant to the filtered focus view).
+      if (it.isGhost && tgtIt.isGhost) continue;
       edges.push({
-        from: w.id, to: tgt,
+        from: it.w.id, to: tgt,
         protocol: d.protocol || "", port: d.port,
         avg_call_ms: d.avg_call_ms,
         fanout_pct: d.fanout_pct, calls_per_request: d.calls_per_request,
+        isGhostEdge: !!(it.isGhost || tgtIt.isGhost),
       });
-      out.get(w.id).push(tgt);
+      out.get(it.w.id).push(tgt);
       inDeg.set(tgt, (inDeg.get(tgt) || 0) + 1);
     }
   }
-  if (crossClusterHidden > 0) {
+  if (ghostCount > 0) {
     root.appendChild(el("div", {
-      style: { fontSize: "11px", color: "var(--yellow)", background: "rgba(234,179,8,.08)", border: "1px solid rgba(234,179,8,.25)", borderRadius: "6px", padding: "6px 10px", marginBottom: "10px", fontFamily: "JetBrains Mono" },
-    }, [`▲ cross-cluster 의존 ${crossClusterHidden}개가 숨겨져 있습니다 — 'All' 탭에서 확인하세요`]));
+      style: { fontSize: "11px", color: "var(--text2)", background: "rgba(167,139,250,.08)", border: "1px solid rgba(167,139,250,.30)", borderRadius: "6px", padding: "6px 10px", marginBottom: "10px", fontFamily: "JetBrains Mono" },
+    }, [`↗ cross-cluster 엔드포인트 ${ghostCount}개 (점선 테두리, 클러스터명 표기)`]));
   }
 
   if (!edges.length) {
@@ -10484,6 +10680,15 @@ function renderDependency() {
     }
   }
   if (cycleNodes.size) maxLayer += 1;
+  // Per-workload layer override (`w.dep_layer`): pin specific nodes to a chosen column. Null
+  // / undefined keeps the auto-computed layer. Edges may cross sideways as a result — that's
+  // the explicit user intent ("force this node into L1").
+  for (const { w } of items) {
+    if (typeof w.dep_layer === "number" && w.dep_layer >= 0) {
+      layer.set(w.id, w.dep_layer);
+      if (w.dep_layer > maxLayer) maxLayer = w.dep_layer;
+    }
+  }
 
   // Identify back edges (target's layer ≤ source's layer)
   const backEdges = new Set();
@@ -10711,6 +10916,30 @@ function renderDependency() {
   }, [svg("path", { d: "M0,0 L10,5 L0,10 z", fill: "#e67e22" })]));
   root_svg.appendChild(defs);
 
+  // ---- Focus mode: click a node to fade everything but its connected component ----
+  // `state.ui.depFocusId` holds the clicked workload id. Reach = transitive upstream +
+  // downstream via depends_on, so the focused subgraph stays vivid while siblings dim.
+  // A stale focus id (filtered out / deleted) is cleared lazily here.
+  if (state.ui.depFocusId && !byId.has(state.ui.depFocusId)) state.ui.depFocusId = null;
+  const focusId = state.ui.depFocusId || null;
+  let reach = null;
+  if (focusId) {
+    const outAdj = new Map(), inAdj = new Map();
+    for (const e of edges) {
+      (outAdj.get(e.from) || outAdj.set(e.from, []).get(e.from)).push(e.to);
+      (inAdj.get(e.to) || inAdj.set(e.to, []).get(e.to)).push(e.from);
+    }
+    reach = new Set([focusId]);
+    const stack = [focusId];
+    while (stack.length) {
+      const n = stack.pop();
+      for (const x of outAdj.get(n) || []) if (!reach.has(x)) { reach.add(x); stack.push(x); }
+      for (const x of inAdj.get(n)  || []) if (!reach.has(x)) { reach.add(x); stack.push(x); }
+    }
+  }
+  const FADE = 0.18;
+  const inFocus = (id) => !reach || reach.has(id);
+
   // ---- Edges (drawn first so nodes overlap) ----
   // Multi-layer edges route through a horizontal lane that lies in a gutter
   // between intervening layers' node rows, so the curve doesn't pass through any box.
@@ -10719,34 +10948,44 @@ function renderDependency() {
     const a = pos.get(e.from), b = pos.get(e.to);
     if (!a || !b) return;
     const back = backEdges.has(idx);
-    const x1 = a.cx + BOX_W / 2;
+    // Pick the side of each box that gives the shorter horizontal run. If A sits to the LEFT
+    // of B, exit A's right edge and enter B's left (the default left-to-right reading). If A
+    // sits to the right (e.g. via a layer-override pin or a cycle back-edge), exit A's left and
+    // enter B's right — otherwise the curve has to sweep all the way around the node.
+    const aOnLeft = a.cx <= b.cx;
+    const x1 = aOnLeft ? a.cx + BOX_W / 2 : a.cx - BOX_W / 2;
+    const x2 = aOnLeft ? b.cx - BOX_W / 2 : b.cx + BOX_W / 2;
+    const sgn = aOnLeft ? 1 : -1;      // bezier control-point direction follows the chosen side
     const y1 = a.cy;
-    const x2 = b.cx - BOX_W / 2;
     const y2 = b.cy;
-    const dx = Math.max(40, (x2 - x1) / 2);
+    const dx = Math.max(40, Math.abs(x2 - x1) / 2);
     const midline = (y1 + y2) / 2;
 
     let path;
     let labelY = midline - 8;
     if (back) {
-      path = `M${a.cx + BOX_W / 2},${y1} C${a.cx + BOX_W},${y1 - 30} ${b.cx - BOX_W},${y2 - 30} ${b.cx - BOX_W / 2},${y2}`;
+      path = `M${x1},${y1} C${x1 + sgn * dx},${y1 - 30} ${x2 - sgn * dx},${y2 - 30} ${x2},${y2}`;
       labelY = midline - 28;
     } else {
       const lane = laneOf.get(idx);
       if (lane) {
-        path = `M${x1},${y1} C${x1 + dx},${lane.yc} ${x2 - dx},${lane.yc} ${x2},${y2}`;
+        path = `M${x1},${y1} C${x1 + sgn * dx},${lane.yc} ${x2 - sgn * dx},${lane.yc} ${x2},${y2}`;
         labelY = lane.yLane - 4;
       } else {
         // Adjacent layers — gentle bezier (no intervening boxes to clear).
-        path = `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`;
+        path = `M${x1},${y1} C${x1 + sgn * dx},${y1} ${x2 - sgn * dx},${y2} ${x2},${y2}`;
       }
     }
 
+    // Focus-mode opacity: an edge is "in focus" only when BOTH endpoints are in the reach set.
+    const edgeInFocus = inFocus(e.from) && inFocus(e.to);
+    const baseStrokeOp = e.isGhostEdge ? 0.65 : 1;
     root_svg.appendChild(svg("path", {
       d: path, fill: "none",
       stroke: back ? "#e67e22" : "#7f8c8d",
       "stroke-width": 1.4,
-      "stroke-dasharray": back ? "4 3" : "",
+      "stroke-dasharray": back ? "4 3" : (e.isGhostEdge ? "3 4" : ""),
+      "stroke-opacity": edgeInFocus ? baseStrokeOp : FADE,
       "marker-end": back ? "url(#arr-back)" : "url(#arr)",
     }));
     // Edge label (protocol + ms) — small, mid-arc. Suppressed when view-local toggle is off.
@@ -10760,24 +10999,40 @@ function renderDependency() {
           x: mx, y: labelY, "text-anchor": "middle",
           fill: back ? "#e67e22" : "var(--text3)",
           "font-size": "9", "font-family": "JetBrains Mono",
+          "fill-opacity": edgeInFocus ? 1 : FADE,
         }, [labelParts.join(" / ")]));
       }
     }
   });
 
   // ---- Nodes ----
-  for (const { w } of items) {
+  for (const it of items) {
+    const w = it.w;
     const np = pos.get(w.id);
     if (!np) continue;
     const col = colorOf(w);
     const x = np.cx - BOX_W / 2, y = np.cy - BOX_H / 2;
+    const isFocusNode = reach && w.id === focusId;
+    const nodeInFocus = inFocus(w.id);
     const g = svg("g", {
       style: "cursor:pointer",
-      onclick: () => selectEntity("workload", w.id),
+      // First click focuses this node (its connected component stays vivid, the rest fades).
+      // Click the same node again to restore. Clicking a different node switches focus to it.
+      onclick: () => {
+        state.ui.depFocusId = (state.ui.depFocusId === w.id) ? null : w.id;
+        selectEntity("workload", w.id);
+      },
+      opacity: nodeInFocus ? 1 : FADE,
     });
+    // Cross-cluster ghosts get a dashed border + slightly faded fill so the focus stays on
+    // the in-scope cluster while still showing where data flows in/out. The clicked focus node
+    // gets a thicker stroke so it's obvious which one is the focal point in its subgraph.
     g.appendChild(svg("rect", {
       x, y, width: BOX_W, height: BOX_H, rx: 6, ry: 6,
-      fill: col.fill, stroke: col.stroke, "stroke-width": 1.5,
+      fill: col.fill, stroke: col.stroke,
+      "stroke-width": isFocusNode ? 2.8 : 1.5,
+      "fill-opacity": it.isGhost ? 0.55 : 1,
+      "stroke-dasharray": it.isGhost ? "4 3" : "",
     }));
     const lbl = w.name.length > 18 ? w.name.slice(0, 17) + "…" : w.name;
     g.appendChild(svg("text", {
@@ -10785,7 +11040,10 @@ function renderDependency() {
       fill: "#fff", "font-size": "12", "font-weight": "600",
       "font-family": "Pretendard, sans-serif",
     }, [lbl]));
-    const sub = [w.category || "", w.replicas > 1 ? `×${w.replicas}` : ""].filter(Boolean).join(" ");
+    // Ghost: show the source cluster name as the sub-label so users see where it comes from.
+    const sub = it.isGhost
+      ? `↗ ${it.c.name}`
+      : [w.category || "", w.replicas > 1 ? `×${w.replicas}` : ""].filter(Boolean).join(" ");
     if (sub) {
       g.appendChild(svg("text", {
         x: np.cx, y: y + 33, "text-anchor": "middle",
@@ -10793,7 +11051,7 @@ function renderDependency() {
         "font-family": "JetBrains Mono",
       }, [sub]));
     }
-    if (w.namespace) {
+    if (w.namespace && !it.isGhost) {
       g.appendChild(svg("text", {
         x: np.cx, y: y + 45, "text-anchor": "middle",
         fill: "rgba(255,255,255,0.6)", "font-size": "9",
