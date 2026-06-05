@@ -67,6 +67,27 @@
   .app[data-left-collapsed="true"][data-right-collapsed="true"] { grid-template-columns: 0 1fr 0; }
   .app[data-findings-expanded="true"] { grid-template-rows: var(--topbar-h) 1fr 240px; }
 
+  /* === Resize gutters between tree / canvas / inspector. Absolute-positioned so they sit
+     on top of the grid column boundaries without disturbing the grid template (which has
+     collapsed states bound to it). Drag to resize, double-click to reset to defaults. === */
+  .gutter {
+    position: absolute;
+    top: var(--topbar-h);
+    bottom: var(--findings-h);
+    width: 6px;
+    cursor: col-resize;
+    background: transparent;
+    z-index: 50;
+    user-select: none;
+    transition: background .12s;
+  }
+  .gutter:hover, .gutter.dragging { background: rgba(77,156,255,.35); }
+  .gutter-l { left: calc(var(--tree-w) - 3px); }
+  .gutter-r { right: calc(var(--inspector-w) - 3px); }
+  .app[data-left-collapsed="true"]  .gutter-l { display: none; }
+  .app[data-right-collapsed="true"] .gutter-r { display: none; }
+  .app[data-findings-expanded="true"] .gutter { bottom: 240px; }
+
   /* === Topbar === */
   .topbar {
     grid-area: topbar;
@@ -1001,6 +1022,9 @@
     <div class="inspector-empty">엔티티를 선택하세요</div>
   </aside>
 
+  <div class="gutter gutter-l" id="gutterL" title="드래그로 폭 조절 / 더블클릭으로 기본값(260px) 복원"></div>
+  <div class="gutter gutter-r" id="gutterR" title="드래그로 폭 조절 / 더블클릭으로 기본값(380px) 복원"></div>
+
   <footer class="findings">
     <div class="findings-summary">
       <span class="count" data-sev="error"><span class="icon">⊗</span> <span id="cntErr">0</span> errors</span>
@@ -1330,9 +1354,9 @@ const HELP = {
   },
   "view.export": {
     cat: "기타",
-    title: "Export — K8s YAML + Helm + Capacity 리포트",
-    body: "현재 프로젝트를 3가지 산출물로 변환: (1) K8s manifests (Namespace/ResourceQuota/NetworkPolicy/Deployment·StatefulSet/Service/Ingress/PVC), (2) Helm values.yaml (umbrella chart용 워크로드별 values), (3) Capacity 리포트 (사이트별 U/kW 산정, GPU 플랜, 네트워크 플랜, 검증 요약).",
-    reco: "K8s YAML은 kubectl apply -f 가능한 multi-doc 형식. Helm values는 별도 chart template과 결합 필요 (umbrella chart 권장). Capacity 리포트는 발주서/제안서에 첨부 가능한 .md.",
+    title: "Export — K8s YAML + Helm + Docker Compose + Capacity 리포트",
+    body: "현재 프로젝트를 4가지 산출물로 변환: (1) K8s manifests (Namespace/ResourceQuota/NetworkPolicy/Deployment·StatefulSet/Service/Ingress/PVC), (2) Helm chart (워크로드별 Deployment/StatefulSet/Service template + values), (3) Docker Compose (단일 호스트용 best-effort 변환 — 워크로드→service, 내부 포트는 expose·외부 노출은 publish, depends_on/volume/리소스 매핑), (4) Capacity 리포트 (사이트별 U/kW 산정, GPU 플랜, 네트워크 플랜, 검증 요약).",
+    reco: "K8s YAML은 kubectl apply -f 가능한 multi-doc 형식. Helm은 별도 chart 없이 바로 install 가능. Docker Compose는 Operator/HA/Ingress/오토스케일 등 k8s 고유 기능이 빠지는 단일 호스트 근사치(각 service 주석에 누락 항목 명시) — docker compose up -d 로 로컬 구동. Capacity 리포트는 발주서/제안서에 첨부 가능한 .md.",
   },
 
   // ───── Namespace / NetworkPolicy ─────
@@ -1917,7 +1941,10 @@ async function loadCatalog() {
     console.log("Catalog source: inlined (build-time)");
   } else {
     results = await Promise.all(CATALOG_FILES.map(async p => {
-      const res = await fetch(p);
+      // cache:"no-cache" → always revalidate with the server (conditional GET, 304 when
+      // unchanged) so a plain reload picks up catalog edits. python3 -m http.server sends no
+      // Cache-Control, so without this the browser can serve a stale catalog from cache.
+      const res = await fetch(p, { cache: "no-cache" });
       if (!res.ok) throw new Error(`Failed to load ${p}: ${res.status}`);
       return [p, await res.json()];
     }));
@@ -2286,11 +2313,32 @@ function addNodeGpu(nodeId) {
 function updateNodeGpu(nodeId, index, partial) {
   const n = state.project.nodes.find(x => x.id === nodeId);
   if (!n || !n.spec.gpu || !n.spec.gpu[index]) return;
-  // If model changes, also update form_factor based on gpu-models reference
+  const cur = n.spec.gpu[index];
+  // If model changes, also update form_factor based on gpu-models reference, and
+  // reconcile MIG: drop it if the new model can't do MIG, or reset to the first
+  // profile if the currently-selected profile isn't valid for the new model.
   if (partial.model && state.catalog.gpuModels[partial.model]) {
-    partial.form_factor = state.catalog.gpuModels[partial.model].form_factor;
+    const ni = state.catalog.gpuModels[partial.model];
+    partial.form_factor = ni.form_factor;
+    const profs = ni.mig_profiles || [];
+    if (!ni.mig_capable || !profs.length) {
+      partial.mig_enabled = false;
+      partial.mig_profile = "";
+    } else if (cur.mig_enabled && !profs.some(p => p.name === cur.mig_profile)) {
+      partial.mig_profile = profs[0].name;
+    }
   }
-  Object.assign(n.spec.gpu[index], partial);
+  Object.assign(cur, partial);
+  // Invariant: MIG enabled ⇒ a profile valid for the current model is selected
+  // (guards programmatic/imported state where mig_profile may be missing).
+  if (cur.mig_enabled) {
+    const mi = state.catalog.gpuModels[cur.model];
+    const mprofs = (mi && mi.mig_profiles) || [];
+    if (!mprofs.some(p => p.name === cur.mig_profile)) {
+      if (mprofs.length) cur.mig_profile = mprofs[0].name;
+      else { cur.mig_enabled = false; delete cur.mig_profile; }
+    }
+  }
   emit(); saveSoon();
 }
 
@@ -3833,6 +3881,51 @@ function runValidator(project) {
         F("SPOF_RISK", "warn",
           `${w.name}: replicas=1, ${w.category} (SPOF 위험)`, { kind: "workload", id: w.id });
       }
+
+      // ---- HA topology checks (stateful workloads only) ----
+      if (HA_STATEFUL_CATS.has(w.category)) {
+        const haMode = w.ha?.mode || "none";
+        // Stateful workload with no HA topology at all → suggest setting one.
+        if (haMode === "none" && (w.replicas ?? 1) === 1) {
+          F("WORKLOAD_STATEFUL_NO_HA", "warn",
+            `${w.name}: stateful 워크로드인데 HA topology 미설정 — Primary-Replica/Sentinel/Sharded 검토`,
+            { kind: "workload", id: w.id }, "workload.ha.mode");
+        }
+        // HA topology set but anti-affinity missing — pods can still land on the same node.
+        if (haMode !== "none" && (w.scheduling?.anti_affinity || "none") === "none") {
+          F("WORKLOAD_STATEFUL_NO_ANTI_AFFINITY", "warn",
+            `${w.name}: HA mode=${haMode}인데 anti-affinity 없음 — 같은 노드에 몰리면 HA 효과 없음`,
+            { kind: "workload", id: w.id }, "workload.scheduling.anti_affinity");
+        }
+        // Sentinel needs an odd quorum ≥ 3 (typical: 3 or 5).
+        if (haMode === "sentinel") {
+          const q = w.ha?.quorum_count ?? 0;
+          if (q < 3) {
+            F("WORKLOAD_SENTINEL_QUORUM_LOW", "error",
+              `${w.name}: Sentinel quorum=${q} — 홀수 ≥3 필요 (3 또는 5 권장)`,
+              { kind: "workload", id: w.id }, "workload.ha.quorum_count");
+          } else if (q % 2 === 0) {
+            F("WORKLOAD_SENTINEL_QUORUM_EVEN", "warn",
+              `${w.name}: Sentinel quorum=${q}이 짝수 — split-brain 방지를 위해 홀수 권장`,
+              { kind: "workload", id: w.id }, "workload.ha.quorum_count");
+          }
+        }
+        // Sharded cluster typical minimum is 3 shards.
+        if (haMode === "sharded-cluster") {
+          const p = w.ha?.primaries ?? 0;
+          if (p < 3) {
+            F("WORKLOAD_SHARDED_TOO_SMALL", "warn",
+              `${w.name}: Sharded cluster shards=${p} — 권장 최소 3 shard`,
+              { kind: "workload", id: w.id }, "workload.ha.primaries");
+          }
+        }
+        // HA DB must have persistent storage — otherwise replicated data has nowhere to live.
+        if (haMode !== "none" && w.category === "DB" && !(w.persistent_volumes || []).length) {
+          F("WORKLOAD_HA_NO_STORAGE", "warn",
+            `${w.name}: HA DB는 공유/분산 PV 필요 — persistent_volumes 비어있음`,
+            { kind: "workload", id: w.id }, "workload.persistent_volumes");
+        }
+      }
       // replicas_max sanity:
       //   - max cannot be 0 (schema enforces minimum=1, but check defensively).
       //   - max must be ≥ replicas when both are explicit (min may legitimately be 0).
@@ -4750,6 +4843,73 @@ function renderNodeInspector(root, id) {
     }),
   ]));
 
+  // Labels — node-level k=v pairs that workload nodeSelector / anti-affinity topologyKey /
+  // zone derivation already read. multi-zone templates auto-set `topology.kubernetes.io/zone`
+  // here; this editor surfaces them and lets users add their own (gpu=h200-nvl etc.) so
+  // workload selectors stop failing with "nodeSelector 0/1 match".
+  {
+    const labels = n.labels || {};
+    const labelEntries = Object.entries(labels);
+    root.appendChild(el("div", { class: "section-title" }, [`Labels (${labelEntries.length})`]));
+    root.appendChild(el("div", { style: { fontSize: "11px", color: "var(--text2)", marginBottom: "6px" } }, [
+      "K8s 노드 라벨 (key=value). 워크로드의 nodeSelector·anti-affinity topologyKey가 이 값을 봅니다. ",
+      "예: gpu=h200-nvl, disktype=ssd, topology.kubernetes.io/zone=zone-a",
+    ]));
+    if (!labelEntries.length) {
+      root.appendChild(el("div", { class: "empty-hint" }, ["없음 — 추가 시 워크로드 selector 매칭에 사용 가능"]));
+    }
+    labelEntries.forEach(([k, v], idx) => {
+      root.appendChild(el("div", {
+        style: { display: "grid", gridTemplateColumns: "1fr 1fr 32px", gap: "6px", marginBottom: "4px", alignItems: "center" },
+      }, [
+        el("div", { class: "field", style: { margin: 0 } }, [
+          el("input", {
+            "data-focus-key": `node.${id}.label.${idx}.key`,
+            style: { padding: "5px 8px", fontSize: "11px" },
+            value: k, placeholder: "key (예: gpu)",
+            oninput: e => {
+              const newKey = e.target.value;
+              const newLabels = {};
+              for (const [k2, v2] of labelEntries) newLabels[k2 === k ? newKey : k2] = v2;
+              updateNodeField(id, "labels", newLabels);
+            },
+          }),
+        ]),
+        el("div", { class: "field", style: { margin: 0 } }, [
+          el("input", {
+            "data-focus-key": `node.${id}.label.${idx}.value`,
+            style: { padding: "5px 8px", fontSize: "11px" },
+            value: v, placeholder: "value (예: h200-nvl)",
+            oninput: e => updateNodeField(id, "labels", { ...labels, [k]: e.target.value }),
+          }),
+        ]),
+        el("button", {
+          title: "삭제",
+          style: {
+            padding: "4px 8px", fontSize: "11px", lineHeight: "1",
+            color: "var(--red)", border: "1px solid var(--border)",
+            borderRadius: "4px", background: "var(--surface)",
+            cursor: "pointer",
+          },
+          onmouseover: e => { e.target.style.background = "rgba(248,113,113,.12)"; e.target.style.borderColor = "var(--red)"; },
+          onmouseout:  e => { e.target.style.background = "var(--surface)"; e.target.style.borderColor = "var(--border)"; },
+          onclick: () => {
+            const newLabels = { ...labels }; delete newLabels[k];
+            updateNodeField(id, "labels", newLabels);
+          },
+        }, ["✕"]),
+      ]));
+    });
+    root.appendChild(el("button", {
+      class: "add-btn", style: { width: "100%", marginTop: "4px" },
+      onclick: () => {
+        let key = "key", i = 1;
+        while (labels[key] !== undefined) key = `key${++i}`;
+        updateNodeField(id, "labels", { ...labels, [key]: "" });
+      },
+    }, ["＋ Add Label"]));
+  }
+
   // Network interfaces (multi-NIC)
   const ifaces = n.network?.interfaces || [];
   root.appendChild(el("div", { class: "section-title" }, [`Network Interfaces (${ifaces.length})`]));
@@ -5074,6 +5234,8 @@ function renderNodeInspector(root, id) {
           el("div", { style: { fontSize: "11px", color: "var(--text2)" } }, [
             ginfo.tdp_w ? `TDP ${ginfo.tdp_w}W × ${g.count} = ${(ginfo.tdp_w * g.count) / 1000}kW total` : "",
           ]),
+          // GPU model/count is fixed by the instance type, but MIG is still selectable.
+          renderMigRow(n, i, gpuModels),
         ]));
       }
       if (gpus.length) {
@@ -6222,6 +6384,333 @@ function renderWorkloadInspector(root, id) {
       el("span", {}, ["Dependency 그래프에서 숨기기"]),
       el("span", { style: { color: "var(--text3)", fontSize: "11px" } }, ["(이 워크로드 노드와 연결된 edge가 그래프에서 제외)"]),
     ]));
+
+    // ===================== HA topology (stateful workloads only) =====================
+    // Captures the operational HA shape (mode + primaries + replicas-per-primary + quorum) so
+    // the capacity sim, validator, and YAML/Helm export all see one consistent picture instead
+    // of guessing from `replicas` alone. Only shown for stateful categories (DB / Cache / Queue).
+    if (HA_STATEFUL_CATS.has(w.category)) {
+      const ha = w.ha || { mode: "none" };
+      const haMode = ha.mode || "none";
+      const haPrimaries = ha.primaries ?? HA_DEFAULTS[haMode].primaries;
+      const haReplicas = ha.replicas_per_primary ?? HA_DEFAULTS[haMode].replicas_per_primary;
+      const haQuorum = ha.quorum_count ?? HA_DEFAULTS[haMode].quorum_count;
+      const dataPods = haPrimaries * (1 + haReplicas);
+      const totalPods = dataPods + haQuorum;
+      const setHa = patch => {
+        w.ha = { ...(w.ha || {}), ...patch };
+        emit(); saveSoon();
+      };
+
+      root.appendChild(el("div", {
+        style: {
+          marginTop: "18px", paddingTop: "10px", borderTop: "1px solid var(--border)",
+          fontSize: "11px", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em",
+          color: "var(--text3)",
+        },
+      }, ["HA topology"]));
+
+      root.appendChild(el("div", { class: "section-title", style: { marginTop: "8px" } }, ["HA mode"]));
+      root.appendChild(el("div", { style: { fontSize: "11px", color: "var(--text2)", marginBottom: "6px" } }, [
+        "Stateful 워크로드(DB/Cache/Queue)의 운영 토폴로지. ",
+        "Capacity 시뮬레이션(quorum vs data pod 구분)과 K8s/Helm export 주석에 반영됩니다.",
+      ]));
+      root.appendChild(el("div", { class: "field", style: { margin: 0 } }, [
+        el("select", {
+          style: { fontSize: "12px" },
+          onchange: e => {
+            const m = e.target.value;
+            const defs = HA_DEFAULTS[m];
+            w.ha = { ...(w.ha || {}), mode: m, ...defs };
+            const dp = defs.primaries * (1 + defs.replicas_per_primary);
+            if (m !== "none" && dp > 0) w.replicas = dp;
+            emit(); saveSoon();
+          },
+        }, HA_MODES.map(m =>
+          el("option", { value: m.v, selected: haMode === m.v ? "" : null }, [m.label]))),
+      ]));
+
+      if (haMode !== "none") {
+        const isSharded = haMode === "sharded-cluster";
+        root.appendChild(el("div", {
+          style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "8px", marginTop: "8px" },
+        }, [
+          el("div", { class: "field", style: { margin: 0 } }, [
+            el("label", { style: { fontSize: "10px" } }, [isSharded ? "Shards" : "Primaries"]),
+            el("input", {
+              "data-focus-key": `workload.${id}.ha.primaries`,
+              type: "text", inputmode: "numeric", pattern: "[0-9]*",
+              value: haPrimaries,
+              oninput: e => {
+                const v = parseInt(e.target.value);
+                if (Number.isFinite(v) && v >= 1) {
+                  w.ha = { ...(w.ha || {}), primaries: v };
+                  w.replicas = v * (1 + (w.ha.replicas_per_primary ?? 0));
+                  emit(); saveSoon();
+                }
+              },
+            }),
+          ]),
+          el("div", { class: "field", style: { margin: 0 } }, [
+            el("label", { style: { fontSize: "10px" } }, ["Replicas / primary"]),
+            el("input", {
+              "data-focus-key": `workload.${id}.ha.replicas_per_primary`,
+              type: "text", inputmode: "numeric", pattern: "[0-9]*",
+              value: haReplicas,
+              oninput: e => {
+                const v = parseInt(e.target.value);
+                if (Number.isFinite(v) && v >= 0) {
+                  w.ha = { ...(w.ha || {}), replicas_per_primary: v };
+                  w.replicas = (w.ha.primaries ?? 1) * (1 + v);
+                  emit(); saveSoon();
+                }
+              },
+            }),
+          ]),
+          el("div", { class: "field", style: { margin: 0 } }, [
+            el("label", { style: { fontSize: "10px" } }, ["Quorum / Sentinel"]),
+            el("input", {
+              "data-focus-key": `workload.${id}.ha.quorum_count`,
+              type: "text", inputmode: "numeric", pattern: "[0-9]*",
+              value: haQuorum,
+              oninput: e => {
+                const v = parseInt(e.target.value);
+                if (Number.isFinite(v) && v >= 0) setHa({ quorum_count: v });
+              },
+            }),
+          ]),
+        ]));
+
+        root.appendChild(el("div", {
+          style: { marginTop: "8px", fontSize: "11px", color: "var(--text2)", fontFamily: "JetBrains Mono" },
+        }, [
+          `▸ data pods: ${haPrimaries} × (1+${haReplicas}) = ${dataPods}`,
+          haQuorum > 0 ? ` · quorum: ${haQuorum}` : "",
+          ` · 총 ${totalPods}대`,
+        ]));
+
+        root.appendChild(el("div", { class: "section-title", style: { marginTop: "12px" } }, ["Operator / Chart"]));
+        root.appendChild(el("div", { class: "field", style: { margin: 0 } }, [
+          el("input", {
+            "data-focus-key": `workload.${id}.ha.operator`,
+            type: "text", list: `ha-ops-${id}`,
+            value: ha.operator || "",
+            placeholder: "예: cloudnative-pg, bitnami-redis, strimzi-kafka-operator (선택)",
+            oninput: e => setHa({ operator: e.target.value }),
+          }),
+          el("datalist", { id: `ha-ops-${id}` },
+            HA_OPERATORS.map(op => el("option", { value: op }, []))),
+        ]));
+      }
+    }
+
+    // ===================== Scheduling =====================
+    // First-class UI for fields the data model + sim + YAML/Helm export already read:
+    // anti_affinity (None/spread-by-node/spread-by-zone), node_selector, tolerations.
+    // Lives inside Basic so users see it next to replicas/category without an extra tab.
+    {
+      const sched = w.scheduling || {};
+      const aa = sched.anti_affinity || "none";
+      const ns = sched.node_selector || {};
+      const tols = sched.tolerations || [];
+
+      // Cluster-derived context for feasibility hints.
+      const clusterNodes = (cluster.node_ids || [])
+        .map(nid => (state.project.nodes || []).find(n => n.id === nid))
+        .filter(Boolean);
+      const workerNodes = clusterNodes.filter(n => (n.cluster_roles || []).includes("worker"));
+      const workerCount = workerNodes.length;
+      const zoneSet = new Set();
+      for (const n of workerNodes) {
+        const z = n.labels?.["topology.kubernetes.io/zone"] || n.site_id;
+        if (z) zoneSet.add(z);
+      }
+      const zoneCount = zoneSet.size;
+      const replicas = w.replicas ?? 1;
+
+      // Group header to visually separate scheduling from the fields above.
+      root.appendChild(el("div", {
+        style: {
+          marginTop: "18px", paddingTop: "10px", borderTop: "1px solid var(--border)",
+          fontSize: "11px", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em",
+          color: "var(--text3)",
+        },
+      }, ["Scheduling"]));
+
+      // ---- Anti-affinity ----
+      root.appendChild(el("div", { class: "section-title", style: { marginTop: "8px" } }, ["Anti-affinity (pod 분산)"]));
+      root.appendChild(el("div", { style: { fontSize: "11px", color: "var(--text2)", marginBottom: "6px" } }, [
+        "동일 워크로드의 replica를 같은 노드(또는 zone)에 묶지 않도록 K8s 스케줄러에 힌트. ",
+        "Capacity 시뮬레이션과 K8s YAML/Helm export에 동일하게 반영됩니다.",
+      ]));
+      root.appendChild(el("div", { class: "field", style: { margin: 0 } }, [
+        el("select", {
+          style: { fontSize: "12px" },
+          onchange: e => updateWorkloadField(id, "scheduling.anti_affinity", e.target.value),
+        }, [
+          { v: "none",           label: "None — 분산 강제 없음 (replica가 한 노드에 몰릴 수 있음)" },
+          { v: "spread-by-node", label: "Spread by node — 노드 간 분산 (단일 노드 장애 견딤, topologyKey=hostname)" },
+          { v: "spread-by-zone", label: "Spread by zone — zone 간 분산 (AZ 장애 견딤, topologyKey=zone)" },
+        ].map(o => el("option", { value: o.v, selected: aa === o.v ? "" : null }, [o.label]))),
+      ]));
+
+      // Feasibility hints (warn when the setting can't actually fan out as advertised).
+      const hints = [];
+      if (aa === "spread-by-node" && workerCount > 0 && replicas > workerCount) {
+        hints.push({ sev: "warn", msg: `replicas ${replicas} > worker 노드 ${workerCount}: 일부 pod가 같은 노드에 묶이거나 unschedulable이 됩니다` });
+      }
+      if (aa === "spread-by-zone") {
+        if (zoneCount < 2) {
+          hints.push({ sev: "warn", msg: `이 클러스터의 zone은 ${zoneCount}개 — by-zone 효과 없음 (노드에 topology.kubernetes.io/zone 라벨 또는 다중 site 필요)` });
+        } else if (replicas > zoneCount) {
+          hints.push({ sev: "info", msg: `replicas ${replicas} > zone ${zoneCount}: zone당 평균 ${Math.ceil(replicas / zoneCount)}개 pod` });
+        }
+      }
+      for (const h of hints) {
+        root.appendChild(el("div", {
+          style: { fontSize: "11px", marginTop: "4px", color: h.sev === "warn" ? "var(--yellow)" : "var(--text3)" },
+        }, [(h.sev === "warn" ? "▲ " : "ℹ ") + h.msg]));
+      }
+
+      // ---- Node selector ----
+      const nsEntries = Object.entries(ns);
+      root.appendChild(el("div", { class: "section-title", style: { marginTop: "16px" } }, [`Node selector (${nsEntries.length})`]));
+      root.appendChild(el("div", { style: { fontSize: "11px", color: "var(--text2)", marginBottom: "6px" } }, [
+        "워크로드가 들어갈 수 있는 노드를 라벨로 한정 (예: disktype=ssd, gpu=true)",
+      ]));
+      if (!nsEntries.length) {
+        root.appendChild(el("div", { class: "empty-hint" }, ["없음 — 모든 worker 노드에 스케줄 가능"]));
+      }
+      nsEntries.forEach(([k, v], idx) => {
+        root.appendChild(el("div", {
+          style: { display: "grid", gridTemplateColumns: "1fr 1fr 32px", gap: "6px", marginBottom: "4px", alignItems: "center" },
+        }, [
+          el("div", { class: "field", style: { margin: 0 } }, [
+            el("input", {
+              "data-focus-key": `workload.${id}.ns.${idx}.key`,
+              style: { padding: "5px 8px", fontSize: "11px" },
+              value: k, placeholder: "key",
+              oninput: e => {
+                const newKey = e.target.value;
+                const newNs = {};
+                for (const [k2, v2] of nsEntries) newNs[k2 === k ? newKey : k2] = v2;
+                updateWorkloadField(id, "scheduling.node_selector", newNs);
+              },
+            }),
+          ]),
+          el("div", { class: "field", style: { margin: 0 } }, [
+            el("input", {
+              "data-focus-key": `workload.${id}.ns.${idx}.value`,
+              style: { padding: "5px 8px", fontSize: "11px" },
+              value: v, placeholder: "value",
+              oninput: e => updateWorkloadField(id, "scheduling.node_selector", { ...ns, [k]: e.target.value }),
+            }),
+          ]),
+          el("button", {
+            title: "삭제",
+            style: {
+              padding: "4px 8px", fontSize: "11px", lineHeight: "1",
+              color: "var(--red)", border: "1px solid var(--border)",
+              borderRadius: "4px", background: "var(--surface)",
+              cursor: "pointer",
+            },
+            onmouseover: e => { e.target.style.background = "rgba(248,113,113,.12)"; e.target.style.borderColor = "var(--red)"; },
+            onmouseout:  e => { e.target.style.background = "var(--surface)"; e.target.style.borderColor = "var(--border)"; },
+            onclick: () => {
+              const newNs = { ...ns }; delete newNs[k];
+              updateWorkloadField(id, "scheduling.node_selector", newNs);
+            },
+          }, ["✕"]),
+        ]));
+      });
+      root.appendChild(el("button", {
+        class: "add-btn", style: { width: "100%", marginTop: "4px" },
+        onclick: () => {
+          let key = "key", i = 1;
+          while (ns[key] !== undefined) { key = `key${++i}`; }
+          updateWorkloadField(id, "scheduling.node_selector", { ...ns, [key]: "" });
+        },
+      }, ["＋ Add Node Selector"]));
+
+      // ---- Tolerations ----
+      root.appendChild(el("div", { class: "section-title", style: { marginTop: "16px" } }, [`Tolerations (${tols.length})`]));
+      root.appendChild(el("div", { style: { fontSize: "11px", color: "var(--text2)", marginBottom: "6px" } }, [
+        "taint 있는 노드(예: dedicated GPU)에 들어갈 수 있도록 허용",
+      ]));
+      if (!tols.length) {
+        root.appendChild(el("div", { class: "empty-hint" }, ["없음 — taint 있는 노드 회피"]));
+      }
+      for (let i = 0; i < tols.length; i++) {
+        const t = tols[i];
+        const op = t.operator || "Equal";
+        const isExists = op === "Exists";
+        root.appendChild(el("div", {
+          style: { display: "grid", gridTemplateColumns: "1fr 84px 1fr 100px 32px", gap: "6px", marginBottom: "4px", alignItems: "center" },
+        }, [
+          el("div", { class: "field", style: { margin: 0 } }, [
+            el("input", {
+              "data-focus-key": `workload.${id}.tol.${i}.key`,
+              style: { padding: "5px 8px", fontSize: "11px" },
+              value: t.key || "", placeholder: "key",
+              oninput: e => {
+                const newTols = [...tols]; newTols[i] = { ...t, key: e.target.value };
+                updateWorkloadField(id, "scheduling.tolerations", newTols);
+              },
+            }),
+          ]),
+          el("div", { class: "field", style: { margin: 0 } }, [
+            el("select", {
+              style: { padding: "5px 8px", fontSize: "11px" },
+              onchange: e => {
+                const newTols = [...tols];
+                newTols[i] = { ...t, operator: e.target.value };
+                if (e.target.value === "Exists") delete newTols[i].value;
+                updateWorkloadField(id, "scheduling.tolerations", newTols);
+              },
+            }, ["Equal", "Exists"].map(o => el("option", { value: o, selected: op === o ? "" : null }, [o]))),
+          ]),
+          el("div", { class: "field", style: { margin: 0 } }, [
+            el("input", {
+              "data-focus-key": `workload.${id}.tol.${i}.value`,
+              style: { padding: "5px 8px", fontSize: "11px", opacity: isExists ? 0.5 : 1 },
+              value: t.value || "", placeholder: isExists ? "(N/A)" : "value",
+              readOnly: isExists ? "" : null,
+              oninput: e => {
+                const newTols = [...tols]; newTols[i] = { ...t, value: e.target.value };
+                updateWorkloadField(id, "scheduling.tolerations", newTols);
+              },
+            }),
+          ]),
+          el("div", { class: "field", style: { margin: 0 } }, [
+            el("select", {
+              style: { padding: "5px 8px", fontSize: "11px" },
+              onchange: e => {
+                const newTols = [...tols]; newTols[i] = { ...t, effect: e.target.value };
+                updateWorkloadField(id, "scheduling.tolerations", newTols);
+              },
+            }, ["", "NoSchedule", "PreferNoSchedule", "NoExecute"].map(ef =>
+              el("option", { value: ef, selected: (t.effect || "") === ef ? "" : null }, [ef || "(any)"]))),
+          ]),
+          el("button", {
+            title: "삭제",
+            style: {
+              padding: "4px 8px", fontSize: "11px", lineHeight: "1",
+              color: "var(--red)", border: "1px solid var(--border)",
+              borderRadius: "4px", background: "var(--surface)",
+              cursor: "pointer",
+            },
+            onmouseover: e => { e.target.style.background = "rgba(248,113,113,.12)"; e.target.style.borderColor = "var(--red)"; },
+            onmouseout:  e => { e.target.style.background = "var(--surface)"; e.target.style.borderColor = "var(--border)"; },
+            onclick: () => updateWorkloadField(id, "scheduling.tolerations", tols.filter((_, j) => j !== i)),
+          }, ["✕"]),
+        ]));
+      }
+      root.appendChild(el("button", {
+        class: "add-btn", style: { width: "100%", marginTop: "4px" },
+        onclick: () => updateWorkloadField(id, "scheduling.tolerations",
+          [...tols, { key: "", operator: "Equal", value: "", effect: "NoSchedule" }]),
+      }, ["＋ Add Toleration"]));
+    }
   }
   else if (state.ui.workloadTab === "resources") {
     const reqs = w.resources?.requests || {};
@@ -7066,6 +7555,53 @@ function renderWorkloadInspector(root, id) {
   }
 }
 
+// MIG (Multi-Instance GPU) controls for one GPU entry. Returns null for non-MIG-capable
+// models. Editable on both onprem and cloud nodes — the GPU model/count is fixed by a cloud
+// instance type, but MIG partitioning is a software choice, so it stays selectable everywhere.
+function renderMigRow(n, idx, gpuModels) {
+  const g = n.spec.gpu[idx];
+  const ginfo = gpuModels[g.model] || {};
+  const migProfiles = ginfo.mig_profiles || [];
+  if (!ginfo.mig_capable || !migProfiles.length) return null;
+
+  const migOn = !!g.mig_enabled;
+  const curProf = migProfiles.find(p => p.name === g.mig_profile) || migProfiles[0];
+
+  const migToggle = el("label", {
+    style: { display: "flex", alignItems: "center", gap: "4px", margin: 0, fontSize: "11px", textTransform: "none", letterSpacing: 0, color: migOn ? "var(--accent)" : "var(--text3)", whiteSpace: "nowrap" },
+    title: "Multi-Instance GPU — 물리 GPU 1장을 격리된 인스턴스로 분할",
+  }, [
+    el("input", {
+      type: "checkbox",
+      checked: migOn ? "" : null,
+      onchange: e => updateNodeGpu(n.id, idx, e.target.checked
+        ? { mig_enabled: true, mig_profile: g.mig_profile || migProfiles[0].name }
+        : { mig_enabled: false }),
+    }),
+    "MIG",
+  ]);
+
+  const children = [migToggle];
+  if (migOn) {
+    children.push(el("select", {
+      style: { padding: "4px 6px", background: "var(--surface3)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: "4px", fontSize: "11px" },
+      title: "MIG 분할 프로파일 (compute slice · 인스턴스당 VRAM)",
+      onchange: e => updateNodeGpu(n.id, idx, { mig_profile: e.target.value }),
+    }, migProfiles.map(p =>
+      el("option", { value: p.name, selected: p.name === curProf.name ? "" : null },
+        [`${p.name} · ${p.vram_gb}GB ×${p.count}`]))));
+
+    const totalInst = (g.count || 0) * curProf.count;
+    children.push(el("span", {
+      style: { fontSize: "10px", color: "var(--text2)", fontFamily: "JetBrains Mono", whiteSpace: "nowrap" },
+    }, [`${curProf.count}/GPU × ${g.count} = ${totalInst} instances · ${curProf.vram_gb}GB each`]));
+  }
+
+  return el("div", {
+    style: { display: "flex", alignItems: "center", gap: "8px", marginTop: "6px", flexWrap: "wrap" },
+  }, children);
+}
+
 function renderGpuRowEditable(n, idx, supportedModels, gpuModels) {
   const g = n.spec.gpu[idx];
   const ginfo = gpuModels[g.model] || {};
@@ -7121,6 +7657,9 @@ function renderGpuRowEditable(n, idx, supportedModels, gpuModels) {
     }, ["✕"]),
   ]);
 
+  // MIG (Multi-Instance GPU) controls — second row; shared with the cloud branch.
+  const migRow = renderMigRow(n, idx, gpuModels);
+
   const tdp = ginfo.tdp_w || 0;
   const totalKw = tdp * g.count / 1000;
   const tdpLine = el("div", {
@@ -7133,7 +7672,7 @@ function renderGpuRowEditable(n, idx, supportedModels, gpuModels) {
 
   return el("div", {
     style: { background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: "5px", padding: "8px 10px", marginBottom: "6px" },
-  }, [headRow, tdpLine]);
+  }, [headRow, migRow, tdpLine]);
 }
 
 function renderDiskRowEditable(n, idx) {
@@ -8469,6 +9008,60 @@ function simulateScheduling(project) {
           });
         }
       }
+
+      // ---- Quorum pods (Sentinel / arbiter / etc.) ----
+      // Separate from data pods because they're light-weight (typical Sentinel: ~100m CPU,
+      // ~128Mi RAM). Anti-affinity still applies — they should spread across nodes/zones too.
+      const quorumCount = w.ha?.quorum_count || 0;
+      if (quorumCount > 0 && !isDaemonSet) {
+        const qCpu = HA_QUORUM_POD_CPU;
+        const qMem = HA_QUORUM_POD_MEM_GB;
+        for (let qi = 0; qi < quorumCount; qi++) {
+          let qPool = eligibleAll;
+          if (aa === "spread-by-node") {
+            qPool = [...qPool].sort((a, b) =>
+              (placedByNode.get(a.id) || 0) - (placedByNode.get(b.id) || 0));
+          } else if (aa === "spread-by-zone") {
+            const zc = new Map();
+            for (const [nid, count] of placedByNode) {
+              const node = workers.find(x => x.id === nid);
+              const z = zoneOf(node);
+              zc.set(z, (zc.get(z) || 0) + count);
+            }
+            qPool = [...qPool].sort((a, b) =>
+              (zc.get(zoneOf(a)) || 0) - (zc.get(zoneOf(b)) || 0));
+          }
+          let placedNode = null;
+          for (const n of qPool) {
+            const r = remaining.get(n.id);
+            if (!r) continue;
+            if (r.cpu < qCpu || r.mem < qMem) continue;
+            r.cpu -= qCpu; r.mem -= qMem;
+            placedNode = n.id;
+            break;
+          }
+          if (placedNode) {
+            placedByNode.set(placedNode, (placedByNode.get(placedNode) || 0) + 1);
+            if (!placements.has(placedNode)) placements.set(placedNode, []);
+            placements.get(placedNode).push({
+              workloadId: w.id, workloadName: w.name + " (quorum)",
+              namespace: w.namespace || "default", kind: "Quorum",
+              replicaIdx: qi,
+              cpuReq: qCpu, memReq: qMem, cpuMax: qCpu, memMax: qMem,
+              gpuReq: 0, vramReq: 0, gpuModel: undefined, vramMode: false,
+            });
+          } else {
+            unscheduled.push({
+              workloadId: w.id, workloadName: w.name + " (quorum)",
+              namespace: w.namespace || "default", kind: "Quorum",
+              replicaIdx: qi,
+              clusterId: c.id, clusterName: c.name,
+              reqs: { cpu: qCpu, mem: qMem, gpu: 0, vram: 0, vramMode: false },
+              perNode: [],
+            });
+          }
+        }
+      }
     }
   }
   return { placements, unscheduled };
@@ -9154,6 +9747,51 @@ function renderNamespaceCluster(c) {
 //============ Unified node color standard (shared by Architecture & Dependency) ============
 // One source of truth so a workload is the same colour on every screen and in exports.
 // Two modes (toggled via state.ui.colorBy):
+//============ HA topology (stateful workloads: DB / Cache / Queue) ============
+// Shared by the workload inspector, the validator, the capacity sim, and the YAML/Helm export
+// so every place reads the same operational meaning instead of guessing from `replicas` alone.
+//   none             — single instance, no failover
+//   primary-replica  — 1 primary + N read replicas (classic Postgres pattern)
+//   sentinel         — primary + replicas with a separate quorum (Redis Sentinel, MongoDB ReplicaSet+arbiter)
+//   sharded-cluster  — N shards × (primary + replica per shard) (Redis Cluster, MongoDB sharded, Cassandra)
+const HA_STATEFUL_CATS = new Set(["DB", "Cache", "Queue"]);
+const HA_MODES = [
+  { v: "none",            label: "None — 단일 인스턴스 (HA 없음)" },
+  { v: "primary-replica", label: "Primary-Replica — 1 primary + N replica (Postgres 류)" },
+  { v: "sentinel",        label: "Sentinel — primary + replicas + 별도 quorum (Redis Sentinel)" },
+  { v: "sharded-cluster", label: "Sharded Cluster — N shard × (primary+replica) (Redis Cluster, MongoDB)" },
+];
+const HA_DEFAULTS = {
+  "none":             { primaries: 1, replicas_per_primary: 0, quorum_count: 0 },
+  "primary-replica":  { primaries: 1, replicas_per_primary: 2, quorum_count: 0 },
+  "sentinel":         { primaries: 1, replicas_per_primary: 2, quorum_count: 3 },
+  "sharded-cluster":  { primaries: 3, replicas_per_primary: 1, quorum_count: 0 },
+};
+// Free-text field with these suggestions so reviewers can see at a glance which Operator/Chart
+// is intended. Not used by the sim — just documentation that survives export round-trips.
+const HA_OPERATORS = [
+  "cloudnative-pg", "zalando-postgres-operator", "bitnami-postgresql-ha", "crunchy-data-pgo",
+  "bitnami-redis", "ot-container-kit-redis-operator", "spotahome-redis-operator",
+  "strimzi-kafka-operator", "bitnami-kafka",
+  "mongodb-community-operator",
+  "manual",
+];
+// Quorum pods (Sentinels, etcd-style arbiters) are intentionally light. Defaults match real
+// Sentinel/etcd footprint and are used by the capacity sim when `ha.quorum_count > 0`.
+const HA_QUORUM_POD_CPU = 0.1;
+const HA_QUORUM_POD_MEM_GB = 0.128;
+// Compute data-pod count and quorum count for any workload. Returns { data, quorum, total }.
+// data = primaries × (1 + replicas_per_primary), quorum = explicit count (independent pods).
+function haPodCounts(w) {
+  const ha = w?.ha;
+  if (!ha || !ha.mode || ha.mode === "none") return { data: w?.replicas ?? 1, quorum: 0, total: w?.replicas ?? 1 };
+  const defs = HA_DEFAULTS[ha.mode] || HA_DEFAULTS["none"];
+  const pri = ha.primaries ?? defs.primaries;
+  const rpp = ha.replicas_per_primary ?? defs.replicas_per_primary;
+  const q   = ha.quorum_count ?? defs.quorum_count;
+  return { data: pri * (1 + rpp), quorum: q, total: pri * (1 + rpp) + q };
+}
+
 //   "category"  → fixed palette keyed on workload.category (API/WAS, DB/Cache, ML merged).
 //   "namespace" → deterministic golden-angle HSL keyed on the *normalised* namespace, so the
 //                 same namespace is the same colour everywhere and dev-monitoring == monitoring.
@@ -10502,7 +11140,7 @@ function renderDependency() {
   }
   const selectedClusterId = state.ui.depCluster || "";
 
-  // View-local option (not persisted in project data): show edge labels (protocol + latency).
+  // View-local option (not persisted in project data): show edge labels (protocol:port + latency).
   if (state.ui.depShowLabels == null) state.ui.depShowLabels = true;
   const showEdgeLabels = state.ui.depShowLabels !== false;
 
@@ -10537,7 +11175,7 @@ function renderDependency() {
       style: { display: "flex", alignItems: "center", gap: "6px", marginLeft: "auto", fontSize: "11px", color: "var(--text2)", cursor: "pointer" },
     }, [
       labelToggle,
-      el("span", {}, ["edge label (protocol·latency)"]),
+      el("span", {}, ["edge label (protocol:port·latency)"]),
     ]));
     root.appendChild(bar);
   }
@@ -10988,10 +11626,13 @@ function renderDependency() {
       "stroke-opacity": edgeInFocus ? baseStrokeOp : FADE,
       "marker-end": back ? "url(#arr-back)" : "url(#arr)",
     }));
-    // Edge label (protocol + ms) — small, mid-arc. Suppressed when view-local toggle is off.
+    // Edge label (protocol:port + ms) — small, mid-arc. Suppressed when view-local toggle is off.
     if (showEdgeLabels) {
       const labelParts = [];
-      if (e.protocol) labelParts.push(e.protocol);
+      // Protocol and port shown together (e.g. "HTTP:8080"); fall back to whichever exists.
+      if (e.protocol || e.port != null) {
+        labelParts.push(e.port != null ? `${e.protocol || ""}${e.protocol ? ":" : ""}${e.port}` : e.protocol);
+      }
       if (e.avg_call_ms != null) labelParts.push(`${e.avg_call_ms}ms`);
       if (labelParts.length) {
         const mx = (x1 + x2) / 2;
@@ -12258,7 +12899,25 @@ spec:
         spec: podSpec,
       };
 
-      docs.push(`apiVersion: apps/v1
+      // HA topology preamble — exported as a comment block above the manifest so reviewers see
+      // the intended operational shape (which a plain Deployment/StatefulSet can't fully encode).
+      let haPreamble = "";
+      if (w.ha && w.ha.mode && w.ha.mode !== "none") {
+        const _h = w.ha;
+        const _pri = _h.primaries ?? 1;
+        const _rpp = _h.replicas_per_primary ?? 0;
+        const _qc = _h.quorum_count ?? 0;
+        const _data = _pri * (1 + _rpp);
+        haPreamble = `# ---- HA topology ----
+# mode: ${_h.mode}
+# data pods: ${_pri} × (1 + ${_rpp}) = ${_data}${_qc > 0 ? `
+# quorum / sentinel pods: ${_qc} (lightweight, separate)` : ""}${_h.operator ? `
+# operator / chart: ${_h.operator}` : ""}
+# NOTE: this manifest is a plain ${kind} — for production use the operator above to handle
+#       failover, replication and topology. The annotations below preserve intent for review.
+`;
+      }
+      docs.push(`${haPreamble}apiVersion: apps/v1
 kind: ${kind}
 metadata:
   name: ${_yStr(name)}
@@ -12416,6 +13075,17 @@ function generateHelmValues(p) {
       }
       if (w.scheduling?.anti_affinity === "spread-by-node") {
         v.podAntiAffinity = { enabled: true, topologyKey: "kubernetes.io/hostname" };
+      }
+      // HA topology — surfaced as a structured `ha` block so reviewers (and downstream chart
+      // templates) can see the intended operator/mode without parsing the comments.
+      if (w.ha && w.ha.mode && w.ha.mode !== "none") {
+        v.ha = {
+          mode: w.ha.mode,
+          primaries: w.ha.primaries ?? 1,
+          replicasPerPrimary: w.ha.replicas_per_primary ?? 0,
+          quorumCount: w.ha.quorum_count ?? 0,
+          ...(w.ha.operator ? { operator: w.ha.operator } : {}),
+        };
       }
       out.workloads[name] = v;
     }
@@ -12576,6 +13246,173 @@ app.kubernetes.io/instance: {{ .Release.Name }}
     }
   }
   return { chartName, files };
+}
+
+//============ Export: docker-compose.yml ============
+// Best-effort translation of the k8s model to a single docker-compose.yml for single-host /
+// local use. K8s concepts that have no compose equivalent are approximated or dropped, with an
+// honest comment recorded per service (HA/operators, Service port-remap + LB, Ingress,
+// NetworkPolicy, dynamic PVC, multi-cluster). Reuses the same field paths as generateK8sManifests
+// so the two exports describe the same workloads.
+function _composeMemMB(gb) { return Math.max(1, Math.round((gb || 0) * 1024)); }
+
+function generateDockerCompose(p) {
+  const clusters = p.clusters || [];
+
+  // Globally-unique service name per workload id (compose service names share one namespace).
+  // On collision across clusters/namespaces, qualify with the cluster slug, then a numeric suffix.
+  const nameMap = new Map();
+  const used = new Set();
+  const allWl = [];
+  for (const c of clusters) for (const w of (c.workloads || [])) allWl.push({ w, c });
+  for (const { w, c } of allWl) {
+    let n = slug(w.name) || `wl-${w.id}`;
+    if (used.has(n)) n = `${n}-${slug(c.name) || "c"}`;
+    const base = n; let i = 2;
+    while (used.has(n)) n = `${base}-${i++}`;
+    used.add(n); nameMap.set(w.id, n);
+  }
+
+  // Workloads reachable from outside (NodePort / LoadBalancer / behind an Ingress rule). These
+  // publish a host port and so must run as a single container (one host can't bind a port twice).
+  const ingressExposed = new Set();
+  const ingressRoutes = [];
+  for (const c of clusters) {
+    for (const r of (c.ingress_rules || [])) {
+      for (const path of (r.paths || [])) {
+        ingressExposed.add(path.workload_id);
+        const tn = nameMap.get(path.workload_id) || path.workload_id;
+        ingressRoutes.push(`${r.host || "*"}${path.path || "/"} -> ${tn}:${path.port || 80}`);
+      }
+    }
+  }
+
+  const volumeDecls = [];
+  const blocks = [];
+
+  for (const { w, c } of allWl) {
+    const name = nameMap.get(w.id);
+    const kind = w.kind || "Deployment";
+    const ns = w.namespace || "default";
+    const svc = w.network?.service;
+    const ports = (svc && svc.type !== "None") ? (svc.ports || []) : [];
+    const externally = (svc && (svc.type === "NodePort" || svc.type === "LoadBalancer")) || ingressExposed.has(w.id);
+
+    const reqCpu = w.resources?.requests?.cpu ?? 0.1;
+    const reqMem = w.resources?.requests?.memory_gb ?? 0.25;
+    const limCpu = w.resources?.limits?.cpu ?? reqCpu * 2;
+    const limMem = w.resources?.limits?.memory_gb ?? reqMem * 2;
+    const image = w.helm?.image_repo || `registry.example.com/${name}`;
+    const tag = w.helm?.image_tag || "latest";
+    const gpuCount = w.resources?.requests?.gpu?.count || 0;
+    const origReplicas = w.replicas ?? 1;
+
+    const s = {};
+    s.image = `${image}:${tag}`;
+    s.restart = (kind === "Job" || kind === "CronJob") ? "no" : "unless-stopped";
+
+    if (w.runtime?.heap_gb) {
+      s.environment = { JAVA_OPTS: `-Xmx${w.runtime.heap_gb}g -Xms${w.runtime.heap_gb}g` };
+    }
+
+    if (ports.length) {
+      if (externally) {
+        // Publish to the host. host:container — host side uses the k8s service port for familiarity.
+        s.ports = ports.map(pt => `${pt.port}:${pt.target_port || pt.port}`);
+      } else {
+        // Internal only — reachable by other services as <name>:<containerPort> over the network.
+        s.expose = [...new Set(ports.map(pt => String(pt.target_port || pt.port)))];
+      }
+    }
+
+    // persistent_volumes -> local named volumes (no dynamic provisioning / no NFS on a single host).
+    const vmounts = [];
+    (w.persistent_volumes || []).forEach((pv, i) => {
+      const vn = `${name}-${slug(pv.name) || `data-${i}`}`;
+      const mp = pv.mount_path || `/data/${pv.name || `data-${i}`}`;
+      vmounts.push(`${vn}:${mp}`);
+      volumeDecls.push(vn);
+    });
+    if (vmounts.length) s.volumes = vmounts;
+
+    // depends_on only orders startup; all services share one flat network so traffic also works.
+    const deps = [...new Set((w.depends_on || [])
+      .map(d => nameMap.get(d.target_workload_id))
+      .filter(Boolean)
+      .filter(n => n !== name))];
+    if (deps.length) s.depends_on = deps;
+
+    const deploy = {};
+    if (kind !== "DaemonSet" && kind !== "Job" && kind !== "CronJob") {
+      if (externally) {
+        if (origReplicas > 1) deploy.replicas = 1;  // forced; see comment
+      } else if (origReplicas > 1) {
+        deploy.replicas = origReplicas;
+      }
+    }
+    const reservations = { cpus: String(reqCpu), memory: `${_composeMemMB(reqMem)}M` };
+    if (gpuCount) reservations.devices = [{ driver: "nvidia", count: gpuCount, capabilities: ["gpu"] }];
+    deploy.resources = {
+      limits: { cpus: String(limCpu), memory: `${_composeMemMB(limMem)}M` },
+      reservations,
+    };
+    s.deploy = deploy;
+
+    // ---- per-service comments: record everything the format silently drops ----
+    const cm = [];
+    cm.push(`# cluster: ${c.name} · namespace: ${ns} · kind: ${kind}`);
+    if (externally && origReplicas > 1) {
+      cm.push(`# replicas ${origReplicas} -> 1: a published host port can't be shared by multiple containers on one host; add an external LB to scale`);
+    }
+    // Service port-remap is lost: in-cluster callers must hit the CONTAINER port, not the k8s
+    // service port. Relevant whether or not the service is published (external clients use the
+    // host-mapped service port; in-cluster callers always use the container port).
+    const remap = ports.filter(pt => (pt.target_port || pt.port) !== pt.port);
+    if (remap.length) {
+      const tps = remap.map(pt => pt.target_port || pt.port).join("/");
+      const sps = remap.map(pt => pt.port).join("/");
+      cm.push(`# port remap: in-cluster callers must use ${name}:${tps} (container port), not the k8s service port ${sps}${externally ? ` — published host port ${sps} maps to ${tps}` : ""}`);
+    }
+    if (w.ha && w.ha.mode && w.ha.mode !== "none") {
+      const _pri = w.ha.primaries ?? 1, _rpp = w.ha.replicas_per_primary ?? 0;
+      cm.push(`# HA intended: mode=${w.ha.mode}, ${_pri}×(1+${_rpp}) data pods${w.ha.operator ? `, operator: ${w.ha.operator}` : ""} — compose runs a single container; real HA needs the operator/orchestrator`);
+    }
+    if (kind === "DaemonSet") cm.push(`# DaemonSet: one pod per node in k8s; here a single instance`);
+    if (kind === "Job" || kind === "CronJob") cm.push(`# ${kind}: run-once/scheduled in k8s; here restart:no — use 'docker compose run ${name}' or an external scheduler`);
+    if (gpuCount) cm.push(`# GPU ×${gpuCount}: needs the NVIDIA Container Toolkit on the host`);
+
+    const body = _yObj(s, 2);
+    const cmLines = cm.map(l => `    ${l}`).join("\n");
+    blocks.push(`  ${name}:\n${cmLines}\n${body}`);
+  }
+
+  // ---- header ----
+  const header = `# Docker Compose — generated by vk8s · ${new Date().toISOString()}
+# Project: ${p.name}${p.mode ? ` (mode: ${p.mode})` : ""}
+#
+# BEST-EFFORT translation of a Kubernetes model to docker-compose for single-host / local use.
+# These k8s concepts have NO compose equivalent and are approximated or dropped (see per-service notes):
+#   • Operators / CRDs / HA topology         -> single container per workload (no failover/replication)
+#   • HPA autoscaling / pod self-healing      -> 'restart: unless-stopped' only
+#   • Service (port remap + LB across pods)   -> compose DNS reaches the CONTAINER port directly
+#   • Ingress                                 -> no equivalent; front exposed services with nginx/traefik
+#   • NetworkPolicy / namespaces / RBAC       -> not enforced; all services share one flat network
+#   • PVC / StorageClass / NFS                -> local named volumes (no dynamic provisioning)
+#   • Multi-cluster                           -> flattened onto one Docker host & network
+#
+# Images are placeholders (registry.example.com/...) unless set per-workload in vk8s.
+# Run:  docker compose up -d        Validate:  docker compose config -q`;
+
+  const ingressBlock = ingressRoutes.length
+    ? `\n#\n# ---- Ingress routes (no compose equivalent — put a reverse proxy in front) ----\n${ingressRoutes.map(r => `#   ${r}`).join("\n")}`
+    : "";
+
+  const uniqVols = [...new Set(volumeDecls)];
+  const volumesSection = uniqVols.length
+    ? `\n\nvolumes:\n${uniqVols.map(v => `  ${v}:`).join("\n")}`
+    : "";
+
+  return `${header}${ingressBlock}\n\nservices:\n${blocks.join("\n\n")}${volumesSection}\n`;
 }
 
 function _helmPvcTpl(w) {
@@ -12877,142 +13714,277 @@ ${_yObj(spec, 1)}
 }
 
 //============ Export: Capacity report (Markdown) ============
-function generateCapacityReport(p) {
-  const lines = [];
-  const today = new Date().toISOString().slice(0, 10);
+// ============ Project Report — section-based, selectable ============
+// Each section is { id, label, emit(p) -> string[] }. generateCapacityReport(p, hidden=[]) emits the
+// header + every section whose id is NOT in `hidden`. Storing the *deselected* ids (not selected)
+// means any section added later defaults ON for existing saved UIs. Sections self-compute (no shared
+// ctx) so each can be omitted independently; an explicitly-selected but empty section prints "_(none)_".
 
-  lines.push(`# ${p.name} — Infrastructure Capacity Report`);
-  lines.push("");
-  lines.push(`**Mode:** ${p.mode} · **Generated:** ${today}`);
-  if (p.description) lines.push(`\n> ${p.description}`);
-  lines.push("");
+// Escape a value for a Markdown table cell (pipe + newline would otherwise break the table).
+const _mdCell = v => String(v == null || v === "" ? "—" : v).replace(/\|/g, "\\|").replace(/\n/g, " ");
+const _reportNodeIdToCluster = p => {
+  const m = new Map();
+  for (const c of (p.clusters || [])) for (const id of (c.node_ids || [])) m.set(id, c.name);
+  return m;
+};
+const _reportWorkloadIdToName = p => {
+  const m = new Map();
+  for (const c of (p.clusters || [])) for (const w of (c.workloads || [])) m.set(w.id, w.name);
+  return m;
+};
+const _depLabel = d => {
+  const proto = d.protocol || "";
+  return d.port != null ? `${proto}${proto ? ":" : ""}${d.port}` : proto;
+};
 
-  // Counts
+function _secOverview(p) {
   const counts = {
     sites: (p.sites || []).length,
     nodes: (p.nodes || []).length,
     clusters: (p.clusters || []).length,
     workloads: (p.clusters || []).reduce((s, c) => s + (c.workloads?.length || 0), 0),
   };
-  lines.push("## Overview");
-  lines.push("");
-  lines.push(`| Metric | Count |`);
-  lines.push(`|---|---|`);
-  lines.push(`| Sites | ${counts.sites} |`);
-  lines.push(`| Nodes | ${counts.nodes} |`);
-  lines.push(`| Clusters | ${counts.clusters} |`);
-  lines.push(`| Workloads | ${counts.workloads} |`);
-  lines.push("");
+  return [
+    "## Overview", "",
+    "| Metric | Count |", "|---|---|",
+    `| Sites | ${counts.sites} |`,
+    `| Nodes | ${counts.nodes} |`,
+    `| Clusters | ${counts.clusters} |`,
+    `| Workloads | ${counts.workloads} |`,
+  ];
+}
 
-  // Per-site capacity
-  lines.push("## Site Capacity");
-  lines.push("");
-  lines.push("| Site | Kind | Provider/Region | Nodes | U used | kW est | kW budget | Util |");
-  lines.push("|---|---|---|---|---|---|---|---|");
-  for (const s of (p.sites || [])) {
+function _secNodes(p) {
+  const out = ["## Node Specs", ""];
+  const nodes = p.nodes || [];
+  if (!nodes.length) { out.push("_(none)_"); return out; }
+  const gm = state.catalog?.gpuModels || {};
+  const n2c = _reportNodeIdToCluster(p);
+  out.push("| Node | Cluster | Site | Source | Roles | vCPU | RAM (GB) | Disk | GPU | Power (W) |");
+  out.push("|---|---|---|---|---|---|---|---|---|---|");
+  for (const n of nodes) {
+    const site = (p.sites || []).find(s => s.id === n.site_id);
+    const roles = Array.isArray(n.cluster_roles) && n.cluster_roles.length ? n.cluster_roles.join("+") : "—";
+    const disks = n.spec?.disks || [];
+    const diskTot = disks.reduce((a, d) => a + (d.size_gb || 0) * (d.count || 1), 0);
+    const diskTypes = [...new Set(disks.map(d => d.type).filter(Boolean))].join("/");
+    const diskStr = diskTot ? `${diskTot}GB${diskTypes ? ` ${diskTypes}` : ""}` : "—";
+    const gpu = (n.spec?.gpu || []).map(g =>
+      `${g.model}×${g.count}${g.mig_enabled && g.mig_profile ? ` [MIG ${g.mig_profile}]` : ""}`).join(", ") || "—";
+    const powerW = Math.round(computeNodePowerW(n, gm));
+    out.push(`| ${_mdCell(n.name)} | ${_mdCell(n2c.get(n.id))} | ${_mdCell(site?.name)} | ${_mdCell(n.source)} | ${_mdCell(roles)} | ${_mdCell(n.spec?.vcpu)} | ${_mdCell(n.spec?.memory_gb)} | ${_mdCell(diskStr)} | ${_mdCell(gpu)} | ${powerW} |`);
+  }
+  return out;
+}
+
+function _secSites(p) {
+  const out = ["## Site Capacity", ""];
+  const sites = p.sites || [];
+  if (!sites.length) { out.push("_(none)_"); return out; }
+  const gm = state.catalog?.gpuModels || {};
+  out.push("| Site | Kind | Provider/Region | Nodes | U used | kW est | kW budget | Util |");
+  out.push("|---|---|---|---|---|---|---|---|");
+  for (const s of sites) {
     const nodesHere = (p.nodes || []).filter(n => n.site_id === s.id);
-    let uUsed = 0, kwEst = 0;
+    let uUsed = 0, wEst = 0;
     for (const n of nodesHere) {
-      const ff = n.spec?.form_factor || "1U";
-      const m = ff.match(/^(\d+)U$/i);
-      if (m) uUsed += parseInt(m[1]);
-      const base = n.spec?.power?.typical_w_base || 0;
-      const gpus = (n.spec?.gpu || []).reduce((s, g) => s + (g.tdp_w || g.count * 350), 0);
-      kwEst += (base + gpus) / 1000;
+      uUsed += siteFormFactorU(n.spec?.form_factor || "1U");
+      wEst += computeNodePowerW(n, gm);   // accurate catalog TDP + disk power (consistent w/ Node Specs)
     }
+    const kwEst = wEst / 1000;
     const kwBudget = s.capacity?.power_kw || 0;
     const util = kwBudget ? `${Math.round((kwEst / kwBudget) * 100)}%` : "—";
-    lines.push(`| ${s.name} | ${s.kind} | ${s.cloud_provider || "—"}/${s.region || "—"} | ${nodesHere.length} | ${uUsed}U / ${s.capacity?.rack_units || "—"} | ${kwEst.toFixed(1)} | ${kwBudget || "—"} | ${util} |`);
+    out.push(`| ${_mdCell(s.name)} | ${_mdCell(s.kind)} | ${_mdCell(s.cloud_provider || "—")}/${_mdCell(s.region || "—")} | ${nodesHere.length} | ${uUsed}U / ${s.capacity?.rack_units || "—"} | ${kwEst.toFixed(1)} | ${kwBudget || "—"} | ${util} |`);
   }
-  lines.push("");
+  return out;
+}
 
-  // GPU plan
-  const gpuByModel = new Map();
+function _secGpu(p) {
+  const out = ["## GPU Plan", ""];
+  const gm = state.catalog?.gpuModels || {};
+  const byModel = new Map();
   let totalGpus = 0, totalVram = 0;
-  for (const n of (p.nodes || [])) {
-    for (const g of (n.spec?.gpu || [])) {
-      gpuByModel.set(g.model, (gpuByModel.get(g.model) || 0) + g.count);
-      totalGpus += g.count;
-      const ref = state.catalog?.gpuModels?.[g.model];
-      if (ref?.vram_gb) totalVram += ref.vram_gb * g.count;
-    }
+  for (const n of (p.nodes || [])) for (const g of (n.spec?.gpu || [])) {
+    byModel.set(g.model, (byModel.get(g.model) || 0) + g.count);
+    totalGpus += g.count;
+    const ref = gm[g.model];
+    if (ref?.vram_gb) totalVram += ref.vram_gb * g.count;
   }
-  if (totalGpus) {
-    lines.push("## GPU Plan");
-    lines.push("");
-    lines.push(`**Total GPUs:** ${totalGpus} · **Aggregate VRAM:** ~${totalVram} GB`);
-    lines.push("");
-    lines.push("| Model | Count | VRAM/each | TDP/each |");
-    lines.push("|---|---|---|---|");
-    for (const [model, cnt] of [...gpuByModel].sort((a, b) => b[1] - a[1])) {
-      const ref = state.catalog?.gpuModels?.[model] || {};
-      lines.push(`| ${model} | ${cnt} | ${ref.vram_gb || "—"} GB | ${ref.tdp_w || "—"} W |`);
-    }
-    lines.push("");
+  if (!totalGpus) { out.push("_(none)_"); return out; }
+  out.push(`**Total GPUs:** ${totalGpus} · **Aggregate VRAM:** ~${totalVram} GB`, "");
+  out.push("| Model | Count | VRAM/each | TDP/each |", "|---|---|---|---|");
+  for (const [model, cnt] of [...byModel].sort((a, b) => b[1] - a[1])) {
+    const ref = gm[model] || {};
+    out.push(`| ${_mdCell(model)} | ${cnt} | ${ref.vram_gb || "—"} GB | ${ref.tdp_w || "—"} W |`);
   }
+  return out;
+}
 
-  // Network plan
-  const allCidrs = [];
+function _secNetwork(p) {
+  const out = ["## Network Plan", ""];
+  const rows = [];
+  for (const c of (p.clusters || [])) if (c.network) rows.push({
+    cluster: c.name,
+    pod: c.network.pod_cidr || "—", svc: c.network.service_cidr || "—",
+    node: c.network.node_subnet || "—", lb: c.network.lb_pool || "—",
+    dns: c.network.dns_domain || "cluster.local",
+  });
+  if (!rows.length) { out.push("_(none)_"); return out; }
+  out.push("| Cluster | Pod CIDR | Service CIDR | Node Subnet | LB Pool | DNS |", "|---|---|---|---|---|---|");
+  for (const r of rows) out.push(`| ${_mdCell(r.cluster)} | ${_mdCell(r.pod)} | ${_mdCell(r.svc)} | ${_mdCell(r.node)} | ${_mdCell(r.lb)} | ${_mdCell(r.dns)} |`);
+  return out;
+}
+
+function _secClusters(p) {
+  const out = ["## Cluster Configuration", ""];
+  const clusters = p.clusters || [];
+  if (!clusters.length) { out.push("_(none)_"); return out; }
+  for (const c of clusters) {
+    const nodes = (c.node_ids || []).map(id => (p.nodes || []).find(n => n.id === id)).filter(Boolean);
+    const nodeDesc = nodes.map(n =>
+      `${n.name}${Array.isArray(n.cluster_roles) && n.cluster_roles.length ? ` (${n.cluster_roles.join("+")})` : ""}`).join(", ") || "—";
+    const ns = (c.namespaces || []).map(x => x.name).join(", ") || "—";
+    out.push(`### ${_mdCell(c.name)}`, "");
+    out.push(`- **k8s:** ${_mdCell(c.k8s_version || "—")} · **CNI:** ${_mdCell(c.addons?.cni || "—")} · **GPU operator:** ${c.addons?.gpu_operator ? "yes" : "no"} · **HA control plane:** ${c.ha_control_plane ? "yes" : "no"}`);
+    out.push(`- **Nodes (${nodes.length}):** ${_mdCell(nodeDesc)}`);
+    out.push(`- **Namespaces:** ${_mdCell(ns)}`);
+    if (c.network) out.push(`- **Network:** pod ${_mdCell(c.network.pod_cidr || "—")} · svc ${_mdCell(c.network.service_cidr || "—")} · DNS ${_mdCell(c.network.dns_domain || "cluster.local")}`);
+    out.push(`- **Workloads:** ${(c.workloads || []).length}`, "");
+  }
+  if (out[out.length - 1] === "") out.pop();
+  return out;
+}
+
+function _secArchitecture(p) {
+  const out = ["## Architecture", ""];
+  const wlName = _reportWorkloadIdToName(p);
+  let any = false;
   for (const c of (p.clusters || [])) {
-    if (c.network) {
-      allCidrs.push({
-        cluster: c.name,
-        pod: c.network.pod_cidr || "—",
-        svc: c.network.service_cidr || "—",
-        node: c.network.node_subnet || "—",
-        lb: c.network.lb_pool || "—",
-        dns: c.network.dns_domain || "cluster.local",
-      });
+    const edges = [];
+    for (const w of (c.workloads || [])) for (const d of (w.depends_on || [])) {
+      const tgt = wlName.get(d.target_workload_id);
+      if (!tgt) continue;
+      const pp = _depLabel(d), ms = d.avg_call_ms != null ? ` · ${d.avg_call_ms}ms` : "";
+      edges.push(`- ${_mdCell(w.name)} → ${_mdCell(tgt)}${pp ? ` · ${pp}` : ""}${ms}`);
     }
-  }
-  if (allCidrs.length) {
-    lines.push("## Network Plan");
-    lines.push("");
-    lines.push("| Cluster | Pod CIDR | Service CIDR | Node Subnet | LB Pool | DNS |");
-    lines.push("|---|---|---|---|---|---|");
-    for (const r of allCidrs) {
-      lines.push(`| ${r.cluster} | ${r.pod} | ${r.svc} | ${r.node} | ${r.lb} | ${r.dns} |`);
+    const ingress = [];
+    for (const r of (c.ingress_rules || [])) for (const path of (r.paths || [])) {
+      const tgt = wlName.get(path.workload_id) || path.workload_id;
+      ingress.push(`- ${_mdCell((r.host || "*") + (path.path || "/"))} → ${_mdCell(tgt)}:${path.port || 80}`);
     }
-    lines.push("");
+    if (!edges.length && !ingress.length) continue;
+    any = true;
+    out.push(`### ${_mdCell(c.name)}`, "");
+    if (ingress.length) out.push("**Ingress routes:**", ...ingress, "");
+    if (edges.length) out.push("**Dependencies:**", ...edges, "");
   }
+  if (!any) { out.push("_(none)_"); return out; }
+  if (out[out.length - 1] === "") out.pop();
+  return out;
+}
 
-  // Workload summary per cluster
-  lines.push("## Workload Summary");
-  lines.push("");
+function _secWorkloadSummary(p) {
+  const out = ["## Workload Summary", ""];
+  let any = false;
   for (const c of (p.clusters || [])) {
     const wls = c.workloads || [];
     if (!wls.length) continue;
-    lines.push(`### Cluster: ${c.name} (${wls.length} workloads)`);
-    lines.push("");
-    lines.push("| Workload | Namespace | Category | Replicas | CPU req | Mem req | RPS |");
-    lines.push("|---|---|---|---|---|---|---|");
+    any = true;
+    out.push(`### Cluster: ${_mdCell(c.name)} (${wls.length} workloads)`, "");
+    out.push("| Workload | Namespace | Category | Replicas | CPU req | Mem req | RPS |", "|---|---|---|---|---|---|---|");
     for (const w of wls) {
-      lines.push(`| ${w.name} | ${w.namespace || "default"} | ${w.category || "—"} | ${w.replicas ?? 1} | ${w.resources?.requests?.cpu ?? "—"} | ${w.resources?.requests?.memory_gb ?? "—"} GB | ${w.traffic_profile?.target_rps ?? "—"} |`);
+      out.push(`| ${_mdCell(w.name)} | ${_mdCell(w.namespace || "default")} | ${_mdCell(w.category || "—")} | ${w.replicas ?? 1} | ${w.resources?.requests?.cpu ?? "—"} | ${w.resources?.requests?.memory_gb ?? "—"} GB | ${w.traffic_profile?.target_rps ?? "—"} |`);
     }
-    lines.push("");
+    out.push("");
   }
+  if (!any) { out.push("_(none)_"); return out; }
+  if (out[out.length - 1] === "") out.pop();
+  return out;
+}
 
-  // Validation findings
+function _secWorkloadDetail(p) {
+  const out = ["## Workload Details", ""];
+  const wlName = _reportWorkloadIdToName(p);
+  let any = false;
+  for (const c of (p.clusters || [])) for (const w of (c.workloads || [])) {
+    any = true;
+    const r = w.resources || {}, req = r.requests || {}, lim = r.limits || {};
+    const gpu = req.gpu?.count ? ` · GPU ×${req.gpu.count}${req.gpu.model ? ` (${req.gpu.model})` : ""}` : "";
+    const img = `${w.helm?.image_repo || "registry.example.com/" + slug(w.name)}:${w.helm?.image_tag || "latest"}`;
+    out.push(`### ${_mdCell(c.name)} / ${_mdCell(w.name)}`, "");
+    out.push(`- **kind:** ${w.kind || "Deployment"} · **ns:** ${_mdCell(w.namespace || "default")} · **replicas:** ${w.replicas ?? 1} · **category:** ${_mdCell(w.category || "—")}`);
+    out.push(`- **image:** ${_mdCell(img)}`);
+    out.push(`- **resources:** req ${req.cpu ?? "—"} CPU / ${req.memory_gb ?? "—"} GB${gpu} · lim ${lim.cpu ?? "—"} CPU / ${lim.memory_gb ?? "—"} GB`);
+    const ports = (w.network?.service?.ports || []).map(pt => `${pt.name || pt.port} ${pt.port}→${pt.target_port || pt.port}/${pt.protocol || "TCP"}`).join(", ");
+    if (ports) out.push(`- **ports:** ${_mdCell(ports)} (${_mdCell(w.network?.service?.type || "ClusterIP")})`);
+    const deps = (w.depends_on || []).map(d => {
+      const t = wlName.get(d.target_workload_id) || d.target_workload_id, pp = _depLabel(d);
+      return `${t}${pp ? ` (${pp}${d.avg_call_ms != null ? `, ${d.avg_call_ms}ms` : ""})` : ""}`;
+    }).join(", ");
+    if (deps) out.push(`- **depends_on:** ${_mdCell(deps)}`);
+    if (w.ha && w.ha.mode && w.ha.mode !== "none") {
+      out.push(`- **HA:** ${_mdCell(w.ha.mode)} · ${(w.ha.primaries ?? 1)}×(1+${w.ha.replicas_per_primary ?? 0})${w.ha.quorum_count ? ` + ${w.ha.quorum_count} quorum` : ""}${w.ha.operator ? ` · operator: ${_mdCell(w.ha.operator)}` : ""}`);
+    }
+    const sched = [];
+    if (w.scheduling?.anti_affinity && w.scheduling.anti_affinity !== "none") sched.push(`anti-affinity: ${w.scheduling.anti_affinity}`);
+    if (w.scheduling?.node_selector && Object.keys(w.scheduling.node_selector).length) sched.push(`nodeSelector: ${Object.entries(w.scheduling.node_selector).map(([k, v]) => `${k}=${v}`).join(",")}`);
+    if (w.scheduling?.tolerations?.length) sched.push(`${w.scheduling.tolerations.length} toleration(s)`);
+    if (sched.length) out.push(`- **scheduling:** ${_mdCell(sched.join(" · "))}`);
+    const pvs = (w.persistent_volumes || []).map(pv => `${pv.name || "data"} ${pv.size_gb || "?"}GB @ ${pv.mount_path || "/data"}`).join(", ");
+    if (pvs) out.push(`- **storage:** ${_mdCell(pvs)}`);
+    out.push("");
+  }
+  if (!any) { out.push("_(none)_"); return out; }
+  if (out[out.length - 1] === "") out.pop();
+  return out;
+}
+
+function _secValidation(p) {
+  const out = ["## Validation Summary", ""];
   const findings = runValidator(p);
-  const counts2 = { error: 0, warn: 0, info: 0 };
-  for (const f of findings) counts2[f.sev] = (counts2[f.sev] || 0) + 1;
-  lines.push("## Validation Summary");
-  lines.push("");
-  lines.push(`**Errors:** ${counts2.error} · **Warnings:** ${counts2.warn} · **Info:** ${counts2.info}`);
-  lines.push("");
+  const c = { error: 0, warn: 0, info: 0 };
+  for (const f of findings) c[f.sev] = (c[f.sev] || 0) + 1;
+  out.push(`**Errors:** ${c.error} · **Warnings:** ${c.warn} · **Info:** ${c.info}`, "");
   if (findings.length) {
-    lines.push("| Severity | Scope | Message |");
-    lines.push("|---|---|---|");
+    out.push("| Severity | Scope | Message |", "|---|---|---|");
     for (const f of findings.slice(0, 30)) {
       const scope = f.scope ? `${f.scope.kind}:${f.scope.id}` : (f.id || "—");
-      const msg = (f.msg || "").replace(/\|/g, "\\|").replace(/\n/g, " ");
-      lines.push(`| ${f.sev} | ${scope} | ${msg} |`);
+      out.push(`| ${f.sev} | ${_mdCell(scope)} | ${_mdCell(f.msg || "")} |`);
     }
-    if (findings.length > 30) lines.push(`\n_(+${findings.length - 30} more findings — open Findings panel for full list)_`);
-    lines.push("");
+    if (findings.length > 30) out.push(`\n_(+${findings.length - 30} more findings — open Findings panel for full list)_`);
   }
+  return out;
+}
 
-  lines.push(`---`);
+const REPORT_SECTIONS = [
+  { id: "overview",        label: "Overview",        emit: _secOverview },
+  { id: "nodes",           label: "Node Specs",      emit: _secNodes },
+  { id: "sites",           label: "Site Capacity",   emit: _secSites },
+  { id: "gpu",             label: "GPU Plan",        emit: _secGpu },
+  { id: "network",         label: "Network Plan",    emit: _secNetwork },
+  { id: "clusters",        label: "Cluster Config",  emit: _secClusters },
+  { id: "architecture",    label: "Architecture",    emit: _secArchitecture },
+  { id: "workloads",       label: "Workload Summary",emit: _secWorkloadSummary },
+  { id: "workload_detail", label: "Workload Detail", emit: _secWorkloadDetail },
+  { id: "validation",      label: "Validation",      emit: _secValidation },
+];
+
+// hidden: array of section ids to omit. No args ⇒ full report (used by "Download everything").
+function generateCapacityReport(p, hidden = []) {
+  const hide = new Set(hidden);
+  const today = new Date().toISOString().slice(0, 10);
+  const lines = [];
+  lines.push(`# ${_mdCell(p.name)} — Project Report`);
+  lines.push("");
+  lines.push(`**Mode:** ${p.mode} · **Generated:** ${today}`);
+  if (p.description) lines.push(`\n> ${String(p.description).replace(/\n/g, " ")}`);
+  lines.push("");
+  for (const sec of REPORT_SECTIONS) {
+    if (hide.has(sec.id)) continue;
+    const out = sec.emit(p);
+    if (out && out.length) { lines.push(...out, ""); }
+  }
+  lines.push("---");
   lines.push(`_Generated by vk8s · schema v${SCHEMA_VERSION}_`);
   return lines.join("\n");
 }
@@ -13028,7 +14000,12 @@ function renderExport() {
   const slugName = slug(p.name) || "vk8s";
   const k8sContent = generateK8sManifests(p);
   const helmChart = generateHelmChart(p);    // { chartName, files[] }
-  const reportContent = generateCapacityReport(p);
+  const composeContent = generateDockerCompose(p);
+  // Report: the tab respects the per-section checkboxes; the "Download everything" zip always
+  // bundles the FULL report (everything means everything), so generate both.
+  if (!Array.isArray(state.ui.reportHiddenSections)) state.ui.reportHiddenSections = [];
+  const reportFull = generateCapacityReport(p);
+  const reportContent = generateCapacityReport(p, state.ui.reportHiddenSections);
 
   // Tab configuration
   // - single-file tabs: { kind:"single", id, name, ext, mime, content }
@@ -13040,9 +14017,12 @@ function renderExport() {
     { kind: "multi",  id: "helm",   name: "Helm Chart",
       files: helmChart.files, chartName: helmChart.chartName,
       filename: `${helmChart.chartName}-helm.zip` },
-    { kind: "single", id: "report", name: "Capacity Report",
+    { kind: "single", id: "compose", name: "Docker Compose",
+      ext: "yml", mime: "text/yaml", content: composeContent,
+      filename: `${slugName}-docker-compose.yml` },
+    { kind: "single", id: "report", name: "Project Report",
       ext: "md", mime: "text/markdown", content: reportContent,
-      filename: `${slugName}-capacity-report.md` },
+      filename: `${slugName}-report.md` },
   ];
   const cur = tabs.find(t => t.id === state.ui.exportTab) || tabs[0];
 
@@ -13058,7 +14038,8 @@ function renderExport() {
   // Header row: title + master "Download everything (.zip)"
   const allFiles = [];
   allFiles.push({ path: `k8s-manifests.yaml`, content: k8sContent });
-  allFiles.push({ path: `capacity-report.md`, content: reportContent });
+  allFiles.push({ path: `docker-compose.yml`, content: composeContent });
+  allFiles.push({ path: `project-report.md`, content: reportFull });
   for (const f of helmChart.files) allFiles.push(f);
 
   let dlAllBtn;
@@ -13083,7 +14064,7 @@ function renderExport() {
       "Export", helpIcon("view.export"),
     ]),
     el("span", { style: { fontSize: "11px", color: "var(--text3)", fontStyle: "italic" } }, [
-      "K8s manifests · Helm chart · Capacity report",
+      "K8s manifests · Helm chart · Docker Compose · Project report",
     ]),
     el("span", { style: { flex: 1 } }, []),
     dlAllBtn,
@@ -13116,12 +14097,60 @@ function renderExport() {
   wrap.appendChild(tabRow);
 
   if (cur.kind === "single") {
+    if (cur.id === "report") wrap.appendChild(_renderReportSectionSelector(btnStyle));
     _renderExportSingle(wrap, cur, btnStyle);
   } else {
     _renderExportMulti(wrap, cur, btnStyle, btnPrimary);
   }
 
   root.appendChild(wrap);
+}
+
+// Per-section include/exclude checkboxes for the Project Report. Stores the *deselected* ids in
+// state.ui.reportHiddenSections; toggling re-renders so the preview/download reflect the choice.
+function _renderReportSectionSelector(btnStyle) {
+  const hidden = new Set(state.ui.reportHiddenSections || []);
+  const setHidden = h => { state.ui.reportHiddenSections = [...h]; emit(); saveSoon(); };
+
+  const chips = REPORT_SECTIONS.map(sec => {
+    const on = !hidden.has(sec.id);
+    return el("label", {
+      style: {
+        display: "flex", alignItems: "center", gap: "5px", margin: 0,
+        fontSize: "11px", textTransform: "none", letterSpacing: 0,
+        padding: "3px 8px", borderRadius: "4px", cursor: "pointer",
+        background: on ? "var(--surface2)" : "transparent",
+        border: "1px solid " + (on ? "var(--border)" : "transparent"),
+        color: on ? "var(--text)" : "var(--text3)",
+      },
+    }, [
+      el("input", {
+        type: "checkbox", checked: on ? "" : null,
+        onchange: e => {
+          const h = new Set(state.ui.reportHiddenSections || []);
+          if (e.target.checked) h.delete(sec.id); else h.add(sec.id);
+          setHidden(h);
+        },
+      }),
+      sec.label,
+    ]);
+  });
+
+  const quick = (label, fn) => el("button", {
+    style: { ...btnStyle, padding: "3px 10px", fontSize: "11px" },
+    onclick: fn,
+  }, [label]);
+
+  return el("div", {
+    style: { display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap", marginBottom: "10px",
+             padding: "8px 10px", background: "var(--surface1)", border: "1px solid var(--border)", borderRadius: "6px" },
+  }, [
+    el("span", { style: { fontSize: "11px", color: "var(--text2)", fontWeight: 600, marginRight: "2px" } }, ["Sections:"]),
+    ...chips,
+    el("span", { style: { flex: 1 } }, []),
+    quick("All", () => setHidden(new Set())),
+    quick("None", () => setHidden(new Set(REPORT_SECTIONS.map(s => s.id)))),
+  ]);
 }
 
 function _renderExportSingle(wrap, t, btnStyle) {
@@ -15323,11 +16352,76 @@ function bindFindings() {
   }
 }
 
+//============ Resizable left/right panels ============
+// Drag the gutter at the tree↔canvas boundary to widen the tree (so long names fit), and the
+// gutter at canvas↔inspector boundary for the inspector. Sizes persist to localStorage; a
+// double-click on either gutter snaps that panel back to its default width.
+function setupPanelResizers() {
+  const root = document.documentElement;
+  const DEFAULT_TREE_W = 260;
+  const DEFAULT_INSP_W = 380;
+  const KEY_L = "vk8s.treeW";
+  const KEY_R = "vk8s.inspectorW";
+  const MIN = 180;
+  const minMargin = 360;  // keep the canvas at least this wide so the diagram stays usable
+
+  // Restore persisted sizes (clamped to a sane range for the current window).
+  const restore = (key, prop, def) => {
+    const stored = parseInt(localStorage.getItem(key));
+    const max = Math.max(MIN, window.innerWidth - minMargin - DEFAULT_INSP_W);
+    const v = Number.isFinite(stored) ? Math.min(Math.max(MIN, stored), max) : def;
+    root.style.setProperty(prop, v + "px");
+  };
+  restore(KEY_L, "--tree-w", DEFAULT_TREE_W);
+  restore(KEY_R, "--inspector-w", DEFAULT_INSP_W);
+
+  const wire = (gutter, prop, side, key, defaultW) => {
+    if (!gutter) return;
+    gutter.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      gutter.classList.add("dragging");
+      document.body.style.cursor = "col-resize";
+      const startX = e.clientX;
+      const startW = parseInt(getComputedStyle(root).getPropertyValue(prop));
+      const onMove = (ev) => {
+        // Left gutter grows the tree as the mouse moves right; right gutter grows the
+        // inspector as the mouse moves left. `side` encodes that direction.
+        const dx = (ev.clientX - startX) * (side === "left" ? 1 : -1);
+        // Cap against the live window width so the canvas can't be squeezed to nothing.
+        const otherW = parseInt(getComputedStyle(root).getPropertyValue(
+          side === "left" ? "--inspector-w" : "--tree-w"));
+        const max = Math.max(MIN, window.innerWidth - minMargin - (otherW || 0));
+        const next = Math.max(MIN, Math.min(max, startW + dx));
+        root.style.setProperty(prop, next + "px");
+      };
+      const onUp = () => {
+        gutter.classList.remove("dragging");
+        document.body.style.cursor = "";
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        const final = parseInt(getComputedStyle(root).getPropertyValue(prop));
+        if (Number.isFinite(final)) localStorage.setItem(key, String(final));
+      };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+    // Double-click resets this panel to its default.
+    gutter.addEventListener("dblclick", () => {
+      root.style.setProperty(prop, defaultW + "px");
+      localStorage.removeItem(key);
+    });
+  };
+  wire($("#gutterL"), "--tree-w",      "left",  KEY_L, DEFAULT_TREE_W);
+  wire($("#gutterR"), "--inspector-w", "right", KEY_R, DEFAULT_INSP_W);
+}
+
 //============ Init ============
 async function init() {
   // Bind chrome events
   bindSplash();
   bindFindings();
+  setupPanelResizers();
   $("#btnNewProject").addEventListener("click", () => {
     if (state.project && !confirm("현재 프로젝트를 닫고 새로 시작합니다. 계속?")) return;
     state.project = null;
