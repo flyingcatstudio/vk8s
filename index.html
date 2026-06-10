@@ -1087,7 +1087,7 @@
 //============================================================
 
 //============ Constants ============
-const SCHEMA_VERSION = "0.6";
+const SCHEMA_VERSION = "0.7";
 const STORAGE_KEY    = "vk8s.project.current";
 const CATALOG_FILES  = [
   "data/gpu-models.json",
@@ -1106,6 +1106,7 @@ const VIEWS = [
   { id: "depgraph",    name: "Dependency",   ready: true  },
   { id: "namespace",   name: "Namespace",    ready: true  },
   { id: "bottleneck",  name: "Bottleneck",   ready: true  },
+  { id: "checklist",   name: "Checklist",    ready: true  },
   { id: "export",      name: "Export",       ready: true  },
 ];
 
@@ -1357,6 +1358,12 @@ const HELP = {
     title: "Export — K8s YAML + Helm + Docker Compose + Capacity 리포트",
     body: "현재 프로젝트를 4가지 산출물로 변환: (1) K8s manifests (Namespace/ResourceQuota/NetworkPolicy/Deployment·StatefulSet/Service/Ingress/PVC), (2) Helm chart (워크로드별 Deployment/StatefulSet/Service template + values), (3) Docker Compose (단일 호스트용 best-effort 변환 — 워크로드→service, 내부 포트는 expose·외부 노출은 publish, depends_on/volume/리소스 매핑), (4) Capacity 리포트 (사이트별 U/kW 산정, GPU 플랜, 네트워크 플랜, 검증 요약).",
     reco: "K8s YAML은 kubectl apply -f 가능한 multi-doc 형식. Helm은 별도 chart 없이 바로 install 가능. Docker Compose는 Operator/HA/Ingress/오토스케일 등 k8s 고유 기능이 빠지는 단일 호스트 근사치(각 service 주석에 누락 항목 명시) — docker compose up -d 로 로컬 구동. Capacity 리포트는 발주서/제안서에 첨부 가능한 .md.",
+  },
+  "view.checklist": {
+    cat: "기타",
+    title: "Checklist — 서비스 오픈 준비 점검",
+    body: "현재 프로젝트 구성(클러스터·노드·워크로드·HA·애드온·네트워크·스토리지)을 읽어 서비스 오픈 전에 검증해야 할 운영 점검 항목을 자동 생성합니다. '전체(프로젝트 공통)'와 '클러스터별' 두 범위로 나뉘고, HA 장애 조치, CI/CD, 네트워크·보안, 스토리지·백업, 스케일링, 관측성, 인그레스, DR, 릴리즈 준비 그룹으로 묶입니다. 체크 상태와 메모는 프로젝트에 함께 저장(export·import에도 포함)됩니다.",
+    reco: "구성에서 도출된 항목(HA failover, anti-affinity, PVC, ingress TLS 등)은 'config' 배지가 붙고 ↗로 해당 대상으로 이동합니다. Findings(검증 오류/경고)는 '설정 오류'를 잡는 도구이고, 이 체크리스트는 '실제 동작 테스트' 절차 — 둘은 보완 관계입니다. '⬇ Markdown'으로 점검표를 내보내 오픈 리뷰/인수인계에 사용하세요.",
   },
 
   // ───── Namespace / NetworkPolicy ─────
@@ -2026,6 +2033,15 @@ function migrateProject(p) {
     if (!Array.isArray(p.site_links)) p.site_links = [];
     p.version = "0.6";
     console.log("Project migrated to v0.6");
+  }
+  if (p.version === "0.6") {
+    // 0.6 → 0.7: service-readiness Checklist state. Keyed map of { done, note } per check id.
+    // Items themselves are derived from config at render time; this only persists the user's
+    // tick/note state so it survives save/load/export round-trips.
+    if (!p.checklist || typeof p.checklist !== "object") p.checklist = {};
+    if (!Array.isArray(p.checklist_custom)) p.checklist_custom = [];
+    p.version = "0.7";
+    console.log("Project migrated to v0.7");
   }
   return p;
 }
@@ -13989,6 +14005,548 @@ function generateCapacityReport(p, hidden = []) {
   return lines.join("\n");
 }
 
+//============ Service Readiness Checklist ============
+// Derives an operational pre-launch checklist from the project config. Two scopes:
+//   - project-wide ("전체"): CI/CD, DR, release readiness
+//   - per-cluster: bootstrap, HA failover tests, network/security, storage/backup,
+//                  scaling, observability, ingress exposure
+// Item TICK/NOTE state is persisted in project.checklist keyed by a STABLE id (derived from
+// entity ids, not names) so it survives save/load/export. Items derived from config carry
+// `derived:true` (shown as a `config` badge) and an optional `ref` for jump-to-entity.
+//
+// This complements runValidator (which flags config *errors*): the checklist lists operational
+// *test tasks* ("kill the primary, verify the replica promotes"), not config mistakes.
+
+function _checklistState(p) {
+  if (!p.checklist || typeof p.checklist !== "object") p.checklist = {};
+  return p.checklist;
+}
+function getCheck(p, key) { return _checklistState(p)[key] || { done: false, note: "", text: "", hidden: false }; }
+function setCheck(p, key, patch) {
+  const s = _checklistState(p);
+  s[key] = { done: false, note: "", text: "", hidden: false, ...(s[key] || {}), ...patch };
+}
+const _ckItem = (key, text, extra = {}) => ({ key, text, ...extra });
+
+// Custom (user-added) checklist items. Stored as { key, scopePrefix, groupId }; their text and
+// done/note state live in project.checklist[key] like any other item. ALWAYS access via _ckCustom
+// (lazy-init): projects saved at 0.7 before this feature have no checklist_custom array.
+function _ckCustom(p) { if (!Array.isArray(p.checklist_custom)) p.checklist_custom = []; return p.checklist_custom; }
+function addCustomCheck(p, scopePrefix, groupId, text = "") {
+  const key = `chk:custom:${scopePrefix}:${groupId}:${uid()}`;
+  _ckCustom(p).push({ key, scopePrefix, groupId });
+  setCheck(p, key, { text });
+  return key;
+}
+function removeCustomCheck(p, key) {
+  p.checklist_custom = _ckCustom(p).filter(c => c.key !== key);
+  delete _checklistState(p)[key];
+}
+
+const CHECKLIST_CLUSTER_GROUPS = [
+  {
+    id: "bootstrap", label: "클러스터 부트스트랩", icon: "⚙️",
+    emit: ({ c, cpNodes, workerNodes }) => {
+      const items = []; const K = s => `chk:c:${c.id}:bootstrap:${s}`;
+      items.push(_ckItem(K("nodes-ready"), "kubectl get nodes — 모든 노드 Ready 상태 확인"));
+      if (cpNodes.length) items.push(_ckItem(K("cp-present"), `control-plane(${cpNodes.length}) — apiserver/scheduler/controller-manager 정상 확인`, { derived: true }));
+      if (!workerNodes.length) items.push(_ckItem(K("no-worker"), "⚠ worker 노드 없음 — 워크로드 스케줄 가능한 노드 확보 확인", { derived: true }));
+      const a = c.addons || {};
+      if (c.k8s_version) items.push(_ckItem(K("k8s-ver"), `k8s 버전 ${c.k8s_version} 설치 확인`, { derived: true }));
+      if (a.cni && a.cni !== "None") items.push(_ckItem(K("cni"), `CNI(${a.cni}) — 노드 간 파드 네트워크 통신 확인`, { derived: true }));
+      items.push(_ckItem(K("coredns"), "CoreDNS — 클러스터 내 서비스 DNS resolution 확인"));
+      if (a.ingress && a.ingress !== "None") items.push(_ckItem(K("ingress-ctrl"), `${a.ingress} Ingress 컨트롤러 파드 Running 확인`, { derived: true }));
+      if (a.metrics_server) items.push(_ckItem(K("metrics"), "metrics-server — kubectl top nodes/pods 동작 확인", { derived: true }));
+      if (Array.isArray(a.csi) && a.csi.length) items.push(_ckItem(K("csi"), `CSI 드라이버(${a.csi.join(", ")}) 설치 & StorageClass 확인`, { derived: true }));
+      if (a.gpu_operator) items.push(_ckItem(K("gpu-op"), "GPU Operator — device plugin / nvidia-smi 정상 확인", { derived: true }));
+      if (a.service_mesh && a.service_mesh !== "None") items.push(_ckItem(K("mesh"), `${a.service_mesh} 서비스 메시 — 사이드카 주입 & mTLS 확인`, { derived: true }));
+      if (a.local_pv && a.local_pv !== "None") items.push(_ckItem(K("localpv"), `${a.local_pv} 로컬 PV 프로비저너 동작 확인`, { derived: true }));
+      return items;
+    },
+  },
+  {
+    id: "ha", label: "HA 구성 / 장애 조치 테스트", icon: "🔁",
+    emit: ({ c, cpNodes, workerNodes, workloads }) => {
+      const items = []; const K = s => `chk:c:${c.id}:ha:${s}`;
+      if (c.ha_control_plane) {
+        const ok = cpNodes.length >= 3 && cpNodes.length % 2 === 1;
+        items.push(_ckItem(K("cp-count"), `control-plane ${cpNodes.length}대 — etcd 쿼럼 위해 홀수 ≥3${ok ? "" : " (권장 미달)"} 확인`, { derived: true }));
+        items.push(_ckItem(K("cp-kill"), "control-plane 1대 강제 종료 시 API 서버·스케줄링 계속 동작 확인"));
+        items.push(_ckItem(K("etcd-health"), "etcdctl endpoint health — 멤버 전원 healthy & 쿼럼 유지 확인"));
+      }
+      let hadHa = false;
+      for (const w of workloads) {
+        const ha = w.ha || {}; const mode = ha.mode || "none";
+        const aa = w.scheduling?.anti_affinity || "none";
+        const WK = s => `chk:c:${c.id}:ha:wl:${w.id}:${s}`;
+        const ref = { kind: "workload", id: w.id };
+        if (mode === "primary-replica") {
+          hadHa = true;
+          items.push(_ckItem(WK("failover"), `${w.name}: primary 강제 종료 시 replica 자동 승격(failover) 확인`, { derived: true, ref }));
+          items.push(_ckItem(WK("replag"), `${w.name}: replication lag 정상 & failover 후 데이터 정합성 확인`, { derived: true, ref }));
+        } else if (mode === "sentinel") {
+          hadHa = true;
+          items.push(_ckItem(WK("sentinel"), `${w.name}: Sentinel 쿼럼(${ha.quorum_count ?? "?"})으로 primary 장애 감지 & failover 확인`, { derived: true, ref }));
+          items.push(_ckItem(WK("split"), `${w.name}: failover 중 split-brain 없이 단일 primary 유지 확인`, { derived: true, ref }));
+        } else if (mode === "sharded-cluster") {
+          hadHa = true;
+          items.push(_ckItem(WK("shard"), `${w.name}: shard(${ha.primaries ?? "?"}) 1개 primary 장애 시 replica 승격 & 슬롯 재분배 확인`, { derived: true, ref }));
+        }
+        if (mode !== "none") {
+          if (ha.operator) items.push(_ckItem(WK("operator"), `${w.name}: ${ha.operator} operator가 failover 자동 관리 확인`, { derived: true, ref }));
+          if (aa === "none") items.push(_ckItem(WK("aa-missing"), `${w.name}: HA인데 anti-affinity 미설정 — 파드 노드 분산 수동 확인`, { derived: true, ref }));
+          else items.push(_ckItem(WK("aa"), `${w.name}: 파드가 서로 다른 ${aa === "spread-by-zone" ? "zone" : "노드"}에 분산 배치 확인`, { derived: true, ref }));
+        }
+      }
+      const rolling = workloads.some(w => (w.replicas ?? 1) >= 2 && ["API", "WAS", "Frontend"].includes(w.category));
+      if (rolling) items.push(_ckItem(K("rolling"), "Deployment 파드 강제 삭제 시 자동 재생성 & 무중단(rolling) 확인"));
+      if (hadHa || rolling) items.push(_ckItem(K("pdb"), "주요 워크로드 PodDisruptionBudget — 노드 drain 시 최소 가용 파드 유지 확인"));
+      if (workerNodes.length >= 2) items.push(_ckItem(K("drain"), "워커 노드 1대 cordon+drain 시 파드 재스케줄 & 서비스 유지 확인"));
+      return items;
+    },
+  },
+  {
+    id: "netsec", label: "네트워크 & 보안", icon: "🔒",
+    emit: ({ c }) => {
+      const items = []; const K = s => `chk:c:${c.id}:netsec:${s}`;
+      items.push(_ckItem(K("cidr"), "Pod / Service / Node CIDR 충돌 없음 & 라우팅 정상 확인"));
+      for (const ns of (c.namespaces || []).filter(n => n.default_deny))
+        items.push(_ckItem(K("deny-" + ns.name), `${ns.name}: default-deny NetworkPolicy — 미허용 트래픽 차단 확인`, { derived: true }));
+      if ((c.network_policies || []).length) items.push(_ckItem(K("np"), `NetworkPolicy(${c.network_policies.length}건) 규칙대로 namespace 간 통신 제어 확인`, { derived: true }));
+      for (const r of (c.ingress_rules || []).filter(r => r.tls))
+        items.push(_ckItem(K("tls-" + r.id), `${r.host || r.name || r.id}: TLS 인증서 유효 & HTTPS 정상 (만료일 확인)`, { derived: true }));
+      items.push(_ckItem(K("rbac"), "ServiceAccount / RBAC 최소 권한 부여 확인"));
+      items.push(_ckItem(K("secret"), "Secret — etcd 암호화 또는 외부 secret store 연동 확인"));
+      return items;
+    },
+  },
+  {
+    id: "storage", label: "스토리지 & 백업", icon: "💾",
+    emit: ({ c, workloads }) => {
+      const items = []; const K = s => `chk:c:${c.id}:storage:${s}`;
+      const pvWls = workloads.filter(w => (w.persistent_volumes || []).length);
+      for (const w of pvWls) {
+        const WK = s => `chk:c:${c.id}:storage:wl:${w.id}:${s}`;
+        const pvs = w.persistent_volumes || []; const ref = { kind: "workload", id: w.id };
+        items.push(_ckItem(WK("bound"), `${w.name}: PVC(${pvs.length}개) Bound & 파드 재시작 후 데이터 유지 확인`, { derived: true, ref }));
+        if (pvs.some(v => v.access_mode === "RWX")) items.push(_ckItem(WK("rwx"), `${w.name}: RWX 볼륨 다중 파드 동시 마운트 확인`, { derived: true, ref }));
+        if ((w.ha?.mode && w.ha.mode !== "none") || w.category === "DB") items.push(_ckItem(WK("backup"), `${w.name}: 백업 스케줄 동작 & 복원(restore) 리허설 확인`, { derived: true, ref }));
+      }
+      if (pvWls.length) {
+        items.push(_ckItem(K("sc-default"), "기본 StorageClass 지정 & 동적 프로비저닝 확인"));
+        items.push(_ckItem(K("snapshot"), "VolumeSnapshot / 스냅샷 정책 동작 확인"));
+      }
+      return items;
+    },
+  },
+  {
+    id: "scaling", label: "용량 & 오토스케일링", icon: "📈",
+    emit: ({ c, workloads }) => {
+      const items = []; const K = s => `chk:c:${c.id}:scaling:${s}`;
+      for (const w of workloads) {
+        const WK = s => `chk:c:${c.id}:scaling:wl:${w.id}:${s}`; const ref = { kind: "workload", id: w.id };
+        if (w.hpa && (w.hpa.min || w.hpa.max)) items.push(_ckItem(WK("hpa"), `${w.name}: HPA(${w.hpa.min ?? "?"}~${w.hpa.max ?? "?"}) 부하 시 scale-up & 해소 시 scale-down 확인`, { derived: true, ref }));
+        else if (w.replicas_max && w.replicas_max > (w.replicas ?? 1)) items.push(_ckItem(WK("burst"), `${w.name}: 버스트 스케일 ${w.replicas ?? 1}→${w.replicas_max} 정상 확인`, { derived: true, ref }));
+      }
+      for (const ns of (c.namespaces || []).filter(n => n.resource_quota && Object.keys(n.resource_quota).length))
+        items.push(_ckItem(K("quota-" + ns.name), `${ns.name}: ResourceQuota 한도 초과 시 파드 생성 거부 확인`, { derived: true }));
+      items.push(_ckItem(K("headroom"), "워커 노드 CPU/Mem 여유 — 피크 부하 수용 가능 확인"));
+      return items;
+    },
+  },
+  {
+    id: "obs", label: "관측성 (모니터링·로깅)", icon: "📊",
+    emit: ({ c, workloads }) => {
+      const items = []; const K = s => `chk:c:${c.id}:obs:${s}`;
+      const nsAll = new Set([...(c.namespaces || []).map(n => n.name), ...workloads.map(w => w.namespace)]);
+      if (nsAll.has("monitoring") || workloads.some(w => /prometheus|grafana/i.test(w.name)))
+        items.push(_ckItem(K("metrics"), "Prometheus 메트릭 수집 & Grafana 대시보드 정상 확인", { derived: true }));
+      if (nsAll.has("logging") || workloads.some(w => /loki|fluent|elasticsearch|logstash/i.test(w.name)))
+        items.push(_ckItem(K("logs"), "로그 수집(Loki/EFK) — 파드 로그 중앙 집계 확인", { derived: true }));
+      items.push(_ckItem(K("probes"), "워크로드 liveness / readiness probe 설정 & 동작 확인"));
+      items.push(_ckItem(K("alerts"), "핵심 SLI 알람(에러율·지연·포화도) 설정 & 발화 테스트"));
+      return items;
+    },
+  },
+  {
+    id: "ingress", label: "인그레스 & 외부 노출", icon: "🌐",
+    emit: ({ c, p, workloads }) => {
+      const items = []; const K = s => `chk:c:${c.id}:ingress:${s}`;
+      for (const r of (c.ingress_rules || []))
+        items.push(_ckItem(K("rule-" + r.id), `${r.host || r.name || r.id}: 외부에서 Ingress 라우팅 정상 도달 확인`, { derived: true }));
+      for (const w of workloads) {
+        const st = w.network?.service?.type; const WK = s => `chk:c:${c.id}:ingress:wl:${w.id}:${s}`; const ref = { kind: "workload", id: w.id };
+        if (st === "LoadBalancer") items.push(_ckItem(WK("lb"), `${w.name}: LoadBalancer 외부 IP 할당 & 접근 확인`, { derived: true, ref }));
+        else if (st === "NodePort") items.push(_ckItem(WK("np"), `${w.name}: NodePort 접근 확인`, { derived: true, ref }));
+      }
+      for (const l4 of (p.sites || []).flatMap(s => s.l4_balancers || []).filter(l => (l.target_cluster_ids || []).includes(c.id)))
+        items.push(_ckItem(K("l4-" + l4.id), `L4(${l4.name}${l4.vip ? " · " + l4.vip : ""}) → 클러스터 트래픽 분산 정상 확인`, { derived: true }));
+      if ((c.ingress_rules || []).length) items.push(_ckItem(K("dns"), "외부 DNS 레코드 → Ingress / LB 매핑 확인"));
+      return items;
+    },
+  },
+];
+
+const CHECKLIST_PROJECT_GROUPS = [
+  {
+    id: "cicd", label: "CI/CD & 배포 파이프라인", icon: "🚀",
+    emit: ({ allWorkloads, sites }) => {
+      const items = []; const K = s => `chk:p:cicd:${s}`;
+      items.push(_ckItem(K("trigger"), "소스 커밋 → CI 파이프라인 자동 트리거 확인"));
+      items.push(_ckItem(K("build-test"), "빌드 & 단위/통합 테스트 통과 확인"));
+      items.push(_ckItem(K("image"), "컨테이너 이미지 빌드 & immutable 태깅 확인"));
+      const regs = sites.flatMap(s => (s.external_services || []).filter(e => e.kind === "registry"));
+      if (regs.length) items.push(_ckItem(K("registry"), `이미지 레지스트리(${regs.map(r => r.name).join(", ")}) push & 클러스터 pull 확인`, { derived: true }));
+      else items.push(_ckItem(K("registry"), "컨테이너 레지스트리 push & 클러스터 pull(imagePullSecret 포함) 확인"));
+      items.push(_ckItem(K("scan"), "이미지 취약점 스캔(Trivy 등) 통과 확인"));
+      items.push(_ckItem(K("deploy"), "매니페스트 / Helm 차트 배포(kubectl apply · helm upgrade) 확인"));
+      items.push(_ckItem(K("promote"), "스테이징 → 프로덕션 승급(promotion) 절차 확인"));
+      items.push(_ckItem(K("rollback"), "롤백(이전 버전 재배포) 절차 확인"));
+      if (allWorkloads.some(w => w.category === "DB")) items.push(_ckItem(K("migration"), "DB 스키마 마이그레이션 전/후 호환성 확인", { derived: true }));
+      items.push(_ckItem(K("smoke"), "배포 후 smoke test 자동 실행 & 게이트 확인"));
+      return items;
+    },
+  },
+  {
+    id: "dr", label: "멀티 클러스터 / DR", icon: "🛟",
+    emit: ({ p, clusters, sites }) => {
+      const items = []; const K = s => `chk:p:dr:${s}`;
+      if (clusters.length > 1) items.push(_ckItem(K("cross"), `클러스터(${clusters.length}개) 간 워크로드 의존성 연결 확인`, { derived: true }));
+      if ((p.site_links || []).length) items.push(_ckItem(K("links"), `사이트 간 네트워크 링크(${p.site_links.length}개) 연결 & 대역폭 확인`, { derived: true }));
+      for (const c of clusters.filter(c => /dr|disaster|standby/i.test(c.environment_tag || "")))
+        items.push(_ckItem(K("failover-" + c.id), `DR 클러스터(${c.name})로 트래픽 전환(failover) 리허설 & 데이터 복제 동기화 확인`, { derived: true, ref: { kind: "cluster", id: c.id } }));
+      const managed = sites.flatMap(s => (s.external_services || []).filter(e => ["database", "cache", "queue", "object_store", "backup"].includes(e.kind)));
+      if (managed.length) items.push(_ckItem(K("ext"), `외부 관리형 서비스(${managed.map(m => m.name).join(", ")}) 연결 & 자격증명 확인`, { derived: true }));
+      items.push(_ckItem(K("rto"), "RTO / RPO 목표 대비 복구 시간 측정 & 충족 확인"));
+      return items;
+    },
+  },
+  {
+    id: "release", label: "릴리즈 준비 / 운영", icon: "✅",
+    emit: ({ p }) => {
+      const items = []; const K = s => `chk:p:release:${s}`;
+      items.push(_ckItem(K("runbook"), "런북 & 장애 대응 절차 문서화 확인"));
+      items.push(_ckItem(K("oncall"), "온콜 담당 & 알림 채널 구성 확인"));
+      items.push(_ckItem(K("loadtest"), "부하 테스트(목표 RPS) 수행 & SLO 충족 확인"));
+      items.push(_ckItem(K("security"), "보안 점검(취약점·시크릿 노출) 통과 확인"));
+      const f = runValidator(p);
+      const errs = f.filter(x => x.sev === "error").length, warns = f.filter(x => x.sev === "warn").length;
+      items.push(_ckItem(K("findings"), `vk8s Findings 해소 — 현재 error ${errs} · warn ${warns}건`, { derived: true }));
+      items.push(_ckItem(K("gono"), "최종 Go / No-Go 의사결정 완료"));
+      return items;
+    },
+  },
+];
+
+// Merge derived items with user customisations: append custom items, drop hidden ones, apply
+// text overrides. Returns { id,label,icon,scopePrefix, items, hiddenItems }. Edit/delete/Markdown/
+// Excel all consume this, so they automatically reflect overrides/deletions/custom items.
+function _ckAssembleGroup(p, scopePrefix, base, derivedItems) {
+  const customs = _ckCustom(p)
+    .filter(c => c.scopePrefix === scopePrefix && c.groupId === base.id)
+    .map(c => ({ key: c.key, text: getCheck(p, c.key).text || "", custom: true }));
+  const resolve = i => {
+    const st = getCheck(p, i.key);
+    const override = st.text && st.text.length ? st.text : null;
+    return { ...i, baseText: i.text, text: override != null ? override : i.text, edited: !i.custom && override != null };
+  };
+  const items = [], hiddenItems = [];
+  for (const i of [...derivedItems, ...customs]) {
+    (getCheck(p, i.key).hidden ? hiddenItems : items).push(resolve(i));
+  }
+  return { id: base.id, label: base.label, icon: base.icon, scopePrefix, items, hiddenItems };
+}
+
+function _buildChecklist(p) {
+  const sites = p.sites || [];
+  const clusters = p.clusters || [];
+  const allWorkloads = clusters.flatMap(c => c.workloads || []);
+  const keep = g => g.items.length || g.hiddenItems.length;
+  const projectGroups = CHECKLIST_PROJECT_GROUPS
+    .map(g => _ckAssembleGroup(p, "p", g, g.emit({ p, clusters, allWorkloads, sites })))
+    .filter(keep);
+  const clusterBlocks = clusters.map(c => {
+    const nodes = (c.node_ids || []).map(id => (p.nodes || []).find(n => n.id === id)).filter(Boolean);
+    const hasRole = (n, r) => Array.isArray(n.cluster_roles) && n.cluster_roles.includes(r);
+    const ctx = {
+      p, c, nodes,
+      cpNodes: nodes.filter(n => hasRole(n, "control-plane")),
+      workerNodes: nodes.filter(n => hasRole(n, "worker")),
+      workloads: c.workloads || [],
+    };
+    const groups = CHECKLIST_CLUSTER_GROUPS
+      .map(g => _ckAssembleGroup(p, "c:" + c.id, g, g.emit(ctx)))
+      .filter(keep);
+    return { cluster: c, groups };
+  });
+  const hiddenCount = [...projectGroups, ...clusterBlocks.flatMap(b => b.groups)]
+    .reduce((n, g) => n + g.hiddenItems.length, 0);
+  return { projectGroups, clusterBlocks, hiddenCount };
+}
+function _checklistProgress(p, items) {
+  let done = 0;
+  for (const i of items) if (getCheck(p, i.key).done) done++;
+  return { done, total: items.length };
+}
+
+function _checklistMarkdown(p) {
+  const { projectGroups, clusterBlocks } = _buildChecklist(p);
+  const L = [`# ${p.name} — 서비스 준비 체크리스트`, "", `**Generated:** ${_todayStamp()}`];
+  const all = [...projectGroups.flatMap(g => g.items), ...clusterBlocks.flatMap(b => b.groups.flatMap(g => g.items))];
+  const op = _checklistProgress(p, all);
+  L.push(`**진행률:** ${op.done}/${op.total} (${op.total ? Math.round(op.done / op.total * 100) : 0}%)`, "");
+  const emitGroup = g => {
+    const prog = _checklistProgress(p, g.items);
+    L.push(`### ${g.icon || ""} ${g.label}  (${prog.done}/${prog.total})`.trim(), "");
+    for (const i of g.items) {
+      const st = getCheck(p, i.key);
+      const note = st.note ? `  — _${String(st.note).replace(/\n/g, " ")}_` : "";
+      L.push(`- [${st.done ? "x" : " "}] ${i.text}${i.derived ? " `config`" : ""}${note}`);
+    }
+    L.push("");
+  };
+  if (projectGroups.length) { L.push("## 전체 (프로젝트 공통)", ""); projectGroups.forEach(emitGroup); }
+  for (const b of clusterBlocks) {
+    L.push(`## 클러스터: ${b.cluster.name}${b.cluster.environment_tag ? ` (${b.cluster.environment_tag})` : ""}`, "");
+    b.groups.forEach(emitGroup);
+  }
+  L.push("---", `_Generated by vk8s · schema v${SCHEMA_VERSION}_`);
+  return L.join("\n");
+}
+
+// Flat row list for tabular export (Excel). Consumes _buildChecklist so edits/deletions/custom
+// items are already applied. One row per visible item; hidden items excluded.
+function _checklistRows(p) {
+  const { projectGroups, clusterBlocks } = _buildChecklist(p);
+  const rows = [];
+  const push = (scope, g) => {
+    for (const i of g.items) {
+      const st = getCheck(p, i.key);
+      rows.push([scope, g.label, i.text,
+        i.custom ? "직접추가" : i.derived ? "구성도출" : "표준",
+        st.done ? "완료" : "", st.note || ""]);
+    }
+  };
+  for (const g of projectGroups) push("전체", g);
+  for (const b of clusterBlocks) for (const g of b.groups)
+    push(`${b.cluster.name}${b.cluster.environment_tag ? ` (${b.cluster.environment_tag})` : ""}`, g);
+  return rows;
+}
+
+// Minimal valid OOXML .xlsx (single sheet, inline strings, bold/frozen header). Built on the
+// existing _zipStore (STORE method — valid for xlsx). Validated to open in openpyxl/Excel.
+const _xmlEsc = s => String(s == null ? "" : s).replace(/[\r\n]+/g, " ")
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+function _colLetter(n) { let s = ""; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = (n - m - 1) / 26; } return s; }
+function _checklistXlsx(p) {
+  const headers = ["범위", "그룹", "점검 항목", "유형", "완료", "메모"];
+  const rows = _checklistRows(p);
+  const cell = (col, rowNum, val, style) =>
+    `<c r="${_colLetter(col)}${rowNum}" t="inlineStr"${style != null ? ` s="${style}"` : ""}><is><t xml:space="preserve">${_xmlEsc(val)}</t></is></c>`;
+  const xmlRows = [`<row r="1">${headers.map((h, i) => cell(i + 1, 1, h, 1)).join("")}</row>`];
+  rows.forEach((r, idx) => { const rn = idx + 2; xmlRows.push(`<row r="${rn}">${r.map((v, i) => cell(i + 1, rn, v)).join("")}</row>`); });
+  const lastRef = `${_colLetter(headers.length)}${rows.length + 1}`;
+  const sheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:${lastRef}"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft"/></sheetView></sheetViews><cols><col min="1" max="1" width="22"/><col min="2" max="2" width="24"/><col min="3" max="3" width="72"/><col min="4" max="4" width="12"/><col min="5" max="5" width="8"/><col min="6" max="6" width="34"/></cols><sheetData>${xmlRows.join("")}</sheetData></worksheet>`;
+  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`;
+  const rels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`;
+  const workbook = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Checklist" sheetId="1" r:id="rId1"/></sheets></workbook>`;
+  const wbRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`;
+  const styles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE8EEF7"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment vertical="center"/></xf></cellXfs></styleSheet>`;
+  return _zipStore([
+    { path: "[Content_Types].xml", content: contentTypes },
+    { path: "_rels/.rels", content: rels },
+    { path: "xl/workbook.xml", content: workbook },
+    { path: "xl/_rels/workbook.xml.rels", content: wbRels },
+    { path: "xl/styles.xml", content: styles },
+    { path: "xl/worksheets/sheet1.xml", content: sheet },
+  ]);
+}
+
+function _checklistBar(label, prog, big) {
+  const pct = prog.total ? Math.round(prog.done / prog.total * 100) : 0;
+  const color = pct === 100 ? "var(--green)" : pct > 0 ? "var(--accent)" : "var(--border2)";
+  return el("div", { style: { margin: big ? "4px 0 18px" : "0" } }, [
+    el("div", { style: { display: "flex", justifyContent: "space-between", fontSize: big ? "12px" : "11px", color: "var(--text2)", marginBottom: "4px" } }, [
+      el("span", { style: { fontWeight: big ? 600 : 400 } }, [label]),
+      el("span", { style: { fontFamily: "JetBrains Mono" } }, [`${prog.done}/${prog.total} · ${pct}%`]),
+    ]),
+    el("div", { style: { height: big ? "8px" : "5px", background: "var(--surface2)", borderRadius: "4px", overflow: "hidden" } }, [
+      el("div", { style: { width: pct + "%", height: "100%", background: color, transition: "width .2s" } }, []),
+    ]),
+  ]);
+}
+
+function _checklistScopeHeader(title, prog, ref) {
+  const pct = prog.total ? Math.round(prog.done / prog.total * 100) : 0;
+  return el("div", { style: { display: "flex", alignItems: "center", gap: "10px", margin: "24px 0 10px", paddingBottom: "6px", borderBottom: "2px solid var(--border)" } }, [
+    el("span", { style: { fontSize: "14px", fontWeight: 700 } }, [title]),
+    ref ? el("span", { style: { cursor: "pointer", color: "var(--accent)", fontSize: "12px" }, title: "대상으로 이동", onclick: () => selectEntity(ref.kind, ref.id) }, ["↗"]) : null,
+    el("span", { style: { flex: 1 } }, []),
+    el("span", { style: { fontFamily: "JetBrains Mono", fontSize: "12px", color: pct === 100 ? "var(--green)" : "var(--text2)" } }, [`${prog.done}/${prog.total} · ${pct}%`]),
+  ]);
+}
+
+const _ckCtrl = { cursor: "pointer", flexShrink: 0, fontSize: "12px", color: "var(--text3)", padding: "0 2px", userSelect: "none" };
+
+// Render one hidden (soft-deleted derived) item as a restore row.
+function _checklistHiddenRow(p, item) {
+  return el("div", { style: { display: "flex", alignItems: "center", gap: "10px", padding: "6px 14px", borderBottom: "1px solid var(--border)", background: "rgba(127,127,127,.04)" } }, [
+    el("span", { style: { flex: 1, minWidth: 0, fontSize: "12px", color: "var(--text3)", textDecoration: "line-through" } }, [item.text]),
+    el("span", { style: { ...(_ckCtrl), color: "var(--accent)" }, title: "복원", onclick: () => { setCheck(p, item.key, { hidden: false }); emit(); saveSoon(); } }, ["↩ 복원"]),
+  ]);
+}
+
+function _checklistItemRow(p, item) {
+  const st = getCheck(p, item.key);
+  const editing = state.ui.checklistEditingKey === item.key;
+  const cb = el("input", { type: "checkbox", style: { marginTop: "2px", cursor: "pointer", width: "15px", height: "15px", flexShrink: 0 } });
+  cb.checked = !!st.done;
+  cb.addEventListener("change", () => { setCheck(p, item.key, { done: cb.checked }); emit(); saveSoon(); });
+
+  if (editing) {
+    const input = el("input", {
+      type: "text", value: item.text, placeholder: "점검 항목 입력…", "data-focus-key": "chkedit:" + item.key,
+      style: { flex: 1, minWidth: 0, background: "var(--surface2)", border: "1px solid var(--accent)", borderRadius: "4px", padding: "4px 8px", fontSize: "12.5px", color: "var(--text)", fontFamily: "inherit" },
+    });
+    const commit = () => {
+      const v = input.value.trim();
+      if (item.custom && !v) removeCustomCheck(p, item.key);
+      else setCheck(p, item.key, { text: v });
+      state.ui.checklistEditingKey = null; emit(); saveSoon();
+    };
+    const cancel = () => {
+      if (item.custom && !(getCheck(p, item.key).text || "").trim()) removeCustomCheck(p, item.key);
+      state.ui.checklistEditingKey = null; emit();
+    };
+    input.addEventListener("keydown", e => {
+      if (e.key === "Enter") { e.preventDefault(); commit(); }
+      else if (e.key === "Escape") { e.preventDefault(); cancel(); }
+    });
+    setTimeout(() => { const t = input; if (t && document.activeElement !== t) { t.focus(); t.setSelectionRange(t.value.length, t.value.length); } }, 0);
+    const mid = el("div", { style: { flex: 1, display: "flex", gap: "8px", alignItems: "center", minWidth: 0 } }, [input]);
+    if (item.edited) mid.appendChild(el("span", { style: { ..._ckCtrl, color: "var(--text2)" }, title: "기본값으로", onclick: () => { input.value = item.baseText; input.focus(); } }, ["↺"]));
+    mid.appendChild(el("span", { style: { ..._ckCtrl, color: "var(--green)" }, onclick: commit }, ["저장"]));
+    mid.appendChild(el("span", { style: _ckCtrl, onclick: cancel }, ["취소"]));
+    return el("div", { style: { display: "flex", alignItems: "center", gap: "10px", padding: "8px 14px", borderBottom: "1px solid var(--border)" } }, [cb, mid]);
+  }
+
+  const text = el("div", { style: { flex: 1, minWidth: 0 } }, [
+    el("span", { style: { fontSize: "12.5px", lineHeight: "1.5", color: st.done ? "var(--text3)" : "var(--text)", textDecoration: st.done ? "line-through" : "none" } }, [item.text]),
+    item.derived ? el("span", { style: { marginLeft: "6px", fontSize: "9px", padding: "1px 5px", borderRadius: "3px", background: "var(--surface2)", color: "var(--accent)", border: "1px solid var(--border)" } }, ["config"]) : null,
+    item.custom ? el("span", { style: { marginLeft: "6px", fontSize: "9px", padding: "1px 5px", borderRadius: "3px", background: "var(--surface2)", color: "var(--yellow)", border: "1px solid var(--border)" } }, ["직접추가"]) : null,
+    item.edited ? el("span", { style: { marginLeft: "6px", fontSize: "9px", color: "var(--text3)", fontStyle: "italic" }, title: "기본값에서 수정됨" }, ["✎수정됨"]) : null,
+    item.ref ? el("span", { style: { marginLeft: "6px", cursor: "pointer", color: "var(--accent)", fontSize: "11px" }, title: "대상으로 이동", onclick: () => selectEntity(item.ref.kind, item.ref.id) }, ["↗"]) : null,
+  ]);
+  const note = el("input", {
+    type: "text", placeholder: "메모…", value: st.note || "", "data-focus-key": "chknote:" + item.key,
+    style: { width: "150px", flexShrink: 0, background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: "4px", padding: "3px 7px", fontSize: "11px", color: "var(--text)", fontFamily: "inherit" },
+  });
+  note.addEventListener("input", () => { setCheck(p, item.key, { note: note.value }); saveSoon(); });
+  const editBtn = el("span", { style: _ckCtrl, title: "수정", onclick: () => { state.ui.checklistEditingKey = item.key; emit(); } }, ["✎"]);
+  const delBtn = el("span", { style: _ckCtrl, title: item.custom ? "삭제" : "숨기기 (복원 가능)", onclick: () => {
+    if (item.custom) { if (!confirm("이 항목을 삭제할까요?")) return; removeCustomCheck(p, item.key); }
+    else setCheck(p, item.key, { hidden: true });
+    if (state.ui.checklistEditingKey === item.key) state.ui.checklistEditingKey = null;
+    emit(); saveSoon();
+  } }, [item.custom ? "🗑" : "✕"]);
+  return el("div", { style: { display: "flex", alignItems: "flex-start", gap: "8px", padding: "8px 14px", borderBottom: "1px solid var(--border)" } }, [cb, text, note, editBtn, delBtn]);
+}
+
+function _checklistGroupCard(p, scopePrefix, g, opts) {
+  const { hideComplete, showHidden } = opts;
+  const collapseKey = scopePrefix + ":" + g.id;
+  const collapsed = !!state.ui.checklistCollapsed[collapseKey];
+  const prog = _checklistProgress(p, g.items);
+  const all = prog.total > 0 && prog.done === prog.total;
+  const card = el("div", { style: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "8px", marginBottom: "8px", overflow: "hidden" } });
+  card.appendChild(el("div", {
+    style: { display: "flex", alignItems: "center", gap: "8px", padding: "10px 12px", cursor: "pointer", background: all ? "rgba(46,160,67,.06)" : "transparent" },
+    onclick: () => { state.ui.checklistCollapsed[collapseKey] = !collapsed; emit(); },
+  }, [
+    el("span", { style: { fontSize: "11px", color: "var(--text3)", width: "12px" } }, [collapsed ? "▸" : "▾"]),
+    el("span", {}, [g.icon || "•"]),
+    el("span", { style: { fontWeight: 600, fontSize: "13px" } }, [g.label]),
+    el("span", { style: { flex: 1 } }, []),
+    g.hiddenItems.length ? el("span", { style: { fontSize: "10px", color: "var(--text3)" }, title: "숨긴 항목" }, [`숨김 ${g.hiddenItems.length}`]) : null,
+    all ? el("span", { style: { color: "var(--green)", fontSize: "12px" } }, ["✓ 완료"]) : null,
+    el("span", { style: { fontFamily: "JetBrains Mono", fontSize: "11px", color: "var(--text3)" } }, [`${prog.done}/${prog.total}`]),
+  ]));
+  if (!collapsed) {
+    const body = el("div", { style: { borderTop: "1px solid var(--border)" } });
+    const visible = hideComplete ? g.items.filter(i => !getCheck(p, i.key).done) : g.items;
+    for (const item of visible) body.appendChild(_checklistItemRow(p, item));
+    if (!visible.length) body.appendChild(el("div", { style: { padding: "10px 14px", fontSize: "12px", color: "var(--text3)" } }, [
+      g.items.length ? "완료된 항목 숨김 — 남은 항목 없음" : "항목 없음 — 아래에서 추가하거나 숨긴 항목을 복원하세요",
+    ]));
+    if (showHidden) for (const item of g.hiddenItems) body.appendChild(_checklistHiddenRow(p, item));
+    // Add custom item
+    body.appendChild(el("div", { style: { padding: "6px 14px" } }, [
+      el("span", {
+        style: { cursor: "pointer", fontSize: "11px", color: "var(--accent)", userSelect: "none" },
+        onclick: () => { const key = addCustomCheck(p, scopePrefix, g.id, ""); state.ui.checklistEditingKey = key; emit(); saveSoon(); },
+      }, ["＋ 항목 추가"]),
+    ]));
+    card.appendChild(body);
+  }
+  return card;
+}
+
+function renderChecklist() {
+  const root = $("#viewBody");
+  root.innerHTML = "";
+  const p = state.project;
+  if (!p) return;
+  if (!state.ui.checklistCollapsed) state.ui.checklistCollapsed = {};
+  const hideComplete = !!state.ui.checklistHideComplete;
+  const showHidden = !!state.ui.checklistShowHidden;
+  const opts = { hideComplete, showHidden };
+  const { projectGroups, clusterBlocks, hiddenCount } = _buildChecklist(p);
+  const allItems = [...projectGroups.flatMap(g => g.items), ...clusterBlocks.flatMap(b => b.groups.flatMap(g => g.items))];
+  const fbase = `${slug(p.name) || "vk8s"}-checklist-${_todayStamp()}`;
+
+  const wrap = el("div", {});
+  const btn = (active, label, on) => el("button", {
+    style: {
+      background: active ? "var(--accent)" : "var(--surface2)", color: active ? "#fff" : "var(--text)",
+      border: "1px solid " + (active ? "var(--accent)" : "var(--border)"), padding: "5px 12px",
+      borderRadius: "4px", cursor: "pointer", fontSize: "12px", fontFamily: "inherit",
+    }, onclick: on,
+  }, [label]);
+
+  wrap.appendChild(el("div", { style: { display: "flex", alignItems: "center", gap: "10px", marginBottom: "12px", flexWrap: "wrap" } }, [
+    el("h2", { style: { fontSize: "16px", fontWeight: 600, margin: 0 } }, ["Service Readiness Checklist", helpIcon("view.checklist")]),
+    el("span", { style: { fontSize: "11px", color: "var(--text3)", fontStyle: "italic" } }, ["구성 기반 자동 생성 · 수정/추가/체크 모두 프로젝트에 저장"]),
+    el("span", { style: { flex: 1 } }, []),
+    btn(hideComplete, hideComplete ? "☑ 남은 항목만" : "☐ 남은 항목만", () => { state.ui.checklistHideComplete = !hideComplete; emit(); }),
+    hiddenCount ? btn(showHidden, `${showHidden ? "☑" : "☐"} 숨긴 항목 ${hiddenCount}`, () => { state.ui.checklistShowHidden = !showHidden; emit(); }) : null,
+    btn(false, "⬇ Excel", () => { try { _triggerDownload(_checklistXlsx(p), `${fbase}.xlsx`); } catch (e) { console.error("xlsx failed", e); alert("Excel 생성 실패: " + e.message); } }),
+    btn(false, "⬇ Markdown", () => _triggerDownload(new Blob([_checklistMarkdown(p)], { type: "text/markdown;charset=utf-8" }), `${fbase}.md`)),
+  ]));
+
+  if (!allItems.length && !hiddenCount) {
+    wrap.appendChild(el("div", { class: "view-empty" }, [
+      el("div", { class: "big" }, ["☑"]),
+      el("h2", {}, ["Checklist"]),
+      el("p", {}, ["클러스터·워크로드를 구성하면 점검 항목이 생성됩니다."]),
+    ]));
+    root.appendChild(wrap); return;
+  }
+
+  wrap.appendChild(_checklistBar("전체 진행률", _checklistProgress(p, allItems), true));
+
+  if (projectGroups.length) {
+    wrap.appendChild(_checklistScopeHeader("🌐 전체 (프로젝트 공통)", _checklistProgress(p, projectGroups.flatMap(g => g.items))));
+    for (const g of projectGroups) wrap.appendChild(_checklistGroupCard(p, "p", g, opts));
+  }
+  for (const b of clusterBlocks) {
+    const cItems = b.groups.flatMap(g => g.items);
+    wrap.appendChild(_checklistScopeHeader(`☸ ${b.cluster.name}${b.cluster.environment_tag ? "  ·  " + b.cluster.environment_tag : ""}`, _checklistProgress(p, cItems), { kind: "cluster", id: b.cluster.id }));
+    for (const g of b.groups) wrap.appendChild(_checklistGroupCard(p, "c:" + b.cluster.id, g, opts));
+  }
+
+  root.appendChild(wrap);
+}
+
 //============ Render: Export ============
 function renderExport() {
   const root = $("#viewBody");
@@ -14355,6 +14913,7 @@ function renderViewBody() {
   if (v === "depgraph") return renderDependency();
   if (v === "namespace") return renderNamespace();
   if (v === "bottleneck") return renderBottleneck();
+  if (v === "checklist") return renderChecklist();
   if (v === "export") return renderExport();
   // placeholder for other views
   $("#viewBody").innerHTML = "";
