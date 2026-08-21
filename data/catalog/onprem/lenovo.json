@@ -162,6 +162,39 @@
         },
         "gpu": []
       }
+    },
+    {
+      "key": "ThinkSystem-SR680a-V4",
+      "brand": "Lenovo",
+      "source": "onprem",
+      "category": "GPU",
+      "display_name": "Lenovo ThinkSystem SR680a V4 (HGX B300)",
+      "generation": "V4",
+      "release_year": 2025,
+      "tags": ["8u", "gpu", "sxm", "hgx", "blackwell-ultra", "b300", "training", "inference"],
+      "notes": "8U 공랭 HGX B300 NVL8 8장 (Blackwell Ultra SXM, NVSwitch 5세대). Intel Xeon 6 ×2(최대 86코어), DDR5 최대 4TB, ConnectX-8. 공랭 NVL8 보드는 GPU당 270GB.",
+      "spec": {
+        "vcpu": 172,
+        "memory_gb": 4096,
+        "disks": [{ "size_gb": 3840, "type": "NVMe", "count": 8 }],
+        "nics": [
+          { "speed_gbps": 800, "count": 8, "interconnect": "InfiniBand" },
+          { "speed_gbps": 100, "count": 2 }
+        ],
+        "form_factor": "8U",
+        "power": {
+          "psu_max_w": 19200,
+          "typical_w_base": 3000,
+          "psu_redundancy": "N+N"
+        },
+        "gpu_chassis": {
+          "max_count": 8,
+          "supported_form_factors": ["SXM"],
+          "supported_models": ["B300-SXM"],
+          "nvlink_topology": "nvswitch-mesh"
+        },
+        "gpu": []
+      }
     }
   ]
 }

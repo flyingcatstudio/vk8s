@@ -413,7 +413,7 @@ VRAM 모드 워크로드는 export 시 `nvidia.com/gpu: 1`이 됨. 시뮬레이�
 
 ### 16.1 GPU 모델 — `data/gpu-models.json`
 
-NVIDIA Hopper / Ampere / Ada 라인업 + 일부 AMD MI. 각 항목:
+NVIDIA Blackwell Ultra(B300) / Blackwell(B200·B100·RTX PRO 6000) / Hopper(H200·H100) / Ada(L40S·L40·L4) / Ampere(A100) 라인업. 각 항목:
 
 ```json
 "H200-SXM": {

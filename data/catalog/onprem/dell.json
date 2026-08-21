@@ -88,7 +88,7 @@
         "gpu_chassis": {
           "max_count": 3,
           "supported_form_factors": ["PCIe-FH", "PCIe-LP"],
-          "supported_models": ["L40S", "L40", "L4", "H100-PCIe", "H200-NVL"],
+          "supported_models": ["RTX-PRO-6000-Blackwell-SE", "L40S", "L40", "L4", "H100-PCIe", "H200-NVL"],
           "nvlink_topology": "none"
         },
         "gpu": []
@@ -218,6 +218,39 @@
           "max_count": 8,
           "supported_form_factors": ["SXM"],
           "supported_models": ["H100-SXM", "H200-SXM"],
+          "nvlink_topology": "nvswitch-mesh"
+        },
+        "gpu": []
+      }
+    },
+    {
+      "key": "PowerEdge-XE9780",
+      "brand": "Dell",
+      "source": "onprem",
+      "category": "GPU",
+      "display_name": "Dell PowerEdge XE9780 (HGX B300)",
+      "generation": "17G",
+      "release_year": 2025,
+      "tags": ["10u", "gpu", "sxm", "hgx", "blackwell-ultra", "b300", "training", "inference"],
+      "notes": "10U 공랭 HGX B300 NVL8 8장 (Blackwell Ultra SXM, GPU당 270GB·1100W, NVSwitch 5세대). Intel Xeon 6. 액냉형은 XE9780L(랙당 256 GPU), AMD EPYC 변형은 XE9785. 초대형 LLM 학습·추론용.",
+      "spec": {
+        "vcpu": 172,
+        "memory_gb": 4096,
+        "disks": [{ "size_gb": 3840, "type": "NVMe", "count": 8 }],
+        "nics": [
+          { "speed_gbps": 800, "count": 8, "interconnect": "InfiniBand" },
+          { "speed_gbps": 200, "count": 2 }
+        ],
+        "form_factor": "10U",
+        "power": {
+          "psu_max_w": 19200,
+          "typical_w_base": 3200,
+          "psu_redundancy": "N+N"
+        },
+        "gpu_chassis": {
+          "max_count": 8,
+          "supported_form_factors": ["SXM"],
+          "supported_models": ["B300-SXM"],
           "nvlink_topology": "nvswitch-mesh"
         },
         "gpu": []

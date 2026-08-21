@@ -265,6 +265,30 @@
         },
         "gpu": [{ "model": "B200-SXM", "form_factor": "SXM", "count": 8, "nvlink_enabled": true }]
       }
+    },
+    {
+      "key": "p6-b300.48xlarge",
+      "brand": "AWS",
+      "source": "cloud",
+      "category": "GPU",
+      "display_name": "AWS p6-b300.48xlarge (8× B300 Blackwell Ultra)",
+      "generation": "Blackwell Ultra",
+      "release_year": 2025,
+      "tags": ["gpu", "b300", "blackwell-ultra", "training", "inference", "sxm", "efa"],
+      "notes": "HGX B300 8장 (Blackwell Ultra SXM, NVSwitch 5세대, GPU 메모리 합 ~2.1TB). EFA 6.4Tbps. p6-b200 대비 GPU 메모리·FP4 성능 상향.",
+      "spec": {
+        "vcpu": 192,
+        "memory_gb": 4096,
+        "disks": [{ "size_gb": 3840, "type": "NVMe", "count": 8 }],
+        "nics": [{ "speed_gbps": 6400, "count": 1, "interconnect": "Ethernet" }],
+        "gpu_chassis": {
+          "max_count": 8,
+          "supported_form_factors": ["SXM"],
+          "supported_models": ["B300-SXM"],
+          "nvlink_topology": "nvswitch-mesh"
+        },
+        "gpu": [{ "model": "B300-SXM", "form_factor": "SXM", "count": 8, "nvlink_enabled": true }]
+      }
     }
   ]
 }

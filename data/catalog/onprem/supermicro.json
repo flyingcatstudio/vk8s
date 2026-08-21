@@ -132,6 +132,72 @@
         },
         "gpu": []
       }
+    },
+    {
+      "key": "SYS-822GS-NB3RT",
+      "brand": "Supermicro",
+      "source": "onprem",
+      "category": "GPU",
+      "display_name": "Supermicro SYS-822GS-NB3RT (HGX B300)",
+      "generation": "X14",
+      "release_year": 2025,
+      "tags": ["8u", "gpu", "sxm", "hgx", "blackwell-ultra", "b300", "training", "inference"],
+      "notes": "8U 공랭 HGX B300 8장 (Blackwell Ultra SXM, GPU당 288GB HBM3e·1400W, NVSwitch 5세대). Intel Xeon 6 ×2. 액냉 4U 변형(SYS-422GS-NBRT-LCC) 별도.",
+      "spec": {
+        "vcpu": 172,
+        "memory_gb": 3072,
+        "disks": [{ "size_gb": 3840, "type": "NVMe", "count": 16 }],
+        "nics": [
+          { "speed_gbps": 800, "count": 8, "interconnect": "InfiniBand" },
+          { "speed_gbps": 100, "count": 2 }
+        ],
+        "form_factor": "8U",
+        "power": {
+          "psu_max_w": 19200,
+          "typical_w_base": 3000,
+          "psu_redundancy": "N+N"
+        },
+        "gpu_chassis": {
+          "max_count": 8,
+          "supported_form_factors": ["SXM"],
+          "supported_models": ["B300-SXM-288G"],
+          "nvlink_topology": "nvswitch-mesh"
+        },
+        "gpu": []
+      }
+    },
+    {
+      "key": "SYS-522GA-NRT",
+      "brand": "Supermicro",
+      "source": "onprem",
+      "category": "GPU",
+      "display_name": "Supermicro SYS-522GA-NRT (RTX PRO 6000)",
+      "generation": "X14",
+      "release_year": 2025,
+      "tags": ["5u", "gpu", "pcie", "blackwell", "rtx-pro-6000", "inference", "vdi"],
+      "notes": "5U PCIe Gen5 GPU 서버. RTX PRO 6000 Blackwell Server Edition 최대 8장(96GB GDDR7 ×8 = 768GB). Intel Xeon 6900P ×2. NVLink 없음 — 추론/VDI/렌더링용.",
+      "spec": {
+        "vcpu": 256,
+        "memory_gb": 3072,
+        "disks": [{ "size_gb": 3840, "type": "NVMe", "count": 12 }],
+        "nics": [
+          { "speed_gbps": 400, "count": 2, "interconnect": "Ethernet" },
+          { "speed_gbps": 10, "count": 2 }
+        ],
+        "form_factor": "5U",
+        "power": {
+          "psu_max_w": 8000,
+          "typical_w_base": 1600,
+          "psu_redundancy": "N+N"
+        },
+        "gpu_chassis": {
+          "max_count": 8,
+          "supported_form_factors": ["PCIe-FH"],
+          "supported_models": ["RTX-PRO-6000-Blackwell-SE", "L40S", "L40"],
+          "nvlink_topology": "none"
+        },
+        "gpu": []
+      }
     }
   ]
 }

@@ -1223,14 +1223,14 @@ const HELP = {
   "gpu.form_factor.SXM": {
     cat: "GPU",
     title: "SXM (Server PCIe Module)",
-    body: "NVIDIA HGX 보드에 직접 솔더링된 GPU. NVSwitch로 8장 모두 풀메시 연결. PCIe 대비 약 2배 대역폭, 700W까지 공급.",
-    reco: "대규모 LLM 학습 표준. H100-SXM, H200-SXM, A100-SXM이 해당.",
+    body: "NVIDIA HGX 보드에 직접 솔더링된 GPU. NVSwitch로 8장 모두 풀메시 연결. PCIe 대비 약 2배 대역폭, Blackwell Ultra는 장당 1400W까지 공급.",
+    reco: "대규모 LLM 학습 표준. B300-SXM, B200-SXM, H200-SXM, H100-SXM, A100-SXM이 해당.",
   },
   "gpu.form_factor.PCIe-FH": {
     cat: "GPU",
     title: "PCIe Full-Height",
     body: "표준 PCIe 슬롯 GPU. NVLink Bridge로 인접 2장만 페어링. SXM 대비 가격↓ 자유도↑.",
-    reco: "추론, 라이트 학습. L40S, H100-PCIe, A100-PCIe.",
+    reco: "추론, 라이트 학습. RTX-PRO-6000-Blackwell-SE, H200-NVL, L40S, H100-PCIe, A100-PCIe.",
   },
   "gpu.form_factor.PCIe-LP": {
     cat: "GPU",
@@ -1686,7 +1686,7 @@ const HELP = {
     cat: "워크로드",
     title: "GPU Model 제약",
     body: "특정 GPU 모델만 허용. (any)면 클러스터에 있는 어느 GPU든 OK.",
-    reco: "특정 VRAM/성능 필요할 때만 지정 (예: 70B 모델은 H200 필요).",
+    reco: "특정 VRAM/성능 필요할 때만 지정 (예: 70B 모델은 H200 이상, 초대형 MoE는 B300 필요).",
   },
   "runtime.concurrency_model": {
     cat: "워크로드",

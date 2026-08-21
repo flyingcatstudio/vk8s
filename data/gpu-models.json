@@ -1,7 +1,43 @@
 {
   "$schema_version": "0.1",
-  "description": "GPU 모델 레퍼런스. catalog의 supported_models / node.spec.gpu[].model 키로 사용. mig_capable + mig_profiles(name/count/vram_gb)는 MIG 분할 옵션 (NVIDIA MIG User Guide 기준).",
+  "description": "GPU 모델 레퍼런스 (Blackwell Ultra / Blackwell / Hopper / Ada / Ampere). catalog의 supported_models / node.spec.gpu[].model 키로 사용. mig_capable + mig_profiles(name/count/vram_gb)는 MIG 분할 옵션 (NVIDIA MIG User Guide 기준, OEM 변종 보드는 공개 프로파일에서 비례 환산한 근사값).",
   "models": {
+    "B300-SXM-288G": {
+      "vendor": "NVIDIA",
+      "family": "Blackwell Ultra",
+      "form_factor": "SXM",
+      "vram_gb": 288,
+      "vram_type": "HBM3e",
+      "tdp_w": 1400,
+      "fp16_tflops": 2250,
+      "released": 2025,
+      "nvlink_capable": true,
+      "nvlink_note": "HGX B300 NVL16 / DGX B300 급 풀스펙 보드 (액냉 고밀도). NVSwitch 5세대. FP16은 B200과 동급, FP4가 ~1.5×",
+      "mig_capable": true,
+      "mig_profiles": [
+        { "name": "1g.34gb", "count": 7, "vram_gb": 34 },
+        { "name": "2g.67gb", "count": 3, "vram_gb": 67 },
+        { "name": "7g.269gb", "count": 1, "vram_gb": 269 }
+      ]
+    },
+    "B300-SXM": {
+      "vendor": "NVIDIA",
+      "family": "Blackwell Ultra",
+      "form_factor": "SXM",
+      "vram_gb": 270,
+      "vram_type": "HBM3e",
+      "tdp_w": 1100,
+      "fp16_tflops": 2250,
+      "released": 2025,
+      "nvlink_capable": true,
+      "nvlink_note": "HGX B300 NVL8 — OEM 공랭 8-GPU 보드(Dell XE9780 / HPE XD690 / Lenovo SR680a V4 / AWS p6-b300)의 270GB·1100W 변종. NVSwitch 5세대",
+      "mig_capable": true,
+      "mig_profiles": [
+        { "name": "1g.32gb", "count": 7, "vram_gb": 32 },
+        { "name": "2g.63gb", "count": 3, "vram_gb": 63 },
+        { "name": "7g.252gb", "count": 1, "vram_gb": 252 }
+      ]
+    },
     "B200-SXM": {
       "vendor": "NVIDIA",
       "family": "Blackwell",
@@ -63,6 +99,24 @@
         { "name": "3g.71gb", "count": 2, "vram_gb": 71 },
         { "name": "4g.71gb", "count": 1, "vram_gb": 71 },
         { "name": "7g.141gb", "count": 1, "vram_gb": 141 }
+      ]
+    },
+    "RTX-PRO-6000-Blackwell-SE": {
+      "vendor": "NVIDIA",
+      "family": "Blackwell",
+      "form_factor": "PCIe-FH",
+      "vram_gb": 96,
+      "vram_type": "GDDR7",
+      "tdp_w": 600,
+      "fp16_tflops": 500,
+      "released": 2025,
+      "nvlink_capable": false,
+      "nvlink_note": "RTX PRO 6000 Blackwell Server Edition — NVLink 없음(PCIe Gen5 전용). L40S 후속 추론/그래픽 카드",
+      "mig_capable": true,
+      "mig_profiles": [
+        { "name": "1g.24gb", "count": 4, "vram_gb": 24 },
+        { "name": "2g.48gb", "count": 2, "vram_gb": 48 },
+        { "name": "4g.96gb", "count": 1, "vram_gb": 96 }
       ]
     },
     "L40": {

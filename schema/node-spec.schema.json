@@ -50,7 +50,7 @@
     },
     "form_factor": {
       "description": "랙 점유 단위. onprem 전용 (cloud는 미설정).",
-      "enum": ["1U", "2U", "3U", "4U", "5U", "6U", "8U", "Tower"]
+      "enum": ["1U", "2U", "3U", "4U", "5U", "6U", "8U", "10U", "Tower"]
     },
     "power": {
       "type": "object",

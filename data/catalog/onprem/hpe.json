@@ -159,6 +159,39 @@
         },
         "gpu": []
       }
+    },
+    {
+      "key": "Compute-XD690",
+      "brand": "HPE",
+      "source": "onprem",
+      "category": "GPU",
+      "display_name": "HPE Compute XD690 (HGX B300)",
+      "generation": "XD600",
+      "release_year": 2025,
+      "tags": ["10u", "gpu", "sxm", "hgx", "blackwell-ultra", "b300", "training", "inference"],
+      "notes": "10U 공랭 단일 노드, HGX B300 NVL8 8장 (Blackwell Ultra SXM, GPU당 270GB·1100W, NVSwitch 5세대). Intel Xeon 6 ×2, DDR5 최대 4TB, 3200W Titanium PSU ×12. XD685(B200)의 후속.",
+      "spec": {
+        "vcpu": 172,
+        "memory_gb": 4096,
+        "disks": [{ "size_gb": 3840, "type": "NVMe", "count": 8 }],
+        "nics": [
+          { "speed_gbps": 800, "count": 8, "interconnect": "InfiniBand" },
+          { "speed_gbps": 100, "count": 2 }
+        ],
+        "form_factor": "10U",
+        "power": {
+          "psu_max_w": 19200,
+          "typical_w_base": 3200,
+          "psu_redundancy": "N+N"
+        },
+        "gpu_chassis": {
+          "max_count": 8,
+          "supported_form_factors": ["SXM"],
+          "supported_models": ["B300-SXM"],
+          "nvlink_topology": "nvswitch-mesh"
+        },
+        "gpu": []
+      }
     }
   ]
 }
