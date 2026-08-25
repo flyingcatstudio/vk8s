@@ -12007,12 +12007,15 @@ function renderDependency() {
     ]));
   }
 
-  // ---- Focus mode: click a node to fade everything but its connected component ----
-  // `state.ui.depFocusId` holds the clicked workload id. Reach = transitive upstream +
-  // downstream via depends_on, so the focused subgraph stays vivid while siblings dim.
+  // ---- Focus mode: click a node to fade everything but its 2-hop neighborhood ----
+  // `state.ui.depFocusId` holds the clicked workload id. Reach = every node within
+  // FOCUS_HOPS edges of it (either direction via depends_on). A full transitive walk
+  // lit up nearly the whole connected component in dense projects, so the walk is a
+  // level-by-level BFS capped at FOCUS_HOPS instead.
   // A stale focus id (filtered out / deleted) is cleared lazily here.
   if (state.ui.depFocusId && !byId.has(state.ui.depFocusId)) state.ui.depFocusId = null;
   const focusId = state.ui.depFocusId || null;
+  const FOCUS_HOPS = 2;
   let reach = null;
   if (focusId) {
     const outAdj = new Map(), inAdj = new Map();
@@ -12021,11 +12024,16 @@ function renderDependency() {
       (inAdj.get(e.to) || inAdj.set(e.to, []).get(e.to)).push(e.from);
     }
     reach = new Set([focusId]);
-    const stack = [focusId];
-    while (stack.length) {
-      const n = stack.pop();
-      for (const x of outAdj.get(n) || []) if (!reach.has(x)) { reach.add(x); stack.push(x); }
-      for (const x of inAdj.get(n)  || []) if (!reach.has(x)) { reach.add(x); stack.push(x); }
+    let frontier = [focusId];
+    for (let hop = 1; hop <= FOCUS_HOPS && frontier.length; hop++) {
+      const next = [];
+      for (const n of frontier) {
+        for (const x of (outAdj.get(n) || []).concat(inAdj.get(n) || [])) {
+          if (reach.has(x)) continue;
+          reach.add(x); next.push(x);
+        }
+      }
+      frontier = next;
     }
   }
   const FADE = 0.18;
@@ -12110,7 +12118,7 @@ function renderDependency() {
     const nodeInFocus = inFocus(w.id);
     const g = svg("g", {
       style: "cursor:pointer",
-      // First click focuses this node (its connected component stays vivid, the rest fades).
+      // First click focuses this node (it and everything within 2 hops stays vivid, the rest fades).
       // Click the same node again to restore. Clicking a different node switches focus to it.
       onclick: () => {
         state.ui.depFocusId = (state.ui.depFocusId === w.id) ? null : w.id;
