@@ -113,6 +113,11 @@
             "description": "gpu-models.json 키 (예: H200-SXM, A100-PCIe-80G)"
           },
           "form_factor": { "enum": ["SXM", "PCIe-FH", "PCIe-LP"] },
+          "multi_pod_sharing": {
+            "enum": ["none", "time-slicing", "mps", "mig"],
+            "default": "none",
+            "description": "이 카드를 서로 다른 pod 여러 개에 나눠줄 수 있는지 (device plugin 설정). none=카드 1장에 pod 1개(스톡 동작). 한 pod 내부에서 모델을 여러 개 돌리는 것과는 무관."
+          },
           "count": { "type": "integer", "minimum": 1 },
           "nvlink_enabled": { "type": "boolean", "default": false }
         }

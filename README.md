@@ -168,18 +168,40 @@ vLLM 같은 추론 워크로드는 노드의 H100/H200 VRAM 풀에서 GB 단위�
 lane을 선택, cubic bezier control point를 overshoot시켜 곡선 중점이 lane에 정확히 닿게 한다.
 overshoot가 viewBox를 벗어나지 않게 SVG 영역도 함께 확장.
 
+cluster 밴드(§7.3)가 켜져 있으면 회피 대상은 *같은 밴드 안의* 노드로 한정된다.
+중간 layer가 모든 밴드를 관통하기 때문에, 전체를 회피 대상으로 잡으면 클러스터 내부 edge가
+다이어그램 전체 높이를 가로지르는 곡선이 되어버린다. 밴드를 넘나드는 edge는 어차피 긴 대각선이라
+lane 라우팅을 건너뛰고 직접 bezier로 그린다.
+
 ### 7.2 Cluster 필터
 
 상단에 cluster 탭 (`All (N) / cluster-A (n1) / cluster-B (n2) ...`).
 선택 시 해당 cluster의 워크로드만 노출. cross-cluster 의존이 숨겨졌으면
 `▲ cross-cluster 의존 N개가 숨겨져 있습니다 — 'All' 탭에서 확인하세요` 배너로 명시.
 
-### 7.3 워크로드별 그래프 숨김
+### 7.3 Cluster 밴드 (클러스터 우선 구분)
+
+**클러스터가 1차 구분 기준.** 노드를 클러스터별 가로 밴드(swimlane)로 나눈 뒤 그 안에서 layer를 배치한다.
+layer 자체는 그래프 전체에서 공유되므로 `entry / L1 / L2 … / sink` 컬럼은 모든 밴드에서 세로로 정렬되고,
+같은 클러스터의 워크로드는 절대 흩어지지 않는다.
+
+- 밴드 순서 = 프로젝트의 클러스터 순서 (상단 탭 순서와 동일).
+- 밴드 높이 = 그 밴드에서 가장 많은 노드를 가진 layer 기준. layer별로 밴드 안에서 세로 중앙 정렬.
+- barycenter 교차 최소화는 밴드 *내부* 순서만 바꾼다 (클러스터 rank가 항상 우선).
+- cross-cluster ghost endpoint(§7.2 필터 사용 시)도 자기 클러스터 밴드에 놓이므로,
+  트래픽이 밴드를 벗어나는 지점이 그대로 눈에 보인다.
+- 밴드 테두리는 무채색(점선 + 클러스터명·노드 수)으로만 그린다 — 박스 색은 category/namespace
+  색상 표준 전용이라 겹치지 않게 한다 (밴드에 클러스터별 색을 입히지 않는 이유).
+
+우측 상단 체크박스 `cluster 밴드 (클러스터별 구분)`로 토글 (클러스터 2개 이상일 때만 노출, 기본 ON).
+끄면 예전처럼 클러스터를 섞은 채 layer만으로 배치한다. 토글 시 viewBox는 리셋(Fit)된다.
+
+### 7.4 워크로드별 그래프 숨김
 
 `workload.hide_from_dep_graph: true`면 해당 워크로드 노드와 연결된 edge가 그래프에서 제외.
 검증·export·다른 뷰에는 전혀 영향 없음 — 순수 시각화 옵션. workload Inspector → Basic 탭에서 토글.
 
-### 7.4 Edge label 토글
+### 7.5 Edge label 토글
 
 View-local 옵션 (프로젝트 데이터에는 저장 안 됨). 우측 상단 체크박스
 `edge label (protocol·latency)`로 라벨(`HTTP / 15ms` 등)을 한 번에 끄고 켤 수 있다.
@@ -336,17 +358,52 @@ DB / Cache / Queue 카테고리에서만 Basic 탭에 노출 (`workload.ha`). re
 
 1. **chassis** (`node.spec.gpu_chassis`): 노드가 *허용*하는 GPU. `max_count`, `supported_form_factors`,
    `supported_models`, `nvlink_topology(none/bridge/nvswitch-mesh)`. 발주 가능한 슬롯 정의.
-2. **실장착** (`node.spec.gpu[]`): 실제 꽂혀 있는 카드. `{ model, count, mig_enabled?, mig_profile? }[]`.
+2. **실장착** (`node.spec.gpu[]`): 실제 꽂혀 있는 카드. `{ model, count, multi_pod_sharing?, mig_enabled?, mig_profile? }[]`.
    - chassis 룰로 검증 (`GPU_CHASSIS_NOT_SUPPORTED` · `GPU_COUNT_EXCEEDS_CHASSIS` · `GPU_FORM_FACTOR_MISMATCH` · `GPU_MODEL_NOT_IN_CHASSIS_LIST`).
    - NVLink 토폴로지가 `none`인데 카드가 NVLink-capable인 경우 `NVLINK_ON_NONE_TOPOLOGY` 등 추가 검증.
    - **MIG** — A100/H100 등 MIG 지원 모델은 `mig_enabled` + `mig_profile`(예: `1g.10gb`, `3g.40gb`)을 지정. 프로파일 목록은 `data/gpu-models.json`의 `mig_profiles`에서 시드되고, model 변경 시 호환 안 되면 자동 reset. *표시·문서용* — 현재 스케줄 시뮬·export에는 미반영.
+   - **pod 공유** (`multi_pod_sharing`): 아래 §13.2.
 3. **워크로드 소비** (`workload.resources.requests.gpu`):
-   - **VRAM 모드 (권장)** — `{ vram_gb, model? }` (count는 schema 호환 위해 1로 자동). 시뮬레이터는 노드의 모델별 VRAM 풀에서 GB로 차감.
-   - **count 모드 (legacy)** — `{ count, model? }`. 카드 단위 매칭.
+   - **VRAM 모드 (권장)** — `{ vram_gb, model?, breakdown? }` (count는 schema 호환 위해 1로 자동).
+   - **count 모드 (legacy)** — `{ count, model? }`. 카드 N장을 통째로 점유.
    - 모드 분기: `vram_gb > 0`이면 VRAM 모드.
+   - **모델 내역** (`breakdown[{ name, vram_gb, port? }]`) — 하나의 pod가 카드 한 장 안에서 모델을 여러 개
+     서빙하는 구성 (예: vLLM 31B `:8000` + 8B `:8001`). 합계가 `vram_gb`로 자동 계산된다. GPU는 원래 여러
+     프로세스를 동시에 수용하므로 MIG나 device plugin 설정이 **필요 없다**.
 
-**Caveat** — K8s YAML/Helm export는 여전히 `nvidia.com/gpu: count` 정수만 emit (실 K8s API의 한계).
-VRAM 모드 워크로드는 export 시 `nvidia.com/gpu: 1`이 됨. 시뮬레이션과 시각화는 VRAM 기반으로 정확.
+### 13.1 카드 단위 배치 (GPU card ledger)
+
+배치의 단위는 노드의 VRAM 합계가 아니라 **물리 카드 한 장**이다. 시뮬레이터는 노드의 GPU 행을 카드 배열로
+펼친 뒤(`count: 2` → 카드 2장) 카드별 잔여 VRAM에 bin-packing 한다.
+
+- `vram_gb ≤ 카드 VRAM` → 여유 있는 카드에 best-fit 배치 (작은 pod가 새 카드를 열지 않고 채워짐)
+- `vram_gb > 카드 VRAM` → `ceil(요청 / 카드)`장을 **빈 카드로 묶어** 점유 (tensor-parallel 전제, 같은 노드·같은 모델)
+- count 모드 → N장을 통째로 점유
+
+Capacity 뷰에 카드별 점유가 그대로 표시된다 — `GPU#0 72/141GB · vllm-multi`, `GPU#1 0/141GB (free)`.
+
+### 13.2 pod 공유 모드 (`node.spec.gpu[].multi_pod_sharing`)
+
+**서로 다른 pod 여러 개가 한 카드를 나눠 쓸 수 있는가**를 정하는 값. GPU가 여러 프로세스를 돌릴 수 있느냐와는
+다른 층위의 문제다 — 그건 언제나 가능하고, 이 값은 *쿠버네티스 device plugin이 카드를 몇 개의 pod에 배정할 수
+있는지*만 결정한다.
+
+| 값 | 의미 | 시뮬레이터 |
+|---|---|---|
+| `none` (기본) | 스톡 device plugin — 카드 1장 = pod 1개 | 카드당 pod 1개 |
+| `time-slicing` | device plugin이 카드를 N개로 광고. 메모리 격리 없음 | 카드 VRAM 한도 내에서 여러 pod |
+| `mps` | CUDA MPS — 커널 동시 실행 + 클라이언트별 메모리 상한 | 위와 동일 |
+| `mig` | 하드웨어 분할 | 현재 `none`으로 계산 (미구현) |
+
+`none`인 상태에서 서로 다른 pod를 한 카드에 올리려 하면 배치가 실패하고 사유가 표시된다:
+`card-sharing: 카드 2장 모두 다른 pod가 점유 (VRAM은 133GB 남음) · 노드 GPU 행의 공유 모드 필요`.
+실제 클러스터에서 두 번째 pod가 Pending에 걸리는 상황을 그대로 재현한 것이다.
+
+관련 findings — `GPU_CARD_UNDERUSED`(카드 절반 이하만 쓰는 요청), `GPU_SPANS_CARDS`(카드를 넘는 요청).
+
+**Caveat** — K8s YAML/Helm export는 `nvidia.com/gpu` 정수만 emit할 수 있다 (K8s API의 한계).
+VRAM 모드 워크로드는 `ceil(vram_gb / 카드 VRAM)`장으로 환산되어 나간다 (모델 미지정 시 1). 한 카드를 여러 pod가
+공유하는 계획은 device plugin의 time-slicing/MPS 설정이 별도로 필요하며, 그 ConfigMap은 export에 포함되지 않는다.
 
 ---
 

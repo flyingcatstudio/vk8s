@@ -92,7 +92,22 @@
                 },
                 "vram_gb": {
                   "type": "number",
-                  "exclusiveMinimum": 0
+                  "exclusiveMinimum": 0,
+                  "description": "pod 1개가 쓰는 VRAM. 설정 시 카드 개수가 아닌 VRAM 기준으로 배치됨 (카드 1장 안에서 bin-packing, 카드 VRAM을 넘으면 여러 장을 묶어 사용). breakdown이 있으면 그 합계로 자동 계산."
+                },
+                "breakdown": {
+                  "type": "array",
+                  "description": "한 pod가 GPU 한 장 안에서 여러 모델을 서빙할 때의 내역 (예: vLLM 31B :8000 + 8B :8001). 합계가 vram_gb가 됨. MIG/device plugin 공유 설정과 무관.",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["vram_gb"],
+                    "properties": {
+                      "name": { "type": "string" },
+                      "vram_gb": { "type": "number", "exclusiveMinimum": 0 },
+                      "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+                    }
+                  }
                 }
               }
             }
