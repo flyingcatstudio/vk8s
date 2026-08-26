@@ -24,17 +24,18 @@ K8s YAML / Helm / Docker Compose / Project 리포트 산출을 한 페이지에�
 8. [뷰 5 — Namespace & NetworkPolicy](#8-뷰-5--namespace--networkpolicy)
 9. [뷰 6 — Bottleneck (정적 병목 분석)](#9-뷰-6--bottleneck-정적-병목-분석)
 10. [뷰 7 — Checklist (서비스 준비 점검)](#10-뷰-7--checklist-서비스-준비-점검)
-11. [뷰 8 — Export (K8s YAML / Helm / Compose / Report)](#11-뷰-8--export-k8s-yaml--helm--compose--report)
-12. [Workload Inspector — 5탭 + HA](#12-workload-inspector--5탭--ha)
-13. [GPU 모델링 — chassis · 실장착 · VRAM 소비 · MIG](#13-gpu-모델링--chassis--실장착--vram-소비--mig)
-14. [Quick Deploy 템플릿 & Project 시드](#14-quick-deploy-템플릿--project-시드)
-15. [Validator — 검증 룰 카탈로그](#15-validator--검증-룰-카탈로그)
-16. [카탈로그 데이터 (GPU · Runtime · Node 스펙)](#16-카탈로그-데이터-gpu--runtime--node-스펙)
-17. [스키마 & 버전](#17-스키마--버전)
-18. [영속성 · Import / Export](#18-영속성--import--export)
-19. [키보드 단축키](#19-키보드-단축키)
-20. [디렉터리 구조](#20-디렉터리-구조)
-21. [라이선스](#21-라이선스)
+11. [뷰 8 — 산출물 (SI 납품 문서)](#11-뷰-8--산출물-si-납품-문서)
+12. [뷰 9 — Export (K8s YAML / Helm / Compose / Report)](#12-뷰-9--export-k8s-yaml--helm--compose--report)
+13. [Workload Inspector — 5탭 + HA](#13-workload-inspector--5탭--ha)
+14. [GPU 모델링 — chassis · 실장착 · VRAM 소비 · MIG](#14-gpu-모델링--chassis--실장착--vram-소비--mig)
+15. [Quick Deploy 템플릿 & Project 시드](#15-quick-deploy-템플릿--project-시드)
+16. [Validator — 검증 룰 카탈로그](#16-validator--검증-룰-카탈로그)
+17. [카탈로그 데이터 (GPU · Runtime · Node 스펙)](#17-카탈로그-데이터-gpu--runtime--node-스펙)
+18. [스키마 & 버전](#18-스키마--버전)
+19. [영속성 · Import / Export](#19-영속성--import--export)
+20. [키보드 단축키](#20-키보드-단축키)
+21. [디렉터리 구조](#21-디렉터리-구조)
+22. [라이선스](#22-라이선스)
 
 ---
 
@@ -81,7 +82,7 @@ Project ──┬── Sites       ── Storage / L4 LB / NetworkDevice / Ext
 ┌──────────────────────────────────────────────────────────────────┐
 │ 🧵 vk8s   project-name   [hybrid]                  [💾] [⤓] [⤒]   │  ← Top bar
 ├────────┬──────────────────────────────────────────┬──────────────┤
-│ Tree   │  Canvas (8개 뷰 중 하나)                  │ Inspector   │
+│ Tree   │  Canvas (9개 뷰 중 하나)                  │ Inspector   │
 │ Sites  │  [Topology][Architecture][Capacity][Dep] │ 선택된       │
 │ Nodes  │  [Namespace][Bottleneck][Checklist][Exp] │ 엔티티 폼    │
 │ Cluster│                                          │              │
@@ -152,7 +153,7 @@ vLLM 같은 추론 워크로드는 노드의 H100/H200 VRAM 풀에서 GB 단위�
 - model 드롭다운은 *해당 cluster의 worker가 실제 장착한 모델*로만 좁힘 — 미스매치 자체를 차단.
 - `(any)` 옵션은 노드의 모든 모델 VRAM 합산 풀에서 소비.
 - legacy `gpu.count` 기반 워크로드는 그대로 동작 (자동 fallback).
-- 자세한 분기 로직은 §13 참조.
+- 자세한 분기 로직은 §14 참조.
 
 ---
 
@@ -215,7 +216,7 @@ namespace 별 워크로드 분포, ResourceQuota, NetworkPolicy(ingress/egress) 
 - namespace에 `default_deny: true`면 모든 egress/ingress가 명시적 allow 필요.
 - `prod`로 시작하는 namespace에 default_deny가 없으면 경고.
 - workload의 `depends_on` 호출이 NetworkPolicy로 차단되면 block 룰 발동
-  (`WORKLOAD_DEPS_BLOCKED_BY_NETPOL` 등 — §15 참조).
+  (`WORKLOAD_DEPS_BLOCKED_BY_NETPOL` 등 — §16 참조).
 
 ---
 
@@ -234,13 +235,13 @@ namespace 별 워크로드 분포, ResourceQuota, NetworkPolicy(ingress/egress) 
 5. **Latency budget** — 워크로드 자체 `avg_ms` + Σ(downstream call_ms × calls_per_request) > p99 budget.
 
 각 카드는 **transparency block**으로 입력 변수 + 산식 + 도출된 값 + 권장 액션을 모두 노출
-(rule transparency 커밋). validator 룰 카탈로그(§15)와 1:1 대응.
+(rule transparency 커밋). validator 룰 카탈로그(§16)와 1:1 대응.
 
 ---
 
 ## 10. 뷰 7 — Checklist (서비스 준비 점검)
 
-현재 프로젝트 구성(클러스터·노드·워크로드·HA·애드온·네트워크·스토리지)을 읽어 **서비스 오픈 전 검증해야 할 운영 점검 항목**을 자동 생성한다. Findings(§15)가 *설정 오류*를 잡는다면, Checklist는 *실제 동작 테스트 절차*("primary를 죽이고 replica 승격을 확인")를 나열 — 둘은 보완 관계.
+현재 프로젝트 구성(클러스터·노드·워크로드·HA·애드온·네트워크·스토리지)을 읽어 **서비스 오픈 전 검증해야 할 운영 점검 항목**을 자동 생성한다. Findings(§16)가 *설정 오류*를 잡는다면, Checklist는 *실제 동작 테스트 절차*("primary를 죽이고 replica 승격을 확인")를 나열 — 둘은 보완 관계.
 
 ### 10.1 두 범위 × 그룹
 
@@ -284,11 +285,58 @@ Markdown·Excel 모두 `_buildChecklist`를 소비하므로 수정/삭제/추가
 
 ---
 
-## 11. 뷰 8 — Export (K8s YAML / Helm / Compose / Report)
+## 11. 뷰 8 — 산출물 (SI 납품 문서)
+
+**현재 구성에서 도출한 납품 문서를 화면에서 검토·수정한 뒤 내보내는 탭.**
+Export(§12)가 기계가 먹는 산출물(kubectl / helm / docker compose)이라면, 이 탭은 사람이 읽고
+납품하는 문서다. 그래서 다운로드 버튼을 이 탭 안에만 둬서 **눈으로 확인한 뒤 내보내는 흐름**을 강제한다.
+
+산출물은 `DELIVERABLES` 레지스트리에 등록된다 — 새 산출물을 추가할 때는 배열에 한 줄과 렌더 함수
+하나면 되고 상단 탭은 늘어나지 않는다 (Export 뷰의 `tabs`, `REPORT_SECTIONS`와 같은 관용구).
+
+### 11.1 아키텍처 개념도
+
+워크로드를 전부 나열하는 Architecture 뷰(§5)의 한 단계 위 추상. 6개 레인으로 접어 그린다.
+
+| 레인 | 도출 기준 |
+|---|---|
+| 사용자 · 채널 | ingress_rules / LoadBalancer·NodePort Service / L4 존재 → 외부 사용자, `site_links` → 전용망 사용자, 플랫폼 워크로드 → 운영자 |
+| 접근 계층 | `site.network_devices`의 firewall·waf·ddos·cdn·vpn 묶음, `site.l4_balancers`, cluster addon의 Ingress 컨트롤러 |
+| 서비스 계층 | 클러스터별 컬럼. 비-플랫폼·비-stateful 워크로드를 `categoryKeyOf`로 묶어 `API/WAS ×7` 형태로 표기 |
+| 데이터 계층 | 클러스터별 컬럼. StatefulSet 및 DB/Cache/Queue 워크로드 + PVC가 실제로 가리키는 사이트 스토리지 (여러 클러스터가 공유하면 컬럼 밖 공용 줄) |
+| 관리 · 운영 | 네임스페이스 역할(`PLATFORM_NS_ROLES`)별 묶음 — Monitoring / Logging / GitOps / CI / Security … |
+| 외부 연동 | `site.external_services`, `site_links` |
+
+계층 분류는 Architecture 뷰와 **같은 기준**(`categoryKeyOf` · `PLATFORM_NS_ROLES` · `isStateful`)을
+쓴다. 두 그림에서 같은 워크로드가 다른 계층·다른 색으로 보이지 않게 하기 위해서다.
+
+### 11.2 검토 · 수정
+
+다이어그램 아래 **요소 검토·수정** 패널에서 도출된 요소를 하나씩 손본다.
+
+- **체크 해제** — 개념도에서 제외 (도출 항목은 삭제 대신 숨김).
+- **라벨 · 비고** — 입력 즉시 다이어그램에 반영. 비고를 적으면 박스 아래 설명이 그 값으로 바뀐다.
+- **+ 요소** — 레인에 직접 요소 추가 (점선 테두리로 구분). 아직 구성에 없는 목표 요소를 얹을 때 사용.
+- **제목 · 부제** — 산출물 표지 문구. 비워두면 `<프로젝트명> 목표 아키텍처 개념도`.
+- **↺ 재도출** — 손댄 내용을 전부 지우고 현재 구성에서 다시 도출.
+
+다이어그램의 박스를 클릭하면 편집 패널의 해당 라벨 입력으로 포커스가 이동한다.
+
+수정 내용은 `project.concept`에 **엔티티 id 기반 안정 키**로 저장된다(Checklist와 동일한 방식).
+요소 자체는 매번 config에서 다시 도출되므로, 구성이 바뀌어도 손댄 라벨·비고·숨김은 그대로 유지된다.
+
+### 11.3 내보내기
+
+- **SVG / PNG** — 범례와 작성일이 그림 안에 함께 구워진다 (화면과 내보낸 파일이 동일).
+- **Markdown** — 레인별 요소 표(구분 / 요소 / 수량 / 비고). 숨긴 요소는 본문에서 빠지고 하단에 제외 목록으로 남는다.
+
+---
+
+## 12. 뷰 9 — Export (K8s YAML / Helm / Compose / Report)
 
 4개 탭 + 마스터 다운로드 버튼.
 
-### 11.1 K8s Manifests (`*.yaml`)
+### 12.1 K8s Manifests (`*.yaml`)
 
 `kubectl apply -f` 가능한 multi-doc YAML. 포함 리소스:
 
@@ -297,9 +345,9 @@ Markdown·Excel 모두 `_buildChecklist`를 소비하므로 수정/삭제/추가
 - Service (ClusterIP / NodePort / LoadBalancer)
 - Ingress
 - PersistentVolumeClaim
-- `nvidia.com/gpu` resource limit (count 기반 — §13의 caveat 참조)
+- `nvidia.com/gpu` resource limit (count 기반 — §14의 caveat 참조)
 
-### 11.2 Helm Chart (`*.zip`)
+### 12.2 Helm Chart (`*.zip`)
 
 워크로드별 umbrella chart 패턴.
 
@@ -308,14 +356,14 @@ Markdown·Excel 모두 `_buildChecklist`를 소비하므로 수정/삭제/추가
 - ZIP은 store-only(deflate 미사용) → 브라우저만으로 zip 생성 가능.
 - `HELM_DUPLICATE_CHART_NAME` / `HELM_INGRESS_NO_HOST` / `HELM_NO_IMAGE_REPO` 검증 동시 동작.
 
-### 11.3 Docker Compose (`*.yml`)
+### 12.3 Docker Compose (`*.yml`)
 
 단일 호스트용 **best-effort** 변환. 워크로드 → service, 내부 포트는 `expose`·외부 노출은 `publish`, `depends_on` / volume / 리소스 매핑.
 
 - Operator / HA / Ingress / 오토스케일 등 k8s 고유 기능은 단일 호스트 근사치로 빠지며, 각 service 주석에 누락 항목을 명시.
 - `docker compose up -d`로 로컬 구동.
 
-### 11.4 Project Report (`*.md`)
+### 12.4 Project Report (`*.md`)
 
 발주서/제안서에 그대로 첨부할 수 있는 마크다운. **섹션 선택형** — Overview / Node Specs / Site Capacity / GPU Plan / Network Plan / Cluster Config / Architecture / Workload Summary / Workload Detail / Validation 중 원하는 것만 체크(`REPORT_SECTIONS` + `state.ui.reportHiddenSections`).
 
@@ -324,13 +372,13 @@ Markdown·Excel 모두 `_buildChecklist`를 소비하므로 수정/삭제/추가
 - 네트워크 플랜 (L4 LB · CIDR · CNI)
 - 검증 요약 (error/warn 건수와 코드)
 
-### 11.5 ⬇ Download everything (`*.zip`)
+### 12.5 ⬇ Download everything (`*.zip`)
 
 K8s YAML · Docker Compose · 전체 Project Report · Helm chart를 한 ZIP에 묶어 다운로드(리포트는 항상 전체 섹션). 파일명에 날짜 stamp.
 
 ---
 
-## 12. Workload Inspector — 5탭 + HA
+## 13. Workload Inspector — 5탭 + HA
 
 | 탭 | 내용 |
 |---|---|
@@ -340,7 +388,7 @@ K8s YAML · Docker Compose · 전체 Project Report · Helm chart를 한 ZIP에 
 | **Network** | Service (type · ports), Ingress (host · path · TLS), HPA(min/max · cpu_target_pct) |
 | **Deps** | `depends_on[]` 편집 — target_workload_id · protocol · port · avg_call_ms · fanout_pct · calls_per_request |
 
-### 12.1 HA 토폴로지 (stateful 워크로드)
+### 13.1 HA 토폴로지 (stateful 워크로드)
 
 DB / Cache / Queue 카테고리에서만 Basic 탭에 노출 (`workload.ha`). replica 수만으로 추측하지 않고 복제 토폴로지를 명시한다:
 
@@ -352,7 +400,7 @@ DB / Cache / Queue 카테고리에서만 Basic 탭에 노출 (`workload.ha`). re
 
 ---
 
-## 13. GPU 모델링 — chassis · 실장착 · VRAM 소비 · MIG
+## 14. GPU 모델링 — chassis · 실장착 · VRAM 소비 · MIG
 
 세 계층으로 나뉘어 검증된다.
 
@@ -362,7 +410,7 @@ DB / Cache / Queue 카테고리에서만 Basic 탭에 노출 (`workload.ha`). re
    - chassis 룰로 검증 (`GPU_CHASSIS_NOT_SUPPORTED` · `GPU_COUNT_EXCEEDS_CHASSIS` · `GPU_FORM_FACTOR_MISMATCH` · `GPU_MODEL_NOT_IN_CHASSIS_LIST`).
    - NVLink 토폴로지가 `none`인데 카드가 NVLink-capable인 경우 `NVLINK_ON_NONE_TOPOLOGY` 등 추가 검증.
    - **MIG** — A100/H100 등 MIG 지원 모델은 `mig_enabled` + `mig_profile`(예: `1g.10gb`, `3g.40gb`)을 지정. 프로파일 목록은 `data/gpu-models.json`의 `mig_profiles`에서 시드되고, model 변경 시 호환 안 되면 자동 reset. *표시·문서용* — 현재 스케줄 시뮬·export에는 미반영.
-   - **pod 공유** (`multi_pod_sharing`): 아래 §13.2.
+   - **pod 공유** (`multi_pod_sharing`): 아래 §14.2.
 3. **워크로드 소비** (`workload.resources.requests.gpu`):
    - **VRAM 모드 (권장)** — `{ vram_gb, model?, breakdown? }` (count는 schema 호환 위해 1로 자동).
    - **count 모드 (legacy)** — `{ count, model? }`. 카드 N장을 통째로 점유.
@@ -371,7 +419,7 @@ DB / Cache / Queue 카테고리에서만 Basic 탭에 노출 (`workload.ha`). re
      서빙하는 구성 (예: vLLM 31B `:8000` + 8B `:8001`). 합계가 `vram_gb`로 자동 계산된다. GPU는 원래 여러
      프로세스를 동시에 수용하므로 MIG나 device plugin 설정이 **필요 없다**.
 
-### 13.1 카드 단위 배치 (GPU card ledger)
+### 14.1 카드 단위 배치 (GPU card ledger)
 
 배치의 단위는 노드의 VRAM 합계가 아니라 **물리 카드 한 장**이다. 시뮬레이터는 노드의 GPU 행을 카드 배열로
 펼친 뒤(`count: 2` → 카드 2장) 카드별 잔여 VRAM에 bin-packing 한다.
@@ -382,7 +430,7 @@ DB / Cache / Queue 카테고리에서만 Basic 탭에 노출 (`workload.ha`). re
 
 Capacity 뷰에 카드별 점유가 그대로 표시된다 — `GPU#0 72/141GB · vllm-multi`, `GPU#1 0/141GB (free)`.
 
-### 13.2 pod 공유 모드 (`node.spec.gpu[].multi_pod_sharing`)
+### 14.2 pod 공유 모드 (`node.spec.gpu[].multi_pod_sharing`)
 
 **서로 다른 pod 여러 개가 한 카드를 나눠 쓸 수 있는가**를 정하는 값. GPU가 여러 프로세스를 돌릴 수 있느냐와는
 다른 층위의 문제다 — 그건 언제나 가능하고, 이 값은 *쿠버네티스 device plugin이 카드를 몇 개의 pod에 배정할 수
@@ -407,9 +455,9 @@ VRAM 모드 워크로드는 `ceil(vram_gb / 카드 VRAM)`장으로 환산되어 
 
 ---
 
-## 14. Quick Deploy 템플릿 & Project 시드
+## 15. Quick Deploy 템플릿 & Project 시드
 
-### 14.1 Quick Deploy 워크로드 (한 클릭 추가)
+### 15.1 Quick Deploy 워크로드 (한 클릭 추가)
 
 - **DB**: Postgres / MySQL / MongoDB
 - **Cache**: Redis
@@ -418,7 +466,7 @@ VRAM 모드 워크로드는 `ceil(vram_gb / 카드 VRAM)`장으로 환산되어 
 - **ML**: vLLM
 - 각 템플릿에 PVC 시드, Service port, replicas, HA 기본값 포함.
 
-### 14.2 아키텍처 템플릿 (📋 Templates)
+### 15.2 아키텍처 템플릿 (📋 Templates)
 
 전체 프로젝트를 한 번에 시드하는 1-click 템플릿:
 
@@ -428,7 +476,7 @@ VRAM 모드 워크로드는 `ceil(vram_gb / 카드 VRAM)`장으로 환산되어 
 - **Hybrid Cloud (HA)** — IDC 3노드(데이터) + AWS 3노드(웹), VPN site_link, 양쪽 HA control plane.
 - **Multi-Zone HA Production** — 3 zone에 분산된 단일 클러스터, 풀 메시 leased line, anti-affinity zone 분산.
 
-### 14.3 Project 시드 (모드)
+### 15.3 Project 시드 (모드)
 
 처음 만들 때 셋 중 선택:
 
@@ -438,7 +486,7 @@ VRAM 모드 워크로드는 `ceil(vram_gb / 카드 VRAM)`장으로 환산되어 
 
 ---
 
-## 15. Validator — 검증 룰 카탈로그
+## 16. Validator — 검증 룰 카탈로그
 
 300ms 디바운스로 매 편집 후 재실행. 결과는 Findings strip → 상세 패널.
 모든 룰 정의: [`schema/validator-rules.md`](./schema/validator-rules.md).
@@ -466,9 +514,9 @@ VRAM 모드 워크로드는 `ceil(vram_gb / 카드 VRAM)`장으로 환산되어 
 
 ---
 
-## 16. 카탈로그 데이터 (GPU · Runtime · Node 스펙)
+## 17. 카탈로그 데이터 (GPU · Runtime · Node 스펙)
 
-### 16.1 GPU 모델 — `data/gpu-models.json`
+### 17.1 GPU 모델 — `data/gpu-models.json`
 
 NVIDIA Blackwell Ultra(B300) / Blackwell(B200·B100·RTX PRO 6000) / Hopper(H200·H100) / Ada(L40S·L40·L4) / Ampere(A100) 라인업. 각 항목:
 
@@ -486,12 +534,12 @@ NVIDIA Blackwell Ultra(B300) / Blackwell(B200·B100·RTX PRO 6000) / Hopper(H200
 }
 ```
 
-### 16.2 Runtime profile — `data/runtime-profiles.json`
+### 17.2 Runtime profile — `data/runtime-profiles.json`
 
 언어/프레임워크별 동시성 모델 디폴트 (thread-pool 크기, async-await 효율, GIL, JVM heap 비율 등).
 워크로드 Runtime 탭에서 자동 시드되어 Bottleneck 룰의 입력으로 쓰임.
 
-### 16.3 Node 카탈로그 — `data/catalog/*.json`
+### 17.3 Node 카탈로그 — `data/catalog/*.json`
 
 Dell PowerEdge, AWS EC2, NCP, Azure VM 등 사전 정의된 노드 스펙.
 `chassis`, `form_factor`, `vcpu`, `memory_gb`, `disks`, `gpu_chassis`, `power.psu_max_w`까지 채워져 있어
@@ -501,7 +549,7 @@ Dell PowerEdge, AWS EC2, NCP, Azure VM 등 사전 정의된 노드 스펙.
 
 ---
 
-## 17. 스키마 & 버전
+## 18. 스키마 & 버전
 
 JSON Schema (Draft 2020-12) 7개:
 
@@ -517,23 +565,23 @@ JSON Schema (Draft 2020-12) 7개:
 
 버전: `v0.7` (`SCHEMA_VERSION` 상수). 0.6→0.7에서 **서비스 준비 Checklist** 상태(`project.checklist` + `project.checklist_custom`)가 추가됐다. `migrateProject()`가 구버전 프로젝트를 로드 시 자동 마이그레이션.
 
-> **런타임 모델 ⊃ 정적 스키마** — 위 `.json` 파일은 코어 형상만 정의한다. 이후 추가된 `workload.ha`(§12.1) · `node.spec.gpu[].mig_enabled/mig_profile`(§13) · `project.checklist`(§10)는 현재 `index.html` 런타임 모델에만 존재하며 정적 스키마 파일에는 아직 미반영. 자세한 변경 이력은 [`schema/README.md`](./schema/README.md).
+> **런타임 모델 ⊃ 정적 스키마** — 위 `.json` 파일은 코어 형상만 정의한다. 이후 추가된 `workload.ha`(§13.1) · `node.spec.gpu[].mig_enabled/mig_profile`(§14) · `project.checklist`(§10) · `project.concept`(§11)은 현재 `index.html` 런타임 모델에만 존재하며 정적 스키마 파일에는 아직 미반영. 자세한 변경 이력은 [`schema/README.md`](./schema/README.md).
 
 ---
 
-## 18. 영속성 · Import / Export
+## 19. 영속성 · Import / Export
 
 - **저장**: 모든 편집은 자동으로 `localStorage['vk8s.project.current']`에 직렬화 (`saveSoon()` 디바운스). Checklist 체크/메모/사용자 항목도 프로젝트 JSON에 함께 저장.
 - **Import**: 상단 ⤓ 버튼 — JSON 파일을 로드해 현재 프로젝트 교체.
 - **Export (project)**: 상단 ⤒ 버튼 — 현재 프로젝트를 단일 JSON으로 다운로드.
-- **Export (산출물)**: §11 참조.
+- **산출물 (개념도 등)**: §11 참조. · **Export (YAML/Helm/Compose/Report)**: §12 참조.
 - **공장 초기화**: Splash에서 `Reset` (모든 localStorage 삭제).
 
 외부로 나가는 통신은 export 다운로드 외에 **없음** (보안망/에어갭 환경 친화).
 
 ---
 
-## 19. 키보드 단축키
+## 20. 키보드 단축키
 
 | 키 | 동작 |
 |---|---|
@@ -546,7 +594,7 @@ JSON Schema (Draft 2020-12) 7개:
 
 ---
 
-## 20. 디렉터리 구조
+## 21. 디렉터리 구조
 
 ```
 vk8s/
@@ -572,7 +620,7 @@ vk8s/
 
 ---
 
-## 21. 라이선스
+## 22. 라이선스
 
 [LICENSE](./LICENSE) 참조.
 

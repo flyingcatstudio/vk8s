@@ -1107,6 +1107,7 @@ const VIEWS = [
   { id: "namespace",   name: "Namespace",    ready: true  },
   { id: "bottleneck",  name: "Bottleneck",   ready: true  },
   { id: "checklist",   name: "Checklist",    ready: true  },
+  { id: "deliverable", name: "산출물",        ready: true  },
   { id: "export",      name: "Export",       ready: true  },
 ];
 
@@ -1119,6 +1120,7 @@ const state = {
     topologyLayers: { compute: true, network: false, services: false, ingress: false, sites: true },
     archGroupByZone: true,
     colorBy: "category",   // "category" | "namespace" — node color basis (session-only, not saved)
+    deliverable: "concept",
     exportTab: "yaml",
     exportSelectedFile: null,
   },
@@ -1352,6 +1354,12 @@ const HELP = {
     title: "Bottleneck — 정적 병목 분석",
     body: "Little's Law (in-flight = RPS × avg_ms / 1000) 기반. 5개 룰: (1) compute capacity (thread-pool/replica), (2) caller connection pool 고갈, (3) downstream RPS budget 초과, (4) DB max_connections oversubscription, (5) p99 latency budget 누적 초과.",
     reco: "BLOCK은 즉시 SLA 위반 — replicas/pool/threads 조정 필요. WARN은 트래픽 폭증 시 위험. 정적 룰이라 retry/circuit-breaker 등 동적 효과는 미반영. traffic_profile + runtime + depends_on이 채워져야 정확함.",
+  },
+  "view.deliverable": {
+    cat: "기타",
+    title: "산출물 — SI 납품 문서",
+    body: "현재 구성에서 도출한 납품용 문서를 화면에서 검토·수정한 뒤 내보내는 탭. 첫 산출물은 '아키텍처 개념도' — 사용자·채널 / 접근 계층 / 서비스·데이터 계층(클러스터별) / 관리·운영 / 외부 연동 6개 레인으로 접어 그린다. 계층 분류는 Architecture 뷰와 같은 기준(category · namespace 역할 · StatefulSet)을 쓴다.",
+    reco: "요소는 매번 config에서 다시 도출된다 — 라벨·비고·숨김·직접 추가한 요소만 프로젝트에 저장되므로 구성이 바뀌어도 수정 내용이 유지된다. 표시 상태를 눈으로 확인한 뒤 SVG/PNG/Markdown으로 내보내면 된다. 처음 상태로 되돌리려면 ↺ 재도출.",
   },
   "view.export": {
     cat: "기타",
@@ -1871,6 +1879,21 @@ const el = (tag, attrs = {}, children = []) => {
     else if (k === "style") Object.assign(node.style, v);
     else if (k.startsWith("on") && typeof v === "function") node.addEventListener(k.slice(2).toLowerCase(), v);
     else if (k === "dataset") for (const [dk, dv] of Object.entries(v)) node.dataset[dk] = dv;
+    else if (v != null) node.setAttribute(k, v);
+  }
+  for (const c of [].concat(children)) {
+    if (c == null) continue;
+    node.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+  }
+  return node;
+};
+// SVG sibling of el(). The diagram views each used to keep a private, identical copy of this;
+// they now alias it (`const svg = svgNode;`) so a fix here reaches every diagram.
+const SVG_NS = "http://www.w3.org/2000/svg";
+const svgNode = (tag, attrs = {}, children = []) => {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k.startsWith("on") && typeof v === "function") node.addEventListener(k.slice(2).toLowerCase(), v);
     else if (v != null) node.setAttribute(k, v);
   }
   for (const c of [].concat(children)) {
@@ -8289,19 +8312,7 @@ function renderTopologyDiagram(root, p) {
     ]));
     return;
   }
-  const NS = "http://www.w3.org/2000/svg";
-  const svg = (tag, attrs = {}, children = []) => {
-    const node = document.createElementNS(NS, tag);
-    for (const [k, v] of Object.entries(attrs)) {
-      if (k.startsWith("on") && typeof v === "function") node.addEventListener(k.slice(2).toLowerCase(), v);
-      else if (v != null) node.setAttribute(k, v);
-    }
-    for (const c of [].concat(children)) {
-      if (c == null) continue;
-      node.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
-    }
-    return node;
-  };
+  const svg = svgNode;
 
   // Layout constants
   const L4_H = 40, L4_W = 160, NODE_W = 180, NODE_H = 70, ST_H = 40, ST_W = 160;
@@ -10254,6 +10265,35 @@ function legendChipRow(entries) {
   ]);
 }
 
+// Classification — platform namespaces split into sub-roles so the (관리/Mgmt) row
+// can color-group monitoring vs logging vs gitops vs CI rather than dumping them all
+// into one grey blob. namespace remains the source of truth — these are purely
+// visual sub-groupings (no schema change, no extra field on workloads).
+// Lives at module scope (it used to be private to renderArchitecture) because the 개념도
+// deliverable has to answer the same "어느 계층이냐" question — one taxonomy, two diagrams.
+const PLATFORM_NS_ROLES = [
+  { role: "runtime",     label: "Runtime",     color: "#5d6d7e", namespaces: ["kube-system"] },
+  { role: "gateway",     label: "Gateway/Mesh",color: "#7d3c98", namespaces: ["ingress-nginx", "istio-system"] },
+  { role: "security",    label: "Security",    color: "#922b21", namespaces: ["cert-manager", "external-secrets"] },
+  { role: "monitoring",  label: "Monitoring",  color: "#cd5c5c", namespaces: ["monitoring"] },
+  { role: "logging",     label: "Logging",     color: "#b87a2e", namespaces: ["logging"] },
+  { role: "gitops",      label: "GitOps",      color: "#1e6091", namespaces: ["argocd", "fluxcd", "flux-system"] },
+  { role: "ci",          label: "CI",          color: "#0e7c66", namespaces: ["tekton-pipelines", "jenkins", "gitlab", "gitlab-runner", "buildkit", "kaniko"] },
+  { role: "registry",    label: "Registry",    color: "#1e8449", namespaces: ["harbor"] },
+  { role: "backup",      label: "Backup",      color: "#5a3a00", namespaces: ["velero"] },
+];
+const PLATFORM_OTHER = { role: "platform-other", label: "Platform", color: "#5d6d7e", namespaces: [] };
+const nsRoleIndex = new Map();
+for (const r of PLATFORM_NS_ROLES) {
+  for (const ns of r.namespaces) nsRoleIndex.set(ns, r);
+}
+const platformNs = new Set(nsRoleIndex.keys());
+// Normalise the namespace before role lookup so dev-monitoring / monitoring-prod group under
+// Monitoring, etc. (nsRoleIndex keys are already base names like "monitoring").
+const platformRoleOf = (w) => nsRoleIndex.get(nsNormalize(w.namespace)) || PLATFORM_OTHER;
+const isStateful = w => w.kind === "StatefulSet" || ["DB", "Cache", "Queue"].includes(w.category);
+const isPlatform = w => platformNs.has(nsNormalize(w.namespace));
+
 //============ Render: Architecture (switch-bus diagram, Korean style) ============
 function renderArchitecture() {
   const root = $("#viewBody");
@@ -10268,46 +10308,7 @@ function renderArchitecture() {
     return;
   }
 
-  const NS = "http://www.w3.org/2000/svg";
-  const svg = (tag, attrs = {}, children = []) => {
-    const node = document.createElementNS(NS, tag);
-    for (const [k, v] of Object.entries(attrs)) {
-      if (k.startsWith("on") && typeof v === "function") node.addEventListener(k.slice(2).toLowerCase(), v);
-      else if (v != null) node.setAttribute(k, v);
-    }
-    for (const c of [].concat(children)) {
-      if (c == null) continue;
-      node.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
-    }
-    return node;
-  };
-
-  // Classification — platform namespaces split into sub-roles so the (관리/Mgmt) row
-  // can color-group monitoring vs logging vs gitops vs CI rather than dumping them all
-  // into one grey blob. namespace remains the source of truth — these are purely
-  // visual sub-groupings (no schema change, no extra field on workloads).
-  const PLATFORM_NS_ROLES = [
-    { role: "runtime",     label: "Runtime",     color: "#5d6d7e", namespaces: ["kube-system"] },
-    { role: "gateway",     label: "Gateway/Mesh",color: "#7d3c98", namespaces: ["ingress-nginx", "istio-system"] },
-    { role: "security",    label: "Security",    color: "#922b21", namespaces: ["cert-manager", "external-secrets"] },
-    { role: "monitoring",  label: "Monitoring",  color: "#cd5c5c", namespaces: ["monitoring"] },
-    { role: "logging",     label: "Logging",     color: "#b87a2e", namespaces: ["logging"] },
-    { role: "gitops",      label: "GitOps",      color: "#1e6091", namespaces: ["argocd", "fluxcd", "flux-system"] },
-    { role: "ci",          label: "CI",          color: "#0e7c66", namespaces: ["tekton-pipelines", "jenkins", "gitlab", "gitlab-runner", "buildkit", "kaniko"] },
-    { role: "registry",    label: "Registry",    color: "#1e8449", namespaces: ["harbor"] },
-    { role: "backup",      label: "Backup",      color: "#5a3a00", namespaces: ["velero"] },
-  ];
-  const PLATFORM_OTHER = { role: "platform-other", label: "Platform", color: "#5d6d7e", namespaces: [] };
-  const nsRoleIndex = new Map();
-  for (const r of PLATFORM_NS_ROLES) {
-    for (const ns of r.namespaces) nsRoleIndex.set(ns, r);
-  }
-  const platformNs = new Set(nsRoleIndex.keys());
-  // Normalise the namespace before role lookup so dev-monitoring / monitoring-prod group under
-  // Monitoring, etc. (nsRoleIndex keys are already base names like "monitoring").
-  const platformRoleOf = (w) => nsRoleIndex.get(nsNormalize(w.namespace)) || PLATFORM_OTHER;
-  const isStateful = w => w.kind === "StatefulSet" || ["DB", "Cache", "Queue"].includes(w.category);
-  const isPlatform = w => platformNs.has(nsNormalize(w.namespace));
+  const svg = svgNode;
 
   // ---- Zone derivation ----
   // Zone = node.labels["topology.kubernetes.io/zone"] || node.site_id
@@ -11891,19 +11892,7 @@ function renderDependency() {
   const colorOf = (w) => workloadColorClass(w);
 
   // ---- SVG ----
-  const NS = "http://www.w3.org/2000/svg";
-  const svg = (tag, attrs = {}, children = []) => {
-    const node = document.createElementNS(NS, tag);
-    for (const [k, v] of Object.entries(attrs)) {
-      if (k.startsWith("on") && typeof v === "function") node.addEventListener(k.slice(2).toLowerCase(), v);
-      else if (v != null) node.setAttribute(k, v);
-    }
-    for (const c of [].concat(children)) {
-      if (c == null) continue;
-      node.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
-    }
-    return node;
-  };
+  const svg = svgNode;
 
   // Pre-pass: compute lane routing for non-back, multi-layer edges so we can
   // expand the SVG viewBox to accommodate bezier control-point overshoot.
@@ -14993,6 +14982,737 @@ function renderChecklist() {
   root.appendChild(wrap);
 }
 
+//============ Deliverables (SI 산출물) ============
+// 상단 탭 하나 + 레지스트리. 새 산출물을 추가할 때는 DELIVERABLES에 한 줄 + 렌더 함수 하나면 된다
+// (Export 뷰의 tabs 배열 · REPORT_SECTIONS와 같은 관용구). 산출물 종류마다 탭을 늘리면 분석 렌즈
+// (Topology/Capacity/Bottleneck)와 납품 문서가 상단 한 줄에 섞여 축이 흐려지므로 하나로 모은다.
+//
+// Export 뷰가 "기계가 먹는 산출물"(kubectl/helm/compose)이라면 이 탭은 "사람이 검토하고 납품하는
+// 문서"다. 그래서 다운로드 버튼은 이 탭 안에만 둔다 — 화면에서 눈으로 확인한 뒤 내보내는 흐름.
+const DELIVERABLES = [
+  { id: "concept", name: "아키텍처 개념도", kind: "diagram",
+    desc: "현재 구성에서 도출한 목표 아키텍처 개념도", render: renderConceptDeliverable },
+];
+
+// ---- 개념도 편집 상태 ----
+// 개념도는 매번 config에서 다시 도출된다. 사용자가 손댄 것(라벨/메모/숨김/추가 요소)만
+// project.concept에 남기고, 도출 결과와 같아진 오버라이드는 지워서 구성 변경을 계속 따라가게 한다.
+// 키는 엔티티 id에서 만들어지는 안정 키라 save/load/export를 넘겨도 유지된다 (Checklist와 동일).
+// 스키마 버전은 올리지 않는다 — checklist_custom과 같이 lazy-init으로 처리.
+function _conceptState(p) {
+  if (!p.concept || typeof p.concept !== "object") p.concept = {};
+  const c = p.concept;
+  if (!c.boxes || typeof c.boxes !== "object") c.boxes = {};
+  if (!Array.isArray(c.custom)) c.custom = [];
+  return c;
+}
+function getConceptBox(p, key) { return _conceptState(p).boxes[key] || {}; }
+function setConceptBox(p, key, patch) {
+  const boxes = _conceptState(p).boxes;
+  const next = { ...(boxes[key] || {}), ...patch };
+  // 빈 오버라이드는 남기지 않는다 (도출값으로 되돌아감).
+  if (!next.label && !next.note && !next.hidden) delete boxes[key];
+  else boxes[key] = next;
+}
+function addConceptBox(p, lane, colId) {
+  const key = `cd:custom:${uid()}`;
+  _conceptState(p).custom.push({ key, lane, colId: colId || null });
+  setConceptBox(p, key, { label: "새 요소" });
+  return key;
+}
+function removeConceptBox(p, key) {
+  const c = _conceptState(p);
+  c.custom = c.custom.filter(x => x.key !== key);
+  delete c.boxes[key];
+}
+function resetConcept(p) { p.concept = { title: "", subtitle: "", boxes: {}, custom: [] }; }
+
+const conceptTitle = (p) => _conceptState(p).title || `${p.name} 목표 아키텍처 개념도`;
+const conceptSubtitle = (p) => _conceptState(p).subtitle || "";
+
+// 개념도 레인 — 위에서 아래로 읽는 흐름. scope:"column"인 레인만 클러스터별로 쪼개진다.
+const CONCEPT_LANES = [
+  { id: "actor",    label: "사용자 · 채널", scope: "global", flow: true },
+  { id: "edge",     label: "접근 계층",     scope: "global", flow: true },
+  { id: "service",  label: "서비스 계층",   scope: "column", flow: true },
+  { id: "data",     label: "데이터 계층",   scope: "column", flow: true },
+  { id: "platform", label: "관리 · 운영",   scope: "global", flow: false },
+  { id: "external", label: "외부 연동",     scope: "global", flow: false },
+];
+const CONCEPT_LANE_BY_ID = new Map(CONCEPT_LANES.map(l => [l.id, l]));
+
+const _cdNeutral  = { fill: "#37474f", stroke: "#78909c" };
+const _cdEdge     = { fill: "#4a235a", stroke: "#7d3c98" };
+const _cdSecurity = { fill: "#641e16", stroke: "#922b21" };
+const _cdStorage  = { fill: "#154360", stroke: "#2980b9" };
+const _cdExternal = { fill: "#7e5109", stroke: "#b9770e" };
+const _cdLink     = { fill: "#4d5656", stroke: "#7f8c8d" };
+
+const _cdNames = (names) =>
+  names.slice(0, 3).join(", ") + (names.length > 3 ? ` 외 ${names.length - 3}` : "");
+
+// 개념도 모델을 config에서 도출한다. 분류 기준은 새로 만들지 않고 이미 있는 것을 접어 쓴다 —
+// 티어는 categoryKeyOf(=Architecture 뷰 범례와 같은 키), 관리 계층은 PLATFORM_NS_ROLES,
+// 데이터 계층은 isStateful. 그래야 같은 프로젝트를 두 뷰에서 봤을 때 색과 이름이 어긋나지 않는다.
+function buildConceptModel(p) {
+  const st = _conceptState(p);
+  const clusters = p.clusters || [];
+  const sites = p.sites || [];
+  const columns = clusters.map(c => ({
+    id: c.id, label: c.name,
+    sub: `노드 ${(c.node_ids || []).length} · 워크로드 ${(c.workloads || []).length}`,
+  }));
+  const derived = [];
+  const push = (b) => derived.push(b);
+
+  // --- 사용자 · 채널 ---
+  const hosts = [];
+  let publicEntry = false;
+  for (const c of clusters) {
+    for (const r of (c.ingress_rules || [])) { publicEntry = true; if (r.host) hosts.push(r.host); }
+    for (const w of (c.workloads || [])) {
+      const t = w.network?.service?.type;
+      if (t === "LoadBalancer" || t === "NodePort") publicEntry = true;
+    }
+  }
+  for (const s of sites) if ((s.l4_balancers || []).length) publicEntry = true;
+  if (publicEntry) {
+    push({ key: "cd:actor:public", lane: "actor", label: "외부 사용자",
+           sub: hosts.length ? _cdNames(hosts) : "인터넷", ..._cdNeutral });
+  }
+  if ((p.site_links || []).length) {
+    push({ key: "cd:actor:private", lane: "actor", label: "내부 · 전용망 사용자",
+           sub: `사이트 간 연결 ${(p.site_links || []).length}`, ..._cdNeutral });
+  }
+  const hasPlatform = clusters.some(c => (c.workloads || []).some(isPlatform));
+  if (hasPlatform) {
+    push({ key: "cd:actor:ops", lane: "actor", label: "운영자 · 관리자",
+           sub: "모니터링 · 배포 · 운영", ..._cdNeutral });
+  }
+
+  // --- 접근 계층 --- (사이트 경계 장비 + L4 + Ingress 컨트롤러)
+  for (const s of sites) {
+    const sec = (s.network_devices || []).filter(d => ["firewall", "waf", "ddos", "cdn", "vpn"].includes(d.kind));
+    if (sec.length) {
+      push({ key: `cd:edgesec:${s.id}`, lane: "edge", label: "보안 경계",
+             sub: `${s.name} · ${[...new Set(sec.map(d => d.kind.toUpperCase()))].join(" · ")}`,
+             ..._cdSecurity, ref: { kind: "site", id: s.id } });
+    }
+    for (const lb of (s.l4_balancers || [])) {
+      const bits = ["L4 LB"];
+      if (lb.vip) bits.push(lb.vip);
+      if (lb.ha) bits.push("HA");
+      push({ key: `cd:l4:${lb.id}`, lane: "edge", label: lb.name, sub: bits.join(" · "),
+             ..._cdEdge, ref: { kind: "site", id: s.id } });
+    }
+  }
+  for (const c of clusters) {
+    const ing = c.addons?.ingress;
+    if (ing && ing !== "None") {
+      push({ key: `cd:ing:${c.id}`, lane: "edge", label: `${ing} Ingress`,
+             sub: `${c.name} · 규칙 ${(c.ingress_rules || []).length}`,
+             ..._cdEdge, ref: { kind: "cluster", id: c.id } });
+    }
+  }
+
+  // --- 서비스 / 데이터 계층 --- 클러스터 컬럼별로 카테고리 묶음 하나 = 박스 하나
+  for (const c of clusters) {
+    const svc = new Map(), data = new Map();
+    for (const w of (c.workloads || [])) {
+      if (isPlatform(w)) continue;
+      const key = categoryKeyOf(w.category);
+      const bucket = isStateful(w) ? data : svc;
+      const g = bucket.get(key) || { count: 0, names: [] };
+      g.count++; g.names.push(w.name);
+      bucket.set(key, g);
+    }
+    const emit1 = (bucket, lane, prefix) => {
+      for (const [key, g] of bucket) {
+        push({ key: `${prefix}:${c.id}:${key}`, lane, colId: c.id, label: key, count: g.count,
+               sub: _cdNames(g.names), ...COLOR_CATEGORY[key], lk: key, ll: key,
+               ref: { kind: "cluster", id: c.id } });
+      }
+    };
+    emit1(svc, "service", "cd:svc");
+    emit1(data, "data", "cd:data");
+  }
+  // PVC가 실제로 가리키는 사이트 스토리지만 데이터 계층에 올린다 (안 쓰는 스토리지는 개념도에 노이즈).
+  const storageUse = new Map();
+  for (const c of clusters) {
+    for (const w of (c.workloads || [])) {
+      for (const pv of (w.persistent_volumes || [])) {
+        if (!pv.target_storage_id) continue;
+        if (!storageUse.has(pv.target_storage_id)) storageUse.set(pv.target_storage_id, new Set());
+        storageUse.get(pv.target_storage_id).add(c.id);
+      }
+    }
+  }
+  for (const s of sites) {
+    for (const stg of (s.storages || [])) {
+      const used = storageUse.get(stg.id);
+      if (!used) continue;
+      const only = used.size === 1 ? [...used][0] : null;
+      push({ key: `cd:storage:${stg.id}`, lane: "data", colId: only, label: stg.name,
+             sub: `스토리지${stg.kind ? " · " + stg.kind : ""}`, ..._cdStorage,
+             lk: "storage", ll: "스토리지", ref: { kind: "site", id: s.id } });
+    }
+  }
+
+  // --- 관리 · 운영 --- 네임스페이스 역할별 묶음
+  const roles = new Map();
+  for (const c of clusters) {
+    for (const w of (c.workloads || [])) {
+      if (!isPlatform(w)) continue;
+      const r = platformRoleOf(w);
+      const g = roles.get(r.role) || { role: r, count: 0, names: [] };
+      g.count++; g.names.push(w.name);
+      roles.set(r.role, g);
+    }
+  }
+  for (const [rid, g] of roles) {
+    push({ key: `cd:plat:${rid}`, lane: "platform", label: g.role.label, count: g.count,
+           sub: _cdNames(g.names), fill: g.role.color, stroke: g.role.color,
+           lk: `plat:${rid}`, ll: g.role.label });
+  }
+
+  // --- 외부 연동 ---
+  for (const s of sites) {
+    for (const ex of (s.external_services || [])) {
+      push({ key: `cd:ext:${ex.id}`, lane: "external", label: ex.name,
+             sub: [ex.kind, ex.provider].filter(Boolean).join(" · ") || s.name,
+             ..._cdExternal, lk: "external", ll: "외부 서비스", ref: { kind: "site", id: s.id } });
+    }
+  }
+  for (const lk of (p.site_links || [])) {
+    const from = sites.find(s => s.id === lk.from_site_id)?.name || lk.from_site_id;
+    const to = sites.find(s => s.id === lk.to_site_id)?.name || lk.to_site_id;
+    const bits = [lk.kind];
+    if (lk.bandwidth_gbps) bits.push(`${lk.bandwidth_gbps}Gbps`);
+    if (lk.latency_ms) bits.push(`${lk.latency_ms}ms`);
+    push({ key: `cd:link:${lk.id}`, lane: "external", label: lk.name || `${from} ↔ ${to}`,
+           sub: bits.join(" · "), ..._cdLink, lk: "link", ll: "사이트 연결" });
+  }
+
+  // --- 오버라이드 적용 + 사용자 추가 요소 ---
+  const boxes = derived.map(b => {
+    const o = st.boxes[b.key] || {};
+    return { ...b, colId: b.colId || null, derived: true,
+             hidden: !!o.hidden, label: o.label || b.label, note: o.note || "" };
+  });
+  for (const cb of st.custom) {
+    const o = st.boxes[cb.key] || {};
+    boxes.push({ key: cb.key, lane: cb.lane, colId: cb.colId || null, derived: false,
+                 hidden: !!o.hidden, label: o.label || "(이름 없음)", sub: "", note: o.note || "",
+                 ..._cdNeutral });
+  }
+
+  // 범례는 화면과 내보낸 파일이 같아야 하므로 여기서 한 번만 만들어 양쪽에 쓴다.
+  const legend = [];
+  const seenLk = new Set();
+  for (const b of boxes) {
+    if (b.hidden || !b.lk || seenLk.has(b.lk)) continue;
+    seenLk.add(b.lk);
+    legend.push({ key: b.lk, label: b.ll || b.lk, fill: b.fill, stroke: b.stroke });
+  }
+  return { columns, boxes, legend };
+}
+
+// ---- 개념도 SVG ----
+const CD = {
+  PAD: 30, BOX_W: 176, BOX_H: 58, BGAP: 12,
+  LANE_HDR: 20, LANE_PAD: 14, LANE_GAP: 30,
+  COL_GAP: 22, COL_PAD: 14, COL_HDR: 34,
+  BASE_W: 1240,
+};
+const _cdEllip = (s, n) => {
+  s = String(s == null ? "" : s);
+  return s.length > n ? s.slice(0, n - 1) + "…" : s;
+};
+const _cdPerRow = (w) => Math.max(1, Math.floor((w + CD.BGAP) / (CD.BOX_W + CD.BGAP)));
+const _cdRows = (n, perRow) => Math.max(n ? Math.ceil(n / perRow) : 0, 0);
+const _cdBlockH = (n, perRow) => {
+  const rows = _cdRows(n, perRow);
+  return rows ? rows * CD.BOX_H + (rows - 1) * CD.BGAP : 0;
+};
+
+// 박스들을 [x, x+w] 안에서 가운데 정렬로 줄바꿈하며 그린다. 그린 높이를 돌려준다.
+function _cdDrawBoxes(g, list, x, w, y, onPick) {
+  if (!list.length) return 0;
+  const perRow = _cdPerRow(w);
+  let drawn = 0, row = 0;
+  while (drawn < list.length) {
+    const slice = list.slice(drawn, drawn + perRow);
+    const rowW = slice.length * CD.BOX_W + (slice.length - 1) * CD.BGAP;
+    let bx = x + (w - rowW) / 2;
+    const by = y + row * (CD.BOX_H + CD.BGAP);
+    for (const b of slice) {
+      const box = svgNode("g", { style: "cursor:pointer" });
+      box.addEventListener("click", () => onPick(b));
+      box.appendChild(svgNode("rect", {
+        x: bx, y: by, width: CD.BOX_W, height: CD.BOX_H, rx: 6, ry: 6,
+        fill: b.fill, stroke: b.stroke, "stroke-width": b.derived ? 1.4 : 1.4,
+        "stroke-dasharray": b.derived ? "" : "5 3",
+      }));
+      const title = b.count != null ? `${b.label} ×${b.count}` : b.label;
+      box.appendChild(svgNode("text", {
+        x: bx + CD.BOX_W / 2, y: by + (b.sub || b.note ? 23 : 34), "text-anchor": "middle",
+        fill: "#fff", "font-size": 13, "font-weight": 600,
+      }, [_cdEllip(title, 22)]));
+      const sub = b.note || b.sub;
+      if (sub) {
+        box.appendChild(svgNode("text", {
+          x: bx + CD.BOX_W / 2, y: by + 40, "text-anchor": "middle",
+          fill: "#fff", "fill-opacity": 0.72, "font-size": 10.5,
+        }, [_cdEllip(sub, 28)]));
+      }
+      g.appendChild(box);
+      bx += CD.BOX_W + CD.BGAP;
+    }
+    drawn += slice.length;
+    row++;
+  }
+  return _cdBlockH(list.length, perRow);
+}
+
+function _cdLaneFrame(g, label, x, y, w, h) {
+  g.appendChild(svgNode("rect", {
+    x, y, width: w, height: h, rx: 8, ry: 8,
+    fill: "var(--surface2)", "fill-opacity": 0.35,
+    stroke: "var(--border)", "stroke-width": 1,
+  }));
+  g.appendChild(svgNode("text", {
+    x: x + 12, y: y + 15, fill: "var(--text3)", "font-size": 11, "font-weight": 600,
+    "letter-spacing": "0.06em",
+  }, [label]));
+}
+
+function _cdArrow(g, cx, y, h) {
+  g.appendChild(svgNode("line", {
+    x1: cx, y1: y, x2: cx, y2: y + h - 7,
+    stroke: "var(--text3)", "stroke-width": 1.6, "stroke-opacity": 0.75,
+  }));
+  g.appendChild(svgNode("path", {
+    d: `M${cx - 5},${y + h - 8} L${cx + 5},${y + h - 8} L${cx},${y + h} Z`,
+    fill: "var(--text3)", "fill-opacity": 0.75,
+  }));
+}
+
+// 개념도 하나를 그려 <svg>를 돌려준다. onPick(box)은 박스 클릭 시 편집 패널을 열기 위한 콜백.
+function renderConceptSvg(p, model, onPick) {
+  const visible = model.boxes.filter(b => !b.hidden);
+  const laneBoxes = (lane) => visible.filter(b => b.lane === lane);
+  const cols = model.columns;
+
+  // 컬럼 폭 — 최소 2박스가 들어가야 읽힌다. 안 들어가면 캔버스를 넓힌다.
+  const minColW = CD.BOX_W * 2 + CD.BGAP + CD.COL_PAD * 2;
+  let W = CD.BASE_W;
+  let innerW = W - CD.PAD * 2;
+  let colW = cols.length
+    ? Math.max(minColW, (innerW - (cols.length - 1) * CD.COL_GAP) / cols.length)
+    : innerW;
+  if (cols.length && colW * cols.length + (cols.length - 1) * CD.COL_GAP > innerW) {
+    innerW = colW * cols.length + (cols.length - 1) * CD.COL_GAP;
+    W = innerW + CD.PAD * 2;
+  }
+  const colX = (i) => CD.PAD + i * (colW + CD.COL_GAP);
+
+  const g = svgNode("g");
+  let y = CD.PAD;
+
+  // 제목 블록
+  g.appendChild(svgNode("text", {
+    x: CD.PAD, y: y + 20, fill: "var(--text)", "font-size": 20, "font-weight": 700,
+  }, [conceptTitle(p)]));
+  y += 28;
+  const subtitle = conceptSubtitle(p);
+  if (subtitle) {
+    g.appendChild(svgNode("text", {
+      x: CD.PAD, y: y + 12, fill: "var(--text2)", "font-size": 12,
+    }, [subtitle]));
+    y += 20;
+  }
+  g.appendChild(svgNode("text", {
+    x: CD.PAD + innerW, y: y - (subtitle ? 20 : 8), "text-anchor": "end",
+    fill: "var(--text3)", "font-size": 11, "font-family": "JetBrains Mono",
+  }, [`${p.mode} · ${_todayStamp()}`]));
+  y += 14;
+
+  // 전역 레인 하나를 그린다.
+  const drawGlobalLane = (lane) => {
+    const list = laneBoxes(lane.id);
+    if (!list.length) return;
+    const bodyH = _cdBlockH(list.length, _cdPerRow(innerW - CD.LANE_PAD * 2));
+    const h = CD.LANE_HDR + bodyH + CD.LANE_PAD;
+    _cdLaneFrame(g, lane.label, CD.PAD, y, innerW, h);
+    _cdDrawBoxes(g, list, CD.PAD + CD.LANE_PAD, innerW - CD.LANE_PAD * 2, y + CD.LANE_HDR, onPick);
+    y += h;
+    y += CD.LANE_GAP;
+    _cdArrow(g, CD.PAD + innerW / 2, y - CD.LANE_GAP + 6, CD.LANE_GAP - 12);
+  };
+
+  for (const lane of ["actor", "edge"]) {
+    drawGlobalLane(CONCEPT_LANE_BY_ID.get(lane));
+  }
+
+  // 클러스터 밴드 — 컬럼 하나가 클러스터 하나, 그 안에 서비스 계층 → 데이터 계층.
+  const colScoped = (lane, colId) => laneBoxes(lane).filter(b => b.colId === colId);
+  const sharedData = laneBoxes("data").filter(b => b.colId == null);
+  if (cols.length) {
+    const innerColW = colW - CD.COL_PAD * 2;
+    const perRow = _cdPerRow(innerColW);
+    let bandH = 0;
+    const colParts = cols.map(c => {
+      const svc = colScoped("service", c.id), dat = colScoped("data", c.id);
+      const svcH = svc.length ? CD.LANE_HDR + _cdBlockH(svc.length, perRow) : 0;
+      const datH = dat.length ? CD.LANE_HDR + _cdBlockH(dat.length, perRow) : 0;
+      const gap = svcH && datH ? CD.LANE_GAP : 0;
+      const h = CD.COL_HDR + svcH + gap + datH + CD.COL_PAD;
+      bandH = Math.max(bandH, h);
+      return { c, svc, dat, svcH, datH, gap };
+    });
+    cols.forEach((c, i) => {
+      const x = colX(i);
+      const part = colParts[i];
+      g.appendChild(svgNode("rect", {
+        x, y, width: colW, height: bandH, rx: 10, ry: 10,
+        fill: "var(--surface)", "fill-opacity": 0.5,
+        stroke: "var(--border)", "stroke-width": 1.4, "stroke-dasharray": "6 4",
+      }));
+      g.appendChild(svgNode("text", {
+        x: x + CD.COL_PAD, y: y + 18, fill: "var(--text)", "font-size": 13, "font-weight": 600,
+      }, [`☸ ${_cdEllip(c.label, 30)}`]));
+      g.appendChild(svgNode("text", {
+        x: x + CD.COL_PAD, y: y + 30, fill: "var(--text3)", "font-size": 10,
+        "font-family": "JetBrains Mono",
+      }, [c.sub]));
+      let cy = y + CD.COL_HDR;
+      if (part.svc.length) {
+        g.appendChild(svgNode("text", {
+          x: x + CD.COL_PAD, y: cy + 13, fill: "var(--text3)", "font-size": 10.5, "font-weight": 600,
+        }, ["서비스 계층"]));
+        _cdDrawBoxes(g, part.svc, x + CD.COL_PAD, innerColW, cy + CD.LANE_HDR, onPick);
+        cy += part.svcH;
+      }
+      if (part.svc.length && part.dat.length) {
+        _cdArrow(g, x + colW / 2, cy + 6, CD.LANE_GAP - 12);
+        cy += part.gap;
+      }
+      if (part.dat.length) {
+        g.appendChild(svgNode("text", {
+          x: x + CD.COL_PAD, y: cy + 13, fill: "var(--text3)", "font-size": 10.5, "font-weight": 600,
+        }, ["데이터 계층"]));
+        _cdDrawBoxes(g, part.dat, x + CD.COL_PAD, innerColW, cy + CD.LANE_HDR, onPick);
+      }
+    });
+    y += bandH;
+    if (sharedData.length || laneBoxes("platform").length || laneBoxes("external").length) {
+      y += CD.LANE_GAP;
+      _cdArrow(g, CD.PAD + innerW / 2, y - CD.LANE_GAP + 6, CD.LANE_GAP - 12);
+    }
+  }
+  // 여러 클러스터가 함께 쓰는 스토리지는 컬럼 밖 공용 줄에 둔다.
+  if (sharedData.length) {
+    const bodyH = _cdBlockH(sharedData.length, _cdPerRow(innerW - CD.LANE_PAD * 2));
+    const h = CD.LANE_HDR + bodyH + CD.LANE_PAD;
+    _cdLaneFrame(g, "데이터 계층 (공용)", CD.PAD, y, innerW, h);
+    _cdDrawBoxes(g, sharedData, CD.PAD + CD.LANE_PAD, innerW - CD.LANE_PAD * 2, y + CD.LANE_HDR, onPick);
+    y += h + CD.LANE_GAP - 12;
+  }
+
+  // 관리 / 외부 레인은 흐름 화살표 없이 나란히.
+  for (const id of ["platform", "external"]) {
+    const lane = CONCEPT_LANE_BY_ID.get(id);
+    const list = laneBoxes(id);
+    if (!list.length) continue;
+    const bodyH = _cdBlockH(list.length, _cdPerRow(innerW - CD.LANE_PAD * 2));
+    const h = CD.LANE_HDR + bodyH + CD.LANE_PAD;
+    _cdLaneFrame(g, lane.label, CD.PAD, y, innerW, h);
+    _cdDrawBoxes(g, list, CD.PAD + CD.LANE_PAD, innerW - CD.LANE_PAD * 2, y + CD.LANE_HDR, onPick);
+    y += h + 16;
+  }
+
+  // 범례 — 다이어그램 안에 굽는다. 내보낸 SVG/PNG가 화면과 정확히 같아야 하므로
+  // diagramExportButtons에는 범례를 넘기지 않는다 (바깥에서 한 번 더 붙이면 중복).
+  if (model.legend.length) {
+    let lx = CD.PAD, ly = y + 8;
+    g.appendChild(svgNode("text", {
+      x: lx, y: ly + 10, fill: "var(--text3)", "font-size": 10, "font-weight": 600,
+      "letter-spacing": "0.06em",
+    }, ["범례"]));
+    lx += 40;
+    for (const e of model.legend) {
+      const w = 18 + e.label.length * 7.4 + 14;
+      if (lx + w > CD.PAD + innerW) { lx = CD.PAD + 40; ly += 22; }
+      g.appendChild(svgNode("rect", { x: lx, y: ly, width: 12, height: 12, rx: 3, ry: 3, fill: e.fill, stroke: e.stroke }));
+      g.appendChild(svgNode("text", { x: lx + 18, y: ly + 11, fill: "var(--text2)", "font-size": 11 }, [e.label]));
+      lx += w;
+    }
+    y = ly + 24;
+  }
+  g.appendChild(svgNode("text", {
+    x: CD.PAD, y: y + 12, fill: "var(--text3)", "font-size": 10, "font-style": "italic",
+  }, ["점선 테두리 = 직접 추가한 요소 · 그 외는 현재 구성에서 자동 도출"]));
+  y += 20;
+
+  const svgRoot = svgNode("svg", {
+    viewBox: `0 0 ${W} ${y + CD.PAD}`,
+    width: "100%",
+    style: `background:var(--bg); border:1px solid var(--border); border-radius:8px; display:block;`,
+    preserveAspectRatio: "xMidYMin meet",
+  }, [g]);
+  return svgRoot;
+}
+
+// 검토 결과를 그대로 문서로 옮긴 Markdown (숨긴 요소는 빠지고, 메모는 비고로 들어간다).
+function conceptMarkdown(p, model) {
+  const out = [];
+  out.push(`# ${conceptTitle(p)}`);
+  const sub = conceptSubtitle(p);
+  if (sub) out.push(`\n${sub}`);
+  out.push(`\n- 프로젝트: **${p.name}** (${p.mode})`);
+  out.push(`- 작성일: ${_todayStamp()}`);
+  if (model.columns.length) {
+    out.push(`- 대상 클러스터: ${model.columns.map(c => `${c.label} (${c.sub})`).join(", ")}`);
+  }
+  for (const lane of CONCEPT_LANES) {
+    const list = model.boxes.filter(b => b.lane === lane.id && !b.hidden);
+    if (!list.length) continue;
+    out.push(`\n## ${lane.label}\n`);
+    out.push(`| 구분 | 요소 | 수량 | 비고 |`);
+    out.push(`|---|---|---|---|`);
+    for (const b of list) {
+      const col = b.colId ? (model.columns.find(c => c.id === b.colId)?.label || "-") : "공통";
+      const note = b.note || b.sub || "";
+      out.push(`| ${col} | ${b.label} | ${b.count != null ? b.count : "-"} | ${note} |`);
+    }
+  }
+  const hidden = model.boxes.filter(b => b.hidden);
+  if (hidden.length) {
+    out.push(`\n> 개념도에서 제외한 요소 ${hidden.length}건: ${hidden.map(b => b.label).join(", ")}`);
+  }
+  return out.join("\n") + "\n";
+}
+
+// ---- 편집 패널 ----
+function _cdEditRow(p, b, model) {
+  const rowStyle = {
+    display: "grid", gridTemplateColumns: "20px 1fr 1.2fr 90px 22px",
+    gap: "8px", alignItems: "center", padding: "4px 0",
+    borderBottom: "1px solid var(--border)",
+  };
+  const show = el("input", {
+    type: "checkbox", checked: b.hidden ? null : "",
+    title: b.hidden ? "개념도에 표시" : "개념도에서 제외",
+    onchange: e => { setConceptBox(p, b.key, { hidden: !e.target.checked }); emit(); saveSoon(); },
+  });
+  const labelInput = el("input", {
+    "data-focus-key": `concept.${b.key}.label`,
+    value: b.label,
+    style: { width: "100%", fontSize: "11px", padding: "3px 6px" },
+    oninput: e => { setConceptBox(p, b.key, { label: e.target.value }); emit(); saveSoon(); },
+  });
+  const noteInput = el("input", {
+    "data-focus-key": `concept.${b.key}.note`,
+    value: b.note,
+    placeholder: b.sub || "비고",
+    style: { width: "100%", fontSize: "11px", padding: "3px 6px" },
+    oninput: e => { setConceptBox(p, b.key, { note: e.target.value }); emit(); saveSoon(); },
+  });
+  const colLabel = b.colId ? (model.columns.find(c => c.id === b.colId)?.label || "-") : "공통";
+  const meta = el("span", {
+    style: { fontSize: "10px", color: "var(--text3)", fontFamily: "JetBrains Mono", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+    title: b.derived ? `자동 도출 · ${colLabel}` : `직접 추가 · ${colLabel}`,
+  }, [b.derived ? colLabel : "직접 추가"]);
+  const del = b.derived
+    ? el("span", { style: { fontSize: "11px", color: "var(--text3)" }, title: "자동 도출 요소는 삭제 대신 체크 해제로 숨깁니다" }, ["·"])
+    : el("span", {
+        style: { cursor: "pointer", fontSize: "11px", color: "var(--text3)" }, title: "삭제",
+        onclick: () => { removeConceptBox(p, b.key); emit(); saveSoon(); },
+      }, ["🗑"]);
+  const row = el("div", { style: rowStyle }, [show, labelInput, noteInput, meta, del]);
+  if (b.hidden) row.style.opacity = "0.45";
+  return row;
+}
+
+function _cdEditPanel(p, model) {
+  const panel = el("div", {
+    style: {
+      marginTop: "16px", border: "1px solid var(--border)", borderRadius: "8px",
+      background: "var(--surface)", padding: "12px 14px",
+    },
+  });
+  panel.appendChild(el("div", {
+    style: { display: "flex", alignItems: "baseline", gap: "10px", marginBottom: "8px" },
+  }, [
+    el("h3", { style: { fontSize: "13px", fontWeight: 600, margin: 0 } }, ["요소 검토 · 수정"]),
+    el("span", { style: { fontSize: "11px", color: "var(--text3)" } }, [
+      "체크 해제하면 개념도에서 빠집니다. 라벨·비고는 바로 반영되고 프로젝트에 저장됩니다.",
+    ]),
+  ]));
+  for (const lane of CONCEPT_LANES) {
+    const list = model.boxes.filter(b => b.lane === lane.id);
+    const head = el("div", {
+      style: {
+        display: "flex", alignItems: "center", gap: "8px",
+        marginTop: "10px", paddingBottom: "4px",
+      },
+    }, [
+      el("span", { style: { fontSize: "11px", fontWeight: 600, color: "var(--text2)", letterSpacing: "0.05em" } }, [lane.label]),
+      el("span", { style: { fontSize: "10px", color: "var(--text3)", fontFamily: "JetBrains Mono" } },
+        [`${list.filter(b => !b.hidden).length}/${list.length}`]),
+      el("span", { style: { flex: 1 } }, []),
+      el("button", {
+        style: {
+          background: "transparent", border: "1px solid var(--border)", color: "var(--text2)",
+          padding: "2px 8px", borderRadius: "4px", cursor: "pointer", fontSize: "10px", fontFamily: "inherit",
+        },
+        title: `${lane.label}에 직접 요소를 추가합니다`,
+        onclick: () => { addConceptBox(p, lane.id, null); emit(); saveSoon(); },
+      }, ["+ 요소"]),
+    ]);
+    panel.appendChild(head);
+    if (!list.length) {
+      panel.appendChild(el("div", { style: { fontSize: "11px", color: "var(--text3)", padding: "2px 0 6px" } },
+        ["현재 구성에서 도출된 요소 없음"]));
+      continue;
+    }
+    for (const b of list) panel.appendChild(_cdEditRow(p, b, model));
+  }
+  return panel;
+}
+
+// ---- 개념도 산출물 ----
+function renderConceptDeliverable(root, p) {
+  const st = _conceptState(p);
+  const model = buildConceptModel(p);
+
+  if (!p.clusters?.length) {
+    root.appendChild(el("div", { class: "view-empty" }, [
+      el("div", { class: "big" }, ["◇"]),
+      el("h2", {}, ["아키텍처 개념도"]),
+      el("p", {}, ["클러스터·워크로드가 있어야 개념도를 도출할 수 있습니다."]),
+    ]));
+    return;
+  }
+
+  const btnStyle = {
+    background: "var(--surface2)", border: "1px solid var(--border)",
+    color: "var(--text)", padding: "4px 10px", borderRadius: "4px",
+    cursor: "pointer", fontSize: "11px", fontFamily: "inherit",
+  };
+
+  // 제목/부제 — 산출물 표지에 그대로 나가는 값이라 다이어그램 위에 둔다.
+  const titleInput = el("input", {
+    "data-focus-key": "concept.title",
+    value: st.title || "",
+    placeholder: conceptTitle(p),
+    style: { flex: "2 1 260px", fontSize: "12px", padding: "4px 8px" },
+    oninput: e => { st.title = e.target.value; emit(); saveSoon(); },
+  });
+  const subInput = el("input", {
+    "data-focus-key": "concept.subtitle",
+    value: st.subtitle || "",
+    placeholder: "부제 (예: 1단계 이행 목표 구성)",
+    style: { flex: "2 1 220px", fontSize: "12px", padding: "4px 8px" },
+    oninput: e => { st.subtitle = e.target.value; emit(); saveSoon(); },
+  });
+
+  let svgRoot = null;
+  const onPick = (b) => {
+    // 박스를 누르면 편집 패널의 해당 라벨로 포커스를 옮긴다 — 보고 바로 고치는 흐름.
+    const target = root.querySelector(`[data-focus-key="concept.${CSS.escape(b.key)}.label"]`);
+    if (target) { target.scrollIntoView({ block: "center" }); target.focus(); target.select?.(); }
+    else if (b.ref) selectEntity(b.ref.kind, b.ref.id);
+  };
+  svgRoot = renderConceptSvg(p, model, onPick);
+
+  const shown = model.boxes.filter(b => !b.hidden).length;
+  const wrap = el("div", {});
+  wrap.appendChild(el("div", {
+    style: { display: "flex", alignItems: "center", gap: "10px", marginBottom: "10px", flexWrap: "wrap" },
+  }, [
+    el("span", { style: { fontSize: "11px", color: "var(--text3)", letterSpacing: "0.05em", textTransform: "uppercase", fontWeight: 600 } }, ["제목"]),
+    titleInput,
+    subInput,
+    el("button", {
+      style: btnStyle, title: "직접 수정한 라벨·비고·숨김·추가 요소를 모두 지우고 현재 구성에서 다시 도출합니다",
+      onclick: () => {
+        if (!confirm("직접 수정한 내용을 모두 지우고 현재 구성에서 다시 도출합니다. 계속할까요?")) return;
+        resetConcept(p); emit(); saveSoon();
+      },
+    }, ["↺ 재도출"]),
+  ]));
+
+  wrap.appendChild(el("div", {
+    style: { display: "flex", alignItems: "center", gap: "10px", marginBottom: "10px", flexWrap: "wrap" },
+  }, [
+    el("span", { style: { fontSize: "11px", color: "var(--text3)", fontStyle: "italic" } }, [
+      `요소 ${shown}/${model.boxes.length} 표시 · 클러스터 ${model.columns.length}` +
+      (st.custom.length ? ` · 직접 추가 ${st.custom.length}` : ""),
+    ]),
+    el("span", { style: { flex: 1 } }, []),
+    el("span", { style: { fontSize: "11px", color: "var(--text3)" } }, ["확인 후 내보내기 →"]),
+    // 범례는 SVG 안에 이미 있으므로 export 헬퍼에는 넘기지 않는다.
+    ...diagramExportButtons(() => svgRoot, "concept", () => null),
+    el("button", {
+      style: btnStyle, title: "표·비고까지 담은 Markdown 산출물",
+      onclick: () => _triggerDownload(
+        new Blob([conceptMarkdown(p, model)], { type: "text/markdown;charset=utf-8" }),
+        `${slug(p.name) || "vk8s"}-concept-${_todayStamp()}.md`),
+    }, ["⬇ Markdown"]),
+  ]));
+
+  wrap.appendChild(svgRoot);
+  wrap.appendChild(_cdEditPanel(p, model));
+  root.appendChild(wrap);
+}
+
+//============ Render: Deliverables ============
+function renderDeliverables() {
+  const root = $("#viewBody");
+  root.innerHTML = "";
+  const p = state.project;
+  if (!p) return;
+  const cur = DELIVERABLES.find(d => d.id === state.ui.deliverable) || DELIVERABLES[0];
+  state.ui.deliverable = cur.id;
+
+  const wrap = el("div", {});
+  wrap.appendChild(el("div", {
+    style: { display: "flex", alignItems: "center", gap: "12px", marginBottom: "12px", flexWrap: "wrap" },
+  }, [
+    el("h2", { style: { fontSize: "16px", fontWeight: 600, margin: 0 } }, [
+      "산출물", helpIcon("view.deliverable"),
+    ]),
+    el("span", { style: { fontSize: "11px", color: "var(--text3)", fontStyle: "italic" } }, [
+      "화면에서 검토·수정한 뒤 내보내는 납품 문서",
+    ]),
+  ]));
+
+  const tabRow = el("div", {
+    style: { display: "flex", gap: "4px", marginBottom: "12px", borderBottom: "1px solid var(--border)" },
+  });
+  for (const d of DELIVERABLES) {
+    const active = d.id === cur.id;
+    tabRow.appendChild(el("button", {
+      style: {
+        background: active ? "var(--surface2)" : "transparent",
+        border: "1px solid " + (active ? "var(--border)" : "transparent"),
+        borderBottom: active ? "1px solid var(--surface2)" : "1px solid transparent",
+        marginBottom: "-1px",
+        color: active ? "var(--text)" : "var(--text2)",
+        padding: "6px 14px", borderRadius: "4px 4px 0 0",
+        cursor: "pointer", fontSize: "12px", fontFamily: "inherit",
+        fontWeight: active ? "600" : "400",
+      },
+      title: d.desc,
+      onclick: () => { state.ui.deliverable = d.id; emit(); },
+    }, [d.name]));
+  }
+  wrap.appendChild(tabRow);
+  root.appendChild(wrap);
+  cur.render(root, p);
+}
+
 //============ Render: Export ============
 function renderExport() {
   const root = $("#viewBody");
@@ -15360,6 +16080,7 @@ function renderViewBody() {
   if (v === "namespace") return renderNamespace();
   if (v === "bottleneck") return renderBottleneck();
   if (v === "checklist") return renderChecklist();
+  if (v === "deliverable") return renderDeliverables();
   if (v === "export") return renderExport();
   // placeholder for other views
   $("#viewBody").innerHTML = "";
