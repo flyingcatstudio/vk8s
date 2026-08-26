@@ -15006,7 +15006,6 @@ function _conceptState(p) {
   if (!Array.isArray(c.custom)) c.custom = [];
   return c;
 }
-function getConceptBox(p, key) { return _conceptState(p).boxes[key] || {}; }
 function setConceptBox(p, key, patch) {
   const boxes = _conceptState(p).boxes;
   const next = { ...(boxes[key] || {}), ...patch };
@@ -15039,7 +15038,6 @@ const CONCEPT_LANES = [
   { id: "platform", label: "관리 · 운영",   scope: "global", flow: false },
   { id: "external", label: "외부 연동",     scope: "global", flow: false },
 ];
-const CONCEPT_LANE_BY_ID = new Map(CONCEPT_LANES.map(l => [l.id, l]));
 
 const _cdNeutral  = { fill: "#37474f", stroke: "#78909c" };
 const _cdEdge     = { fill: "#4a235a", stroke: "#7d3c98" };
@@ -15194,15 +15192,19 @@ function buildConceptModel(p) {
   }
 
   // --- 오버라이드 적용 + 사용자 추가 요소 ---
+  // baseLabel = 도출된 기본값(편집 입력의 placeholder), labelOverride = 사용자가 덮어쓴 값(입력의 value),
+  // label = 그림에 그릴 값. 입력이 label을 읽으면 라벨을 다 지운 순간 도출값이 되돌아와 다시 칠 수 없다.
   const boxes = derived.map(b => {
     const o = st.boxes[b.key] || {};
-    return { ...b, colId: b.colId || null, derived: true,
-             hidden: !!o.hidden, label: o.label || b.label, note: o.note || "" };
+    return { ...b, colId: b.colId || null, derived: true, hidden: !!o.hidden,
+             baseLabel: b.label, labelOverride: o.label || "",
+             label: o.label || b.label, note: o.note || "" };
   });
   for (const cb of st.custom) {
     const o = st.boxes[cb.key] || {};
     boxes.push({ key: cb.key, lane: cb.lane, colId: cb.colId || null, derived: false,
-                 hidden: !!o.hidden, label: o.label || "(이름 없음)", sub: "", note: o.note || "",
+                 hidden: !!o.hidden, baseLabel: "", labelOverride: o.label || "",
+                 label: o.label || "(이름 없음)", sub: "", note: o.note || "",
                  ..._cdNeutral });
   }
 
@@ -15224,10 +15226,25 @@ const CD = {
   COL_GAP: 22, COL_PAD: 14, COL_HDR: 34,
   BASE_W: 1240,
 };
-const _cdEllip = (s, n) => {
+// 글자 수로 자르면 한글 라벨이 박스를 넘는다 — 한글/전각은 font-size와 거의 같은 폭, 라틴은 그 절반쯤.
+// 정확한 측정 대신 이 두 계수로 폭 예산을 잡고 자른다 (개념도는 인쇄물로 나가므로 넘침이 곧 결함).
+const _cdCharW = (ch, fs) =>
+  (/[\u1100-\u11FF\u2E80-\u9FFF\uAC00-\uD7AF\uF900-\uFAFF\uFF00-\uFF60]/.test(ch) ? 1.0 : 0.55) * fs;
+function _cdFit(s, maxW, fs) {
   s = String(s == null ? "" : s);
-  return s.length > n ? s.slice(0, n - 1) + "…" : s;
-};
+  let w = 0;
+  for (const ch of s) w += _cdCharW(ch, fs);
+  if (w <= maxW) return s;
+  const budget = maxW - _cdCharW("…", fs);
+  let out = "";
+  w = 0;
+  for (const ch of s) {
+    const cw = _cdCharW(ch, fs);
+    if (w + cw > budget) break;
+    w += cw; out += ch;
+  }
+  return out + "…";
+}
 const _cdPerRow = (w) => Math.max(1, Math.floor((w + CD.BGAP) / (CD.BOX_W + CD.BGAP)));
 const _cdRows = (n, perRow) => Math.max(n ? Math.ceil(n / perRow) : 0, 0);
 const _cdBlockH = (n, perRow) => {
@@ -15257,13 +15274,13 @@ function _cdDrawBoxes(g, list, x, w, y, onPick) {
       box.appendChild(svgNode("text", {
         x: bx + CD.BOX_W / 2, y: by + (b.sub || b.note ? 23 : 34), "text-anchor": "middle",
         fill: "#fff", "font-size": 13, "font-weight": 600,
-      }, [_cdEllip(title, 22)]));
+      }, [_cdFit(title, CD.BOX_W - 16, 13)]));
       const sub = b.note || b.sub;
       if (sub) {
         box.appendChild(svgNode("text", {
           x: bx + CD.BOX_W / 2, y: by + 40, "text-anchor": "middle",
           fill: "#fff", "fill-opacity": 0.72, "font-size": 10.5,
-        }, [_cdEllip(sub, 28)]));
+        }, [_cdFit(sub, CD.BOX_W - 14, 10.5)]));
       }
       g.appendChild(box);
       bx += CD.BOX_W + CD.BGAP;
@@ -15300,8 +15317,14 @@ function _cdArrow(g, cx, y, h) {
 // 개념도 하나를 그려 <svg>를 돌려준다. onPick(box)은 박스 클릭 시 편집 패널을 열기 위한 콜백.
 function renderConceptSvg(p, model, onPick) {
   const visible = model.boxes.filter(b => !b.hidden);
-  const laneBoxes = (lane) => visible.filter(b => b.lane === lane);
+  // colId 생략 = 그 레인 전체, colId 지정 = 그 컬럼 것만 (null이면 컬럼에 속하지 않는 공용 요소).
+  const laneBoxes = (lane, colId) =>
+    visible.filter(b => b.lane === lane && (colId === undefined || b.colId === colId));
   const cols = model.columns;
+  // 레인 순서·배치는 CONCEPT_LANES가 정한다 — 배열에 한 줄 넣으면 그림에도 나오도록.
+  const colLanes  = CONCEPT_LANES.filter(l => l.scope === "column");
+  const preLanes  = CONCEPT_LANES.filter(l => l.scope === "global" && l.flow);
+  const postLanes = CONCEPT_LANES.filter(l => l.scope === "global" && !l.flow);
 
   // 컬럼 폭 — 최소 2박스가 들어가야 읽힌다. 안 들어가면 캔버스를 넓힌다.
   const minColW = CD.BOX_W * 2 + CD.BGAP + CD.COL_PAD * 2;
@@ -15337,42 +15360,43 @@ function renderConceptSvg(p, model, onPick) {
   }, [`${p.mode} · ${_todayStamp()}`]));
   y += 14;
 
-  // 전역 레인 하나를 그린다.
-  const drawGlobalLane = (lane) => {
+  // 그릴 구간을 순서대로 모은다. flow:true 구간끼리는 사이에 흐름 화살표가 들어간다.
+  const sections = [];
+  for (const lane of preLanes) {
     const list = laneBoxes(lane.id);
-    if (!list.length) return;
-    const bodyH = _cdBlockH(list.length, _cdPerRow(innerW - CD.LANE_PAD * 2));
-    const h = CD.LANE_HDR + bodyH + CD.LANE_PAD;
-    _cdLaneFrame(g, lane.label, CD.PAD, y, innerW, h);
-    _cdDrawBoxes(g, list, CD.PAD + CD.LANE_PAD, innerW - CD.LANE_PAD * 2, y + CD.LANE_HDR, onPick);
-    y += h;
-    y += CD.LANE_GAP;
-    _cdArrow(g, CD.PAD + innerW / 2, y - CD.LANE_GAP + 6, CD.LANE_GAP - 12);
-  };
-
-  for (const lane of ["actor", "edge"]) {
-    drawGlobalLane(CONCEPT_LANE_BY_ID.get(lane));
+    if (list.length) sections.push({ kind: "lane", label: lane.label, list, flow: true });
+  }
+  const bandHasBoxes = cols.length && colLanes.some(l => laneBoxes(l.id).some(b => b.colId != null));
+  if (bandHasBoxes) sections.push({ kind: "band", flow: true });
+  // 컬럼에 매달 수 없는 것(여러 클러스터가 공유하는 스토리지 등)은 밴드 밖 공용 줄로 뺀다.
+  for (const lane of colLanes) {
+    const shared = laneBoxes(lane.id, null);
+    if (shared.length) sections.push({ kind: "lane", label: `${lane.label} (공용)`, list: shared, flow: true });
+  }
+  for (const lane of postLanes) {
+    const list = laneBoxes(lane.id);
+    if (list.length) sections.push({ kind: "lane", label: lane.label, list, flow: false });
   }
 
-  // 클러스터 밴드 — 컬럼 하나가 클러스터 하나, 그 안에 서비스 계층 → 데이터 계층.
-  const colScoped = (lane, colId) => laneBoxes(lane).filter(b => b.colId === colId);
-  const sharedData = laneBoxes("data").filter(b => b.colId == null);
-  if (cols.length) {
+  const drawLaneSection = (sec) => {
+    const bodyH = _cdBlockH(sec.list.length, _cdPerRow(innerW - CD.LANE_PAD * 2));
+    const h = CD.LANE_HDR + bodyH + CD.LANE_PAD;
+    _cdLaneFrame(g, sec.label, CD.PAD, y, innerW, h);
+    _cdDrawBoxes(g, sec.list, CD.PAD + CD.LANE_PAD, innerW - CD.LANE_PAD * 2, y + CD.LANE_HDR, onPick);
+    y += h;
+  };
+
+  // 클러스터 밴드 — 컬럼 하나가 클러스터 하나, 그 안에 컬럼 레인이 순서대로 쌓인다.
+  const drawBand = () => {
     const innerColW = colW - CD.COL_PAD * 2;
     const perRow = _cdPerRow(innerColW);
-    let bandH = 0;
-    const colParts = cols.map(c => {
-      const svc = colScoped("service", c.id), dat = colScoped("data", c.id);
-      const svcH = svc.length ? CD.LANE_HDR + _cdBlockH(svc.length, perRow) : 0;
-      const datH = dat.length ? CD.LANE_HDR + _cdBlockH(dat.length, perRow) : 0;
-      const gap = svcH && datH ? CD.LANE_GAP : 0;
-      const h = CD.COL_HDR + svcH + gap + datH + CD.COL_PAD;
-      bandH = Math.max(bandH, h);
-      return { c, svc, dat, svcH, datH, gap };
-    });
+    const parts = cols.map(c =>
+      colLanes.map(l => ({ lane: l, list: laneBoxes(l.id, c.id) })).filter(x => x.list.length));
+    const partH = (stack) => stack.reduce((a, x) => a + CD.LANE_HDR + _cdBlockH(x.list.length, perRow), 0)
+                             + Math.max(0, stack.length - 1) * CD.LANE_GAP;
+    const bandH = Math.max(...parts.map(st => CD.COL_HDR + partH(st) + CD.COL_PAD));
     cols.forEach((c, i) => {
       const x = colX(i);
-      const part = colParts[i];
       g.appendChild(svgNode("rect", {
         x, y, width: colW, height: bandH, rx: 10, ry: 10,
         fill: "var(--surface)", "fill-opacity": 0.5,
@@ -15380,56 +15404,31 @@ function renderConceptSvg(p, model, onPick) {
       }));
       g.appendChild(svgNode("text", {
         x: x + CD.COL_PAD, y: y + 18, fill: "var(--text)", "font-size": 13, "font-weight": 600,
-      }, [`☸ ${_cdEllip(c.label, 30)}`]));
+      }, [`☸ ${_cdFit(c.label, innerColW - 16, 13)}`]));
       g.appendChild(svgNode("text", {
         x: x + CD.COL_PAD, y: y + 30, fill: "var(--text3)", "font-size": 10,
         "font-family": "JetBrains Mono",
       }, [c.sub]));
       let cy = y + CD.COL_HDR;
-      if (part.svc.length) {
+      parts[i].forEach((part, k) => {
+        if (k > 0) { _cdArrow(g, x + colW / 2, cy + 6, CD.LANE_GAP - 12); cy += CD.LANE_GAP; }
         g.appendChild(svgNode("text", {
           x: x + CD.COL_PAD, y: cy + 13, fill: "var(--text3)", "font-size": 10.5, "font-weight": 600,
-        }, ["서비스 계층"]));
-        _cdDrawBoxes(g, part.svc, x + CD.COL_PAD, innerColW, cy + CD.LANE_HDR, onPick);
-        cy += part.svcH;
-      }
-      if (part.svc.length && part.dat.length) {
-        _cdArrow(g, x + colW / 2, cy + 6, CD.LANE_GAP - 12);
-        cy += part.gap;
-      }
-      if (part.dat.length) {
-        g.appendChild(svgNode("text", {
-          x: x + CD.COL_PAD, y: cy + 13, fill: "var(--text3)", "font-size": 10.5, "font-weight": 600,
-        }, ["데이터 계층"]));
-        _cdDrawBoxes(g, part.dat, x + CD.COL_PAD, innerColW, cy + CD.LANE_HDR, onPick);
-      }
+        }, [part.lane.label]));
+        _cdDrawBoxes(g, part.list, x + CD.COL_PAD, innerColW, cy + CD.LANE_HDR, onPick);
+        cy += CD.LANE_HDR + _cdBlockH(part.list.length, perRow);
+      });
     });
     y += bandH;
-    if (sharedData.length || laneBoxes("platform").length || laneBoxes("external").length) {
-      y += CD.LANE_GAP;
-      _cdArrow(g, CD.PAD + innerW / 2, y - CD.LANE_GAP + 6, CD.LANE_GAP - 12);
-    }
-  }
-  // 여러 클러스터가 함께 쓰는 스토리지는 컬럼 밖 공용 줄에 둔다.
-  if (sharedData.length) {
-    const bodyH = _cdBlockH(sharedData.length, _cdPerRow(innerW - CD.LANE_PAD * 2));
-    const h = CD.LANE_HDR + bodyH + CD.LANE_PAD;
-    _cdLaneFrame(g, "데이터 계층 (공용)", CD.PAD, y, innerW, h);
-    _cdDrawBoxes(g, sharedData, CD.PAD + CD.LANE_PAD, innerW - CD.LANE_PAD * 2, y + CD.LANE_HDR, onPick);
-    y += h + CD.LANE_GAP - 12;
-  }
+  };
 
-  // 관리 / 외부 레인은 흐름 화살표 없이 나란히.
-  for (const id of ["platform", "external"]) {
-    const lane = CONCEPT_LANE_BY_ID.get(id);
-    const list = laneBoxes(id);
-    if (!list.length) continue;
-    const bodyH = _cdBlockH(list.length, _cdPerRow(innerW - CD.LANE_PAD * 2));
-    const h = CD.LANE_HDR + bodyH + CD.LANE_PAD;
-    _cdLaneFrame(g, lane.label, CD.PAD, y, innerW, h);
-    _cdDrawBoxes(g, list, CD.PAD + CD.LANE_PAD, innerW - CD.LANE_PAD * 2, y + CD.LANE_HDR, onPick);
-    y += h + 16;
-  }
+  sections.forEach((sec, i) => {
+    if (sec.kind === "band") drawBand(); else drawLaneSection(sec);
+    const next = sections[i + 1];
+    if (!next) return;
+    if (sec.flow && next.flow) { _cdArrow(g, CD.PAD + innerW / 2, y + 6, CD.LANE_GAP - 12); y += CD.LANE_GAP; }
+    else y += 16;
+  });
 
   // 범례 — 다이어그램 안에 굽는다. 내보낸 SVG/PNG가 화면과 정확히 같아야 하므로
   // diagramExportButtons에는 범례를 넘기지 않는다 (바깥에서 한 번 더 붙이면 중복).
@@ -15507,7 +15506,8 @@ function _cdEditRow(p, b, model) {
   });
   const labelInput = el("input", {
     "data-focus-key": `concept.${b.key}.label`,
-    value: b.label,
+    value: b.labelOverride,
+    placeholder: b.baseLabel || "요소 이름",
     style: { width: "100%", fontSize: "11px", padding: "3px 6px" },
     oninput: e => { setConceptBox(p, b.key, { label: e.target.value }); emit(); saveSoon(); },
   });
