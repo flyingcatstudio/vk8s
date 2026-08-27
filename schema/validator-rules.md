@@ -335,3 +335,39 @@
 - **scope**: workload
 - **when**: `helm.image_repo` 미설정
 - **msg**: `{workload.name}: image_repo 미설정 — chart values에 placeholder만 들어감.`
+
+---
+
+## 12. 아키텍처 계층 규칙
+
+계층은 `workload.tier`, 비어 있으면 **이름(제품) → 네임스페이스 → category** 순으로 도출한다.
+`kube-system` 등 클러스터 런타임 네임스페이스의 워크로드는 아키텍처가 고른 계층이 아니므로 전부 제외한다.
+
+흐름 계층은 `edge → entry → presentation → application → data`, 보조 계층은 `caching` · `messaging`,
+횡단 계층은 `security` · `observability` · `delivery`. 횡단 계층이 걸린 호출은 방향을 따지지 않는다
+(인증 조회·메트릭 수집은 어느 계층에서든 일어난다).
+
+### `LAYER_UNCLASSIFIED` — info
+- **scope**: workload
+- **when**: 어느 규칙으로도 계층이 정해지지 않음 (보통 `category: "Other"` + 비표준 네임스페이스)
+- **msg**: `{cluster.name}/{workload.name}: 아키텍처 계층 미분류 — 개념도에서 서비스 계층으로 묶입니다`
+
+### `LAYER_DATA_EXPOSED` — block
+- **scope**: workload
+- **when**: `tier ∈ {data, caching}` 이고 `network.service.type ∈ {LoadBalancer, NodePort}`
+- **msg**: `{cluster.name}/{workload.name}: {tier} 계층이 {type}로 외부 노출 — Entry 계층을 우회합니다`
+
+### `LAYER_SKIP_CALL` — warn
+- **scope**: workload, per depends_on
+- **when**: 호출 방향이 허용표에 없고 대상 계층의 order가 더 큼 (예: Presentation → Data)
+- **msg**: `{from.name}({from.tier}) → {to.name}({to.tier}): 중간 계층을 건너뛴 호출`
+
+### `LAYER_UPWARD_CALL` — warn
+- **scope**: workload, per depends_on
+- **when**: 대상 계층의 order가 더 작음 (예: Data → Presentation)
+- **msg**: `{from.name}({from.tier}) → {to.name}({to.tier}): 하위 계층이 상위 계층을 호출`
+
+### `LAYER_NO_ENTRY` — warn
+- **scope**: cluster
+- **when**: `ingress_rules`가 있거나 LoadBalancer/NodePort 서비스가 있는데 Entry 계층 워크로드도 `addons.ingress`도 없음
+- **msg**: `{cluster.name}: 외부 노출이 있는데 Entry 계층(Ingress·게이트웨이)이 없음`

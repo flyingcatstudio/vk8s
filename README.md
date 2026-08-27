@@ -301,14 +301,17 @@ Export(§12)가 기계가 먹는 산출물(kubectl / helm / docker compose)이�
 | 레인 | 도출 기준 |
 |---|---|
 | 사용자 · 채널 | ingress_rules / LoadBalancer·NodePort Service / L4 존재 → 외부 사용자, `site_links` → 전용망 사용자, 플랫폼 워크로드 → 운영자 |
-| 접근 계층 | `site.network_devices`의 firewall·waf·ddos·cdn·vpn 묶음, `site.l4_balancers`, cluster addon의 Ingress 컨트롤러 |
-| 서비스 계층 | 클러스터별 컬럼. 비-플랫폼·비-stateful 워크로드를 `categoryKeyOf`로 묶어 `API/WAS ×7` 형태로 표기 |
-| 데이터 계층 | 클러스터별 컬럼. StatefulSet 및 DB/Cache/Queue 워크로드 + PVC가 실제로 가리키는 사이트 스토리지 (여러 클러스터가 공유하면 컬럼 밖 공용 줄) |
-| 관리 · 운영 | 네임스페이스 역할(`PLATFORM_NS_ROLES`)별 묶음 — Monitoring / Logging / GitOps / CI / Security … |
+| 접근 계층 | `site.network_devices`의 firewall·waf·ddos·cdn·vpn 묶음, `site.l4_balancers`, **Entry 계층 워크로드**(없으면 cluster addon의 Ingress) |
+| 서비스 계층 | 클러스터별 컬럼. **Presentation·Application 계층** 워크로드를 `categoryKeyOf`로 묶어 `API/WAS ×7` 형태로 표기 |
+| 데이터 계층 | 클러스터별 컬럼. **Caching·Messaging·Data 계층** 워크로드 + PVC가 실제로 가리키는 사이트 스토리지 (여러 클러스터가 공유하면 컬럼 밖 공용 줄) |
+| 관리 · 운영 | **Security·Observability·Delivery 계층** — 네임스페이스 역할(`PLATFORM_NS_ROLES`)로 색·라벨을 매기고, 역할이 안 잡히면 계층 이름으로 묶는다 |
 | 외부 연동 | `site.external_services`, `site_links` |
 
-계층 분류는 Architecture 뷰와 **같은 기준**(`categoryKeyOf` · `PLATFORM_NS_ROLES` · `isStateful`)을
-쓴다. 두 그림에서 같은 워크로드가 다른 계층·다른 색으로 보이지 않게 하기 위해서다.
+레인 배치는 **아키텍처 계층(§13.2)** 하나를 기준으로 한다. 계층 판단이 흩어져 있으면 같은
+워크로드가 뷰마다 다른 자리에 나타나므로, 계층 → 레인 매핑 표 하나만 두고 모든 레인이 그것을 읽는다.
+
+`kube-system` 등 클러스터 런타임 워크로드는 개념도에 그리지 않는다 — CoreDNS·kube-proxy는
+아키텍처가 고른 계층이 아니라 쿠버네티스가 그렇게 동작하는 방식이라, 클러스터 프레임이 그 역할을 한다.
 
 레인 목록·순서·배치는 `CONCEPT_LANES` 하나가 정한다 (`scope: "global" | "column"`,
 `flow`가 true면 앞뒤 구간 사이에 흐름 화살표). 레인을 늘릴 때도 배열에 한 줄이면 그림·편집
@@ -332,6 +335,9 @@ Export(§12)가 기계가 먹는 산출물(kubectl / helm / docker compose)이�
 
 ### 11.3 내보내기
 
+- **배경 `[화면 | 인쇄]`** — 앱은 다크 테마지만 산출물은 흰 종이로 나간다. `인쇄`를 고르면 직렬화
+  시점에 팔레트를 흰 배경·어두운 글씨로 갈아끼워 굽는다(테마 전환이 아니라 export 전용).
+  이 토글은 **모든 다이어그램 뷰**(Topology diagram · Architecture · Dependency · 개념도)에 함께 붙는다.
 - **SVG / PNG** — 범례와 작성일이 그림 안에 함께 구워진다 (화면과 내보낸 파일이 동일).
 - **Markdown** — 레인별 요소 표(구분 / 요소 / 수량 / 비고). 숨긴 요소는 본문에서 빠지고 하단에 제외 목록으로 남는다.
 
@@ -387,7 +393,7 @@ K8s YAML · Docker Compose · 전체 Project Report · Helm chart를 한 ZIP에 
 
 | 탭 | 내용 |
 |---|---|
-| **Basic** | name, category, kind, replicas, namespace, cluster (read-only), 🔒 lock, **Dependency 그래프에서 숨기기**, **HA 토폴로지(stateful 카테고리)** |
+| **Basic** | name, category, kind, **architecture tier(§13.2)**, replicas, namespace, cluster (read-only), 🔒 lock, **Dependency 그래프에서 숨기기**, **HA 토폴로지(stateful 카테고리)** |
 | **Resources** | requests/limits (CPU·Memory), **GPU VRAM(GB)** + model 드롭다운(cluster 장착 모델만), PVC (size_gb · access_mode · storage_class · target_storage), Cluster total 합산 |
 | **Runtime** | 언어/프레임워크/버전, concurrency 모델(thread-pool / async-await / event-loop / worker-pool / process), thread/connection pool 사이즈, traffic profile (RPS · avg_ms · peak_factor) |
 | **Network** | Service (type · ports), Ingress (host · path · TLS), HPA(min/max · cpu_target_pct) |
@@ -402,6 +408,51 @@ DB / Cache / Queue 카테고리에서만 Basic 탭에 노출 (`workload.ha`). re
 - **operator** — 자유 입력(예: `cloudnative-pg`, `bitnami-redis`, `strimzi-kafka-operator`) — export 라운드트립을 견디는 문서용.
 
 이 값은 인스펙터·validator(HA 룰)·capacity 시뮬(쿼럼 pod footprint)·export·**Checklist(§10) HA 장애조치 항목**이 공유한다.
+
+---
+
+### 13.2 아키텍처 계층 (`workload.tier`)
+
+인프라 아키텍처의 표준 계층. 개념도(§11.1) 배치와 **계층 규칙 validator(§16)**가 이 값을 공유한다.
+
+| 성격 | 계층 | 그림에서 |
+|---|---|---|
+| **flow** — 트래픽이 위→아래로 지남 | `edge` → `entry` → `presentation` → `application` → `data` | 세로 스택 + 화살표. 호출 방향 검증 대상 |
+| **support** — Application 옆에 붙음 | `caching` · `messaging` | 흐름 옆에 나란히 |
+| **crosscut** — 전 계층에 걸침 | `security` · `observability` · `delivery` | 별도 밴드. 흐름 화살표 없음 |
+
+횡단 계층을 흐름에 끼워 넣으면 화살표가 거짓말을 한다(인증 조회·메트릭 수집은 어느 계층에서든 일어남).
+`delivery`(GitOps·CI·레지스트리·백업)는 런타임 계층이 아니라 딜리버리 파이프라인이라 횡단으로 둔다.
+
+#### 판정 순서 — 3단
+
+```
+1. 사용자 지정 (workload.tier)   — 있으면 무조건 이것
+2. 이름 · 제품 매칭               — redis→caching, kafka→messaging, prometheus→observability …
+3. 구조 필드                      — 네임스페이스(monitoring·ingress-nginx…) → category
+```
+
+인스펙터 Basic 탭 셀렉트의 첫 항목이 도출 결과를 그대로 보여준다 (`자동 — Application (category)`).
+잘못 잡혔을 때만 고르면 되고, 비우면 다시 자동으로 돌아간다 — `dep_layer`와 같은 방식.
+
+**이름만으로는 부족하다.** 업무 서비스는 이름에 제품 신호가 없고(`user-service`, `배치서버`),
+워크로드가 아닌 엔티티는 이름이 자의적이며(`F5` · `FW-A` · `nas-a`) `kind`가 정확하다.
+그래서 제품 별칭은 **보수적으로** 유지한다 — 애매한 낱말(`elasticsearch` · `gateway` · `registry`)은
+일부러 빼서 네임스페이스·category가 가르게 한다. `llm-api-gateway`는 이름에 gateway가 들어가지만
+실제로는 FastAPI 서비스라 Application이 맞다.
+
+`kube-system` 등 클러스터 런타임 네임스페이스는 계층을 매기지 않는다 — 개념도에서 빠지고
+미분류 경고에서도 제외된다.
+
+#### 워크로드가 아닌 엔티티
+
+| 소스 | 매핑 |
+|---|---|
+| `network_devices.kind` | cdn·dns·waf·ddos·firewall → `edge`, vpn → `security`, switch·router → 없음 |
+| `l4_balancers` | `entry` |
+| `storages` | `data` |
+| `external_services.kind` | database·object_store → `data`, cache → `caching`, queue → `messaging`, registry·backup → `delivery`, monitoring·logging → `observability`, secret_store·identity → `security` |
+| `node.purpose` | bastion → `security`, edge → `edge`, ci-runner → `delivery`, management → `observability`, storage → `data` |
 
 ---
 
@@ -512,6 +563,7 @@ VRAM 모드 워크로드는 `ceil(vram_gb / 카드 VRAM)`장으로 환산되어 
 | **Dependency** | `DEPENDS_ON_TARGET_NOT_FOUND` · `DEPENDS_ON_CYCLE` · `DEPENDS_ON_CROSS_CLUSTER` |
 | **정적 병목** | `THREAD_POOL_SATURATION` · `EVENT_LOOP_CPU_BOUND` · `WORKER_POOL_SATURATION` · `DB_CONNECTION_POOL_EXHAUSTED` · `DB_MAX_CONNECTIONS_EXCEEDED` · `TIMEOUT_CASCADE_RISK` · `JVM_HEAP_TOO_SMALL` · `JVM_HEAP_GT_REQUEST` · `SPOF_RISK` · `STATEFUL_NO_PVC` · `RPS_NEVER_REACHED_BY_DEPS` · `KEEPALIVE_HIGH_RPS_DISABLED` |
 | **Helm Export** | `HELM_DUPLICATE_CHART_NAME` · `HELM_INGRESS_NO_HOST` · `HELM_NO_IMAGE_REPO` |
+| **계층 규칙** | `LAYER_UNCLASSIFIED` · `LAYER_DATA_EXPOSED` · `LAYER_SKIP_CALL` · `LAYER_UPWARD_CALL` · `LAYER_NO_ENTRY` — 아키텍처 계층(§13.2) 기반. 프론트가 DB를 직접 부르거나 Data 계층이 외부 노출되는 구성을 잡는다 |
 
 각 룰은 `error(block)` / `warn` / `info` 중 하나의 severity를 갖는다.
 

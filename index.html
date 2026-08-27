@@ -1121,6 +1121,7 @@ const state = {
     archGroupByZone: true,
     colorBy: "category",   // "category" | "namespace" — node color basis (session-only, not saved)
     deliverable: "concept",
+    exportTheme: "screen",   // "screen" | "print" — 다이어그램 내보내기 팔레트 (세션 한정)
     exportTab: "yaml",
     exportSelectedFile: null,
   },
@@ -1354,6 +1355,12 @@ const HELP = {
     title: "Bottleneck — 정적 병목 분석",
     body: "Little's Law (in-flight = RPS × avg_ms / 1000) 기반. 5개 룰: (1) compute capacity (thread-pool/replica), (2) caller connection pool 고갈, (3) downstream RPS budget 초과, (4) DB max_connections oversubscription, (5) p99 latency budget 누적 초과.",
     reco: "BLOCK은 즉시 SLA 위반 — replicas/pool/threads 조정 필요. WARN은 트래픽 폭증 시 위험. 정적 룰이라 retry/circuit-breaker 등 동적 효과는 미반영. traffic_profile + runtime + depends_on이 채워져야 정확함.",
+  },
+  "workload.tier": {
+    cat: "워크로드",
+    title: "Architecture tier — 아키텍처 계층",
+    body: "인프라 아키텍처의 표준 계층. Edge → Entry/Routing → Presentation → Application → Data가 트래픽 흐름이고, Caching·Messaging은 Application 옆에 붙는 보조 계층, Security·Observability·Delivery는 전 계층에 걸치는 횡단 계층입니다. 비워두면 이름(제품) → 네임스페이스 → category 순으로 자동 도출합니다.",
+    reco: "자동 도출이 맞으면 손대지 마세요 — 구성이 바뀌면 따라갑니다. 이름이 제품명이 아닌 업무 서비스(user-service 등)는 category로, 표준 네임스페이스(monitoring·ingress-nginx 등)를 쓰면 그것으로 잡힙니다. 계층이 정해지면 Findings의 '계층 규칙' 룰이 프론트→DB 직접 호출 같은 위반을 잡아냅니다.",
   },
   "view.deliverable": {
     cat: "기타",
@@ -4205,6 +4212,65 @@ function runValidator(project) {
     }
   }
 
+  // N. 아키텍처 계층 규칙
+  // 계층(workload.tier, 비었으면 도출)이 정해지면 호출 방향과 노출을 정적으로 검사할 수 있다.
+  // 계층을 못 정한 워크로드는 개념도에서도 조용히 사라지므로 미분류 자체를 알려준다.
+  // 클러스터 런타임(kube-system)은 아키텍처가 고른 계층이 아니므로 전부 건너뛴다.
+  {
+    const tierIndex = new Map();   // workloadId → { w, c, tier, source }
+    for (const c of project.clusters || []) {
+      for (const w of c.workloads || []) {
+        const r = resolveTier(w);
+        tierIndex.set(w.id, { w, c, ...r });
+      }
+    }
+    for (const { w, c, tier, source } of tierIndex.values()) {
+      if (source === "runtime") continue;
+      if (!tier) {
+        F("LAYER_UNCLASSIFIED", "info",
+          `${c.name}/${w.name}: 아키텍처 계층 미분류 — 개념도에서 서비스 계층으로 묶입니다`,
+          { kind: "workload", id: w.id }, "workload.tier");
+        continue;
+      }
+      // 데이터·캐시 계층이 외부에 직접 노출되면 Entry 계층을 통과하지 않는다.
+      const svcType = w.network?.service?.type;
+      if ((tier === "data" || tier === "caching") && (svcType === "LoadBalancer" || svcType === "NodePort")) {
+        F("LAYER_DATA_EXPOSED", "error",
+          `${c.name}/${w.name}: ${tierLabel(tier)} 계층이 ${svcType}로 외부 노출 — Entry 계층을 우회합니다`,
+          { kind: "workload", id: w.id }, "workload.tier");
+      }
+      // 호출 방향
+      for (const d of w.depends_on || []) {
+        const t = tierIndex.get(d.target_workload_id);
+        if (!t || !t.tier) continue;
+        const verdict = tierCallVerdict(tier, t.tier);
+        if (verdict === "skip") {
+          F("LAYER_SKIP_CALL", "warn",
+            `${w.name}(${tierLabel(tier)}) → ${t.w.name}(${tierLabel(t.tier)}): 중간 계층을 건너뛴 호출`,
+            { kind: "workload", id: w.id }, "workload.tier");
+        } else if (verdict === "upward") {
+          F("LAYER_UPWARD_CALL", "warn",
+            `${w.name}(${tierLabel(tier)}) → ${t.w.name}(${tierLabel(t.tier)}): 하위 계층이 상위 계층을 호출`,
+            { kind: "workload", id: w.id }, "workload.tier");
+        }
+      }
+    }
+    // 외부 노출이 있는데 Entry 계층이 비어 있으면 진입점이 그림에도 구성에도 없다.
+    for (const c of project.clusters || []) {
+      const wls = c.workloads || [];
+      const exposed = (c.ingress_rules || []).length > 0 ||
+        wls.some(w => ["LoadBalancer", "NodePort"].includes(w.network?.service?.type));
+      if (!exposed) continue;
+      const hasEntry = wls.some(w => resolveTier(w).tier === "entry") ||
+        (c.addons?.ingress && c.addons.ingress !== "None");
+      if (!hasEntry) {
+        F("LAYER_NO_ENTRY", "warn",
+          `${c.name}: 외부 노출이 있는데 Entry 계층(Ingress·게이트웨이)이 없음`,
+          { kind: "cluster", id: c.id }, "workload.tier");
+      }
+    }
+  }
+
   return findings;
 }
 
@@ -6401,6 +6467,32 @@ function renderWorkloadInspector(root, id) {
             el("option", { value: v, selected: v === (w.kind || "Deployment") ? "" : null }, [v]))),
       ]),
     ]));
+    // 아키텍처 계층. 비워두면 이름(제품) → 네임스페이스 → category 순으로 도출한다.
+    // 첫 항목에 도출 결과를 그대로 보여줘서, 잘못 잡혔을 때만 손대면 되게 한다 (dep_layer와 같은 방식).
+    {
+      const auto = resolveTier({ ...w, tier: null });
+      const srcLabel = { name: "이름", namespace: "네임스페이스", category: "category", runtime: "클러스터 런타임", none: "" }[auto.source] || "";
+      root.appendChild(el("div", { class: "field" }, [
+        lbl("Architecture tier", "workload.tier"),
+        el("select", {
+          // 비우면 키 자체를 지운다 — null을 남기면 export한 JSON이 스키마(enum)에 걸린다.
+          onchange: e => {
+            const v = e.target.value;
+            if (v) { updateWorkloadField(id, "tier", v); return; }
+            const found = findWorkload(id);
+            if (!found || isWorkloadLocked(found.workload)) return;
+            delete found.workload.tier;
+            emit(); saveSoon();
+          },
+        }, [
+          el("option", { value: "", selected: w.tier ? null : "" },
+            [auto.tier ? `자동 — ${tierLabel(auto.tier)} (${srcLabel})`
+                       : (auto.source === "runtime" ? "자동 — 클러스터 런타임 (개념도 제외)" : "자동 — 미분류")]),
+          ...TIERS.map(t => el("option", { value: t.id, selected: w.tier === t.id ? "" : null },
+            [`${t.label}${t.kind === "crosscut" ? " (횡단)" : t.kind === "support" ? " (보조)" : ""}`])),
+        ]),
+      ]));
+    }
     // Namespace dropdown — based on cluster's namespaces
     const cnsNames = (cluster.namespaces || []).map(n => n.name);
     if (!cnsNames.includes("default")) cnsNames.unshift("default");
@@ -10294,6 +10386,157 @@ const platformRoleOf = (w) => nsRoleIndex.get(nsNormalize(w.namespace)) || PLATF
 const isStateful = w => w.kind === "StatefulSet" || ["DB", "Cache", "Queue"].includes(w.category);
 const isPlatform = w => platformNs.has(nsNormalize(w.namespace));
 
+//============ 아키텍처 계층 (Tier) ============
+// 인프라 아키텍처의 표준 계층. 지금까지 이 판단이 여섯 군데로 흩어져 있었다 —
+// workload.category(11) · categoryKeyOf(8) · PLATFORM_NS_ROLES(9) · external_services.kind(11)
+// · network_devices.kind(8) · CONCEPT_LANES(6). 같은 개념이 위치에 따라 다른 이름을 갖고
+// (클러스터 안 Redis는 category:"Cache", 밖이면 ext kind:"cache"), 클러스터 안에 올린
+// Keycloak처럼 어디에도 못 들어가는 구멍이 있었다. 계층을 하나의 축으로 세우고 나머지를
+// 여기에 매핑한다.
+//
+// 계층은 성격이 셋으로 갈린다:
+//   flow     — 트래픽이 위에서 아래로 지나는 계층. 호출 방향 검증의 대상.
+//   support  — Application ↔ Data 사이에 옆으로 붙는 계층 (캐시·큐).
+//   crosscut — 흐름의 한 칸이 아니라 전 계층에 걸치는 계층. 흐름에 끼워 넣으면 화살표가
+//              거짓말을 하므로 별도 밴드로 다룬다.
+// Delivery(GitOps·CI·레지스트리·백업)는 런타임 계층이 아니라 딜리버리 파이프라인이라
+// 표준 3-tier + 운영 계층 목록에는 없지만 횡단 계층으로 따로 둔다.
+const TIERS = [
+  { id: "edge",          label: "Network & Edge",        short: "Edge",  kind: "flow",     order: 1 },
+  { id: "entry",         label: "Entry / Routing",       short: "Entry", kind: "flow",     order: 2 },
+  { id: "presentation",  label: "Presentation",          short: "Web",   kind: "flow",     order: 3 },
+  { id: "application",   label: "Application",           short: "App",   kind: "flow",     order: 4 },
+  { id: "caching",       label: "Caching",               short: "Cache", kind: "support",  order: 5 },
+  { id: "messaging",     label: "Messaging / Async",     short: "MQ",    kind: "support",  order: 5 },
+  { id: "data",          label: "Data",                  short: "Data",  kind: "flow",     order: 5 },
+  { id: "security",      label: "Security & Auth",       short: "Sec",   kind: "crosscut" },
+  { id: "observability", label: "Observability & Mgmt",  short: "Obs",   kind: "crosscut" },
+  { id: "delivery",      label: "Delivery & Operations", short: "CI/CD", kind: "crosscut" },
+];
+const TIER_BY_ID = new Map(TIERS.map(t => [t.id, t]));
+const TIER_IDS = TIERS.map(t => t.id);
+const tierLabel = (id) => TIER_BY_ID.get(id)?.label || "미분류";
+
+// 제품 이름 → 계층. 계층 판정의 1순위 (SI 프로젝트에서 미들웨어는 거의 제품 이름으로 배포된다).
+// 순서가 곧 우선순위 — ingress-nginx가 nginx보다 먼저 잡혀야 하므로 entry가 presentation 위에 있다.
+// 별칭은 보수적으로 — 애매한 낱말은 넣지 않고 아래 단계(네임스페이스·category)로 흘려보낸다.
+//   `elasticsearch` : 로그 저장소(Observability)일 수도 전문 검색(Data)일 수도 있다.
+//   `gateway`       : 업무 API 서비스 이름에 흔히 들어간다 (llm-api-gateway는 FastAPI 서비스다).
+//   `registry`      : service-registry 같은 이름이 딸려 들어온다.
+// 이런 것들은 네임스페이스가 `gateway`/`registry`거나 사용자가 tier를 지정할 때만 잡힌다.
+const PRODUCT_TIERS = [
+  { tier: "entry",         names: ["ingress-nginx", "nginx-ingress", "istio", "istiod", "envoy", "kong", "traefik",
+                                   "haproxy", "apisix", "zuul", "spring-cloud-gateway"] },
+  { tier: "security",      names: ["keycloak", "vault", "dex", "cert-manager", "external-secrets", "oauth2-proxy",
+                                   "opa", "gatekeeper", "bastion", "openvpn", "wireguard"] },
+  { tier: "observability", names: ["prometheus", "grafana", "loki", "jaeger", "zipkin", "tempo", "thanos", "mimir",
+                                   "alertmanager", "fluentd", "fluent-bit", "logstash", "kibana", "datadog",
+                                   "skywalking", "metrics-server", "node-exporter", "otel-collector"] },
+  { tier: "delivery",      names: ["argocd", "argo-cd", "fluxcd", "tekton", "jenkins", "gitlab-runner", "harbor",
+                                   "velero", "nexus", "buildkit", "kaniko"] },
+  { tier: "caching",       names: ["redis", "valkey", "memcached", "elasticache", "dragonfly", "hazelcast"] },
+  { tier: "messaging",     names: ["kafka", "rabbitmq", "pulsar", "nats", "activemq", "rocketmq", "sqs"] },
+  { tier: "data",          names: ["postgres", "postgresql", "mysql", "mariadb", "mongo", "mongodb", "oracle",
+                                   "mssql", "sqlserver", "cassandra", "clickhouse", "tidb", "cockroach",
+                                   "minio", "dynamodb", "influxdb", "neo4j"] },
+  { tier: "presentation",  names: ["nginx", "apache", "httpd", "caddy"] },
+  { tier: "application",   names: ["tomcat", "gunicorn", "uwsgi", "vllm", "triton"] },
+];
+// 이름 매칭 — 하이픈이 들어간 alias는 부분 문자열로, 단어 alias는 토큰 단위로 맞춘다.
+// 토큰 단위라서 "redistribute"가 "redis"에 걸리지 않는다.
+const _tierTokens = (s) => String(s || "").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+function _tierNameMatches(name, alias) {
+  const n = String(name || "").toLowerCase();
+  return alias.includes("-") ? n.includes(alias) : _tierTokens(n).includes(alias);
+}
+function tierFromName(name) {
+  for (const row of PRODUCT_TIERS) {
+    for (const a of row.names) if (_tierNameMatches(name, a)) return row.tier;
+  }
+  return null;
+}
+
+// 네임스페이스 → 계층 (nsNormalize로 env 접두/접미를 벗긴 뒤 조회). 표준 네임스페이스 이름을
+// 쓰는 프로젝트는 이 단계에서 정확히 잡힌다.
+const NS_TIERS = (() => {
+  const m = new Map();
+  const put = (tier, list) => { for (const ns of list) m.set(ns, tier); };
+  put("entry",         ["ingress-nginx", "istio-system", "kong", "traefik", "apisix", "gateway", "linkerd"]);
+  put("security",      ["cert-manager", "external-secrets", "keycloak", "vault", "security", "auth", "iam"]);
+  put("observability", ["monitoring", "logging", "tracing", "observability", "o11y", "elastic-system", "grafana"]);
+  put("delivery",      ["argocd", "fluxcd", "flux-system", "tekton-pipelines", "jenkins", "gitlab", "gitlab-runner",
+                        "harbor", "velero", "buildkit", "kaniko", "registry", "cicd", "ci"]);
+  return m;
+})();
+
+// category → 계층. 3순위. 업무 서비스는 이름에 제품 신호가 없어서(user-service, 배치서버…)
+// 결국 여기서 갈린다 — 이름만으로 판정하면 대부분의 업무 워크로드를 놓친다.
+const CATEGORY_TIERS = {
+  "Frontend": "presentation",
+  "API": "application", "WAS": "application",
+  "DB": "data", "Cache": "caching", "Queue": "messaging",
+  "ML-Inference": "application", "ML-Training": "application",
+  "Video": "application", "Batch": "application",
+  "Other": null,
+};
+
+// 워크로드가 아닌 엔티티는 이름이 자의적이고(F5 · FW-A · nas-a) kind가 정확하다.
+const DEVICE_TIERS = { cdn: "edge", dns: "edge", waf: "edge", ddos: "edge", vpn: "security", switch: null, router: null, firewall: "edge" };
+const EXT_SERVICE_TIERS = {
+  database: "data", cache: "caching", queue: "messaging", object_store: "data",
+  registry: "delivery", backup: "delivery",
+  monitoring: "observability", logging: "observability",
+  secret_store: "security", identity: "security", custom: null,
+};
+const NODE_PURPOSE_TIERS = { bastion: "security", edge: "edge", "ci-runner": "delivery", management: "observability", storage: "data", compute: null };
+
+// kube-system은 계층이 아니다 — CoreDNS·kube-proxy는 아키텍처가 고른 계층이 아니라
+// 쿠버네티스가 그렇게 동작하는 방식(클러스터 자체의 능력)이다. 개념도에서는 클러스터
+// 프레임으로 표현하고 별도 박스로 그리지 않으며, 미분류 경고에서도 제외한다.
+const CLUSTER_RUNTIME_NS = new Set(["kube-system", "kube-public", "kube-node-lease"]);
+const isClusterRuntime = (w) => CLUSTER_RUNTIME_NS.has(nsNormalize(w.namespace));
+
+// 워크로드의 계층 판정. 3단: 사용자 지정 → 이름(제품) → 구조 필드(namespace → category).
+// { tier, source } 를 돌려준다 — source는 인스펙터가 "(자동: Application)"을 보여주고
+// validator가 왜 그렇게 잡혔는지 설명하는 데 쓴다.
+function resolveTier(w) {
+  if (w?.tier && TIER_BY_ID.has(w.tier)) return { tier: w.tier, source: "user" };
+  if (!w) return { tier: null, source: "none" };
+  if (isClusterRuntime(w)) return { tier: null, source: "runtime" };
+  const byName = tierFromName(w.name);
+  if (byName) return { tier: byName, source: "name" };
+  const byNs = NS_TIERS.get(nsNormalize(w.namespace));
+  if (byNs) return { tier: byNs, source: "namespace" };
+  const byCat = CATEGORY_TIERS[w.category];
+  if (byCat) return { tier: byCat, source: "category" };
+  return { tier: null, source: "none" };
+}
+const tierOf = (w) => resolveTier(w).tier;
+
+// 허용되는 호출 방향 (from 계층 → to 계층). 여기 없는 조합이 계층 위반 후보다.
+// 인접 계층만 허용하는 규칙은 틀린다 — API 게이트웨이(Entry)가 서비스(Application)를 바로
+// 부르거나 SSR 프론트(Presentation)가 게이트웨이를 부르는 건 정상 구성이다.
+// 횡단 계층(security/observability/delivery)은 출발지·목적지 어느 쪽이든 항상 허용한다.
+const TIER_CALLS_OK = {
+  edge:         ["entry", "presentation", "application"],
+  entry:        ["presentation", "application"],
+  presentation: ["entry", "application"],
+  application:  ["application", "entry", "caching", "messaging", "data"],
+  messaging:    ["application", "data"],
+  caching:      [],
+  data:         [],
+};
+const isCrosscutTier = (id) => TIER_BY_ID.get(id)?.kind === "crosscut";
+// 호출 판정: "ok" | "upward" | "skip". 계층이 없거나 횡단이면 판단하지 않는다.
+function tierCallVerdict(fromTier, toTier) {
+  if (!fromTier || !toTier || fromTier === toTier) return "ok";
+  if (isCrosscutTier(fromTier) || isCrosscutTier(toTier)) return "ok";
+  if ((TIER_CALLS_OK[fromTier] || []).includes(toTier)) return "ok";
+  const a = TIER_BY_ID.get(fromTier)?.order ?? 0;
+  const b = TIER_BY_ID.get(toTier)?.order ?? 0;
+  return b < a ? "upward" : "skip";
+}
+
 //============ Render: Architecture (switch-bus diagram, Korean style) ============
 function renderArchitecture() {
   const root = $("#viewBody");
@@ -12972,20 +13215,34 @@ function _legendSvgGroup(entries, modeLabel, leftX, rightX, topY, textColor, mut
 // export is the whole diagram, not the current pan/zoom crop), bakes in a background rect, and —
 // when legendEntries are supplied — appends a colour legend below the diagram. Returns
 // { xml, width, height } so the PNG path knows the final pixel size.
-function _serializeSvg(svgEl, legendEntries) {
+// 내보내기 팔레트. 산출물은 제안서·발주서에 실려 흰 종이로 나가는데 앱은 다크 테마라
+// 화면 색을 그대로 구우면 쓸 수 없다. 테마 시스템을 새로 만들지 않고 직렬화 시점에
+// CSS 변수 맵만 갈아끼운다 (박스 채움색은 원래 채도 높은 중간 톤이라 흰 배경에서도 그대로 읽힌다).
+const EXPORT_CSS_VARS = [
+  "--bg", "--surface", "--surface2", "--border",
+  "--text", "--text2", "--text3",
+  "--accent", "--accent-glow", "--orange", "--purple",
+  "--green", "--blue", "--yellow", "--red",
+];
+const PRINT_PALETTE = {
+  "--bg": "#ffffff", "--surface": "#f7f8fa", "--surface2": "#eceff3", "--border": "#c3c9d2",
+  "--text": "#16191d", "--text2": "#454c55", "--text3": "#697280",
+  "--accent": "#1f6feb", "--accent-glow": "#1f6feb", "--orange": "#a85400", "--purple": "#6b21a8",
+  "--green": "#15803d", "--blue": "#1d4ed8", "--yellow": "#a16207", "--red": "#b91c1c",
+};
+function _exportPalette(mode) {
+  if (mode === "print") return { ...PRINT_PALETTE };
+  const cs = getComputedStyle(document.documentElement);
+  const map = {};
+  for (const v of EXPORT_CSS_VARS) map[v] = cs.getPropertyValue(v).trim() || "#000";
+  return map;
+}
+function _serializeSvg(svgEl, legendEntries, mode) {
   const clone = svgEl.cloneNode(true);
   clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
   clone.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
-  // Resolve CSS var() in attributes (style/fill/stroke) using computed style
-  const cs = getComputedStyle(document.documentElement);
-  const cssVars = [
-    "--bg", "--surface", "--surface2", "--border",
-    "--text", "--text2", "--text3",
-    "--accent", "--accent-glow", "--orange", "--purple",
-    "--green", "--blue", "--yellow", "--red",
-  ];
-  const map = {};
-  for (const v of cssVars) map[v] = cs.getPropertyValue(v).trim() || "#000";
+  // Resolve CSS var() in attributes (style/fill/stroke) from the chosen palette
+  const map = _exportPalette(mode);
   const replaceVars = s => s ? s.replace(/var\((--[a-z0-9-]+)\)/g, (m, k) => map[k] || m) : s;
   const allEls = [clone, ...clone.querySelectorAll("*")];
   for (const n of allEls) {
@@ -13041,12 +13298,12 @@ function _triggerDownload(blob, filename) {
   document.body.removeChild(a);
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
-function _downloadSvg(svgEl, basename, legendEntries) {
-  const { xml } = _serializeSvg(svgEl, legendEntries);
+function _downloadSvg(svgEl, basename, legendEntries, mode) {
+  const { xml } = _serializeSvg(svgEl, legendEntries, mode);
   _triggerDownload(new Blob([xml], { type: "image/svg+xml;charset=utf-8" }), `${basename}.svg`);
 }
-function _downloadPng(svgEl, basename, scale = 2, legendEntries) {
-  const { xml, width: w, height: h } = _serializeSvg(svgEl, legendEntries);
+function _downloadPng(svgEl, basename, scale = 2, legendEntries, mode) {
+  const { xml, width: w, height: h } = _serializeSvg(svgEl, legendEntries, mode);
   const blob = new Blob([xml], { type: "image/svg+xml;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const img = new Image();
@@ -13054,8 +13311,7 @@ function _downloadPng(svgEl, basename, scale = 2, legendEntries) {
     const cv = document.createElement("canvas");
     cv.width = w * scale; cv.height = h * scale;
     const ctx = cv.getContext("2d");
-    const bg = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim() || "#000";
-    ctx.fillStyle = bg;
+    ctx.fillStyle = _exportPalette(mode)["--bg"] || "#000";
     ctx.fillRect(0, 0, cv.width, cv.height);
     ctx.scale(scale, scale);
     ctx.drawImage(img, 0, 0, w, h);
@@ -13083,14 +13339,33 @@ function diagramExportButtons(getSvg, kind, getLegend) {
   };
   const base = () => `${slug(state.project?.name) || "vk8s"}-${kind}-${_todayStamp()}`;
   const legend = () => (typeof getLegend === "function" ? getLegend() : null);
+  // 세션 옵션 — 프로젝트에는 저장하지 않는다. "인쇄"는 흰 배경/어두운 글씨로 구워 문서에 바로 붙일 수 있게 한다.
+  const mode = () => (state.ui.exportTheme === "print" ? "print" : "screen");
+  const mk = (m, text, title) => el("button", {
+    style: {
+      padding: "3px 9px", fontSize: "11px", lineHeight: 1, cursor: "pointer",
+      fontFamily: "JetBrains Mono", fontWeight: 600,
+      background: mode() === m ? "var(--surface2)" : "transparent",
+      border: "1px solid var(--border)",
+      color: mode() === m ? "var(--text)" : "var(--text3)",
+      borderRadius: "4px",
+    },
+    title,
+    onclick: () => { state.ui.exportTheme = m; emit(); },
+  }, [text]);
   return [
+    el("span", { style: { display: "inline-flex", alignItems: "center", gap: "4px", marginRight: "4px" } }, [
+      el("span", { style: { fontSize: "11px", color: "var(--text3)", marginRight: "2px" } }, ["배경"]),
+      mk("screen", "화면", "앱 테마 색 그대로 내보냅니다"),
+      mk("print", "인쇄", "흰 배경 · 어두운 글씨로 내보냅니다 (제안서·발주서용)"),
+    ]),
     el("button", {
       style: btnStyle, title: "SVG 다운로드 (벡터, 무손실 · 범례 포함)",
-      onclick: () => { const s = getSvg(); if (s) _downloadSvg(s, base(), legend()); },
+      onclick: () => { const s = getSvg(); if (s) _downloadSvg(s, base(), legend(), mode()); },
     }, ["⬇ SVG"]),
     el("button", {
       style: btnStyle, title: "PNG 다운로드 (2× 해상도 · 범례 포함)",
-      onclick: () => { const s = getSvg(); if (s) _downloadPng(s, base(), 2, legend()); },
+      onclick: () => { const s = getSvg(); if (s) _downloadPng(s, base(), 2, legend(), mode()); },
     }, ["⬇ PNG"]),
   ];
 }
@@ -15062,6 +15337,21 @@ function buildConceptModel(p) {
   }));
   const derived = [];
   const push = (b) => derived.push(b);
+  // 계층 → 레인. 1단계에서는 기존 6레인을 유지하고 판단 기준만 계층으로 통일한다
+  // (레인을 10계층으로 펼칠 때는 이 표를 1:1로 바꾸면 된다).
+  const TIER_TO_LANE = {
+    edge: "edge", entry: "edge",
+    presentation: "service", application: "service",
+    caching: "data", messaging: "data", data: "data",
+    security: "platform", observability: "platform", delivery: "platform",
+  };
+  // null이면 개념도에서 제외 — kube-system 같은 클러스터 런타임은 클러스터 프레임이 대신한다.
+  // 계층을 못 정한 워크로드는 서비스 계층에 남겨 눈에 보이게 둔다 (validator가 따로 알려준다).
+  const laneOfWorkload = (w) => {
+    const { tier, source } = resolveTier(w);
+    if (source === "runtime") return null;
+    return { tier, lane: tier ? TIER_TO_LANE[tier] : "service" };
+  };
 
   // --- 사용자 · 채널 ---
   const hosts = [];
@@ -15106,10 +15396,19 @@ function buildConceptModel(p) {
   }
   for (const c of clusters) {
     const ing = c.addons?.ingress;
-    if (ing && ing !== "None") {
+    const entryWls = (c.workloads || []).filter(w => laneOfWorkload(w)?.lane === "edge");
+    const rules = (c.ingress_rules || []).length;
+    if (entryWls.length) {
+      // 실제 워크로드가 있으면 그것을 그린다 (애드온 박스와 중복 표시하지 않는다).
+      push({ key: `cd:entry:${c.id}`, lane: "edge",
+             label: ing && ing !== "None" ? `${ing} Ingress` : "Ingress / Gateway",
+             count: entryWls.length,
+             sub: `${c.name} · ${_cdNames(entryWls.map(w => w.name))}`,
+             ..._cdEdge, lk: "entry", ll: "Entry / Routing", ref: { kind: "cluster", id: c.id } });
+    } else if (ing && ing !== "None") {
       push({ key: `cd:ing:${c.id}`, lane: "edge", label: `${ing} Ingress`,
-             sub: `${c.name} · 규칙 ${(c.ingress_rules || []).length}`,
-             ..._cdEdge, ref: { kind: "cluster", id: c.id } });
+             sub: `${c.name} · 규칙 ${rules}`,
+             ..._cdEdge, lk: "entry", ll: "Entry / Routing", ref: { kind: "cluster", id: c.id } });
     }
   }
 
@@ -15117,9 +15416,10 @@ function buildConceptModel(p) {
   for (const c of clusters) {
     const svc = new Map(), data = new Map();
     for (const w of (c.workloads || [])) {
-      if (isPlatform(w)) continue;
+      const t = laneOfWorkload(w);
+      if (!t || t.lane === "platform" || t.lane === "edge") continue;
       const key = categoryKeyOf(w.category);
-      const bucket = isStateful(w) ? data : svc;
+      const bucket = t.lane === "data" ? data : svc;
       const g = bucket.get(key) || { count: 0, names: [] };
       g.count++; g.names.push(w.name);
       bucket.set(key, g);
@@ -15160,8 +15460,14 @@ function buildConceptModel(p) {
   const roles = new Map();
   for (const c of clusters) {
     for (const w of (c.workloads || [])) {
-      if (!isPlatform(w)) continue;
-      const r = platformRoleOf(w);
+      const t = laneOfWorkload(w);
+      if (!t || t.lane !== "platform") continue;
+      // 색·라벨은 기존 네임스페이스 역할 표를 그대로 쓰고, 역할이 안 잡히면(이름으로만 계층이
+      // 정해진 경우 등) 계층 이름으로 묶어 "Platform" 뭉텅이가 되지 않게 한다.
+      const nsRole = platformRoleOf(w);
+      const r = nsRole === PLATFORM_OTHER
+        ? { role: t.tier, label: tierLabel(t.tier), color: PLATFORM_OTHER.color }
+        : nsRole;
       const g = roles.get(r.role) || { role: r, count: 0, names: [] };
       g.count++; g.names.push(w.name);
       roles.set(r.role, g);

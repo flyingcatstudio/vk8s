@@ -17,6 +17,11 @@
       "default": false,
       "description": "true면 인스펙터에서 편집 불가, 삭제 시 추가 확인. UI에서 🔒 표시."
     },
+    "tier": {
+      "enum": ["edge", "entry", "presentation", "application", "caching", "messaging",
+               "data", "security", "observability", "delivery"],
+      "description": "아키텍처 계층 override. 비우면 이름(제품) → 네임스페이스 → category 순으로 자동 도출. 개념도 배치와 '계층 규칙' validator가 이 값을 쓴다. flow=edge/entry/presentation/application/data, support=caching/messaging, crosscut=security/observability/delivery."
+    },
     "hide_from_dep_graph": {
       "type": "boolean",
       "default": false,
