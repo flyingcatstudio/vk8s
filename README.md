@@ -446,13 +446,14 @@ DB / Cache / Queue 카테고리에서만 Basic 탭에 노출 (`workload.ha`). re
 
 #### 워크로드가 아닌 엔티티
 
-| 소스 | 매핑 |
-|---|---|
-| `network_devices.kind` | cdn·dns·waf·ddos·firewall → `edge`, vpn → `security`, switch·router → 없음 |
-| `l4_balancers` | `entry` |
-| `storages` | `data` |
-| `external_services.kind` | database·object_store → `data`, cache → `caching`, queue → `messaging`, registry·backup → `delivery`, monitoring·logging → `observability`, secret_store·identity → `security` |
-| `node.purpose` | bastion → `security`, edge → `edge`, ci-runner → `delivery`, management → `observability`, storage → `data` |
+| 소스 | 매핑 | 지금 쓰이는 곳 |
+|---|---|---|
+| `network_devices.kind` | cdn·dns·waf·ddos·firewall·vpn → `edge`, switch·router → 없음 | 개념도 **접근 계층**의 "네트워크 경계" 박스에 넣을 장비를 고른다 (스위치·라우터는 물리 배선이라 제외) |
+| `l4_balancers` | `entry` | 개념도 접근 계층 박스 · `LAYER_NO_ENTRY` 판정 (사이트 L4가 진입점인 클러스터를 오탐하지 않게) |
+| `external_services.kind` | database·object_store → `data`, cache → `caching`, queue → `messaging`, registry·backup → `delivery`, monitoring·logging → `observability`, secret_store·identity → `security` | 개념도 **외부 연동** 레인의 범례·설명 (`관리형 Redis` → `Caching (외부)`). 레인 자체는 외부 연동에 그대로 둔다 |
+
+사이트 경계에서 종단되는 VPN은 접근 계층의 경계 장비로 본다. 사용자 접속용 VPN 게이트웨이를
+따로 모델링한다면 그 워크로드의 `tier`를 `security`로 지정하면 된다.
 
 ---
 
@@ -563,7 +564,7 @@ VRAM 모드 워크로드는 `ceil(vram_gb / 카드 VRAM)`장으로 환산되어 
 | **Dependency** | `DEPENDS_ON_TARGET_NOT_FOUND` · `DEPENDS_ON_CYCLE` · `DEPENDS_ON_CROSS_CLUSTER` |
 | **정적 병목** | `THREAD_POOL_SATURATION` · `EVENT_LOOP_CPU_BOUND` · `WORKER_POOL_SATURATION` · `DB_CONNECTION_POOL_EXHAUSTED` · `DB_MAX_CONNECTIONS_EXCEEDED` · `TIMEOUT_CASCADE_RISK` · `JVM_HEAP_TOO_SMALL` · `JVM_HEAP_GT_REQUEST` · `SPOF_RISK` · `STATEFUL_NO_PVC` · `RPS_NEVER_REACHED_BY_DEPS` · `KEEPALIVE_HIGH_RPS_DISABLED` |
 | **Helm Export** | `HELM_DUPLICATE_CHART_NAME` · `HELM_INGRESS_NO_HOST` · `HELM_NO_IMAGE_REPO` |
-| **계층 규칙** | `LAYER_UNCLASSIFIED` · `LAYER_DATA_EXPOSED` · `LAYER_SKIP_CALL` · `LAYER_UPWARD_CALL` · `LAYER_NO_ENTRY` — 아키텍처 계층(§13.2) 기반. 프론트가 DB를 직접 부르거나 Data 계층이 외부 노출되는 구성을 잡는다 |
+| **계층 규칙** | `LAYER_UNCLASSIFIED` · `LAYER_DATA_EXPOSED` · `LAYER_SKIP_CALL` · `LAYER_UPWARD_CALL` · `LAYER_NO_ENTRY` — 아키텍처 계층(§13.2) 기반. 프론트가 DB를 직접 부르거나 Data 계층이 외부 노출되는 구성을 잡는다. 전부 `warn`/`info` — 계층은 설계 판단이라 저장을 막지 않는다 |
 
 각 룰은 `error(block)` / `warn` / `info` 중 하나의 severity를 갖는다.
 

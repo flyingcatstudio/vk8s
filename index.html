@@ -4235,7 +4235,7 @@ function runValidator(project) {
       // 데이터·캐시 계층이 외부에 직접 노출되면 Entry 계층을 통과하지 않는다.
       const svcType = w.network?.service?.type;
       if ((tier === "data" || tier === "caching") && (svcType === "LoadBalancer" || svcType === "NodePort")) {
-        F("LAYER_DATA_EXPOSED", "error",
+        F("LAYER_DATA_EXPOSED", "warn",
           `${c.name}/${w.name}: ${tierLabel(tier)} 계층이 ${svcType}로 외부 노출 — Entry 계층을 우회합니다`,
           { kind: "workload", id: w.id }, "workload.tier");
       }
@@ -4256,13 +4256,21 @@ function runValidator(project) {
       }
     }
     // 외부 노출이 있는데 Entry 계층이 비어 있으면 진입점이 그림에도 구성에도 없다.
+    // Entry는 클러스터 안(Ingress 컨트롤러·게이트웨이)만이 아니라 사이트 L4가 맡기도 한다.
+    const l4Targets = new Set();
+    for (const s of project.sites || []) {
+      for (const lb of (s.l4_balancers || [])) {
+        for (const cid of (lb.target_cluster_ids || [])) l4Targets.add(cid);
+      }
+    }
     for (const c of project.clusters || []) {
       const wls = c.workloads || [];
       const exposed = (c.ingress_rules || []).length > 0 ||
         wls.some(w => ["LoadBalancer", "NodePort"].includes(w.network?.service?.type));
       if (!exposed) continue;
       const hasEntry = wls.some(w => resolveTier(w).tier === "entry") ||
-        (c.addons?.ingress && c.addons.ingress !== "None");
+        (c.addons?.ingress && c.addons.ingress !== "None") ||
+        l4Targets.has(c.id);
       if (!hasEntry) {
         F("LAYER_NO_ENTRY", "warn",
           `${c.name}: 외부 노출이 있는데 Entry 계층(Ingress·게이트웨이)이 없음`,
@@ -10481,14 +10489,16 @@ const CATEGORY_TIERS = {
 };
 
 // 워크로드가 아닌 엔티티는 이름이 자의적이고(F5 · FW-A · nas-a) kind가 정확하다.
-const DEVICE_TIERS = { cdn: "edge", dns: "edge", waf: "edge", ddos: "edge", vpn: "security", switch: null, router: null, firewall: "edge" };
+// 사이트 경계에서 종단되는 VPN은 접근 계층의 경계 장비로 본다 (사용자 접속용 VPN 게이트웨이를
+// 따로 모델링한다면 workload.tier로 security를 지정하면 된다). 스위치·라우터는 아키텍처 계층이
+// 아니라 물리 배선이라 계층을 매기지 않는다.
+const DEVICE_TIERS = { cdn: "edge", dns: "edge", waf: "edge", ddos: "edge", firewall: "edge", vpn: "edge", switch: null, router: null };
 const EXT_SERVICE_TIERS = {
   database: "data", cache: "caching", queue: "messaging", object_store: "data",
   registry: "delivery", backup: "delivery",
   monitoring: "observability", logging: "observability",
   secret_store: "security", identity: "security", custom: null,
 };
-const NODE_PURPOSE_TIERS = { bastion: "security", edge: "edge", "ci-runner": "delivery", management: "observability", storage: "data", compute: null };
 
 // kube-system은 계층이 아니다 — CoreDNS·kube-proxy는 아키텍처가 고른 계층이 아니라
 // 쿠버네티스가 그렇게 동작하는 방식(클러스터 자체의 능력)이다. 개념도에서는 클러스터
@@ -15380,9 +15390,10 @@ function buildConceptModel(p) {
 
   // --- 접근 계층 --- (사이트 경계 장비 + L4 + Ingress 컨트롤러)
   for (const s of sites) {
-    const sec = (s.network_devices || []).filter(d => ["firewall", "waf", "ddos", "cdn", "vpn"].includes(d.kind));
+    // 접근 계층에 그릴 장비 = DEVICE_TIERS가 edge로 매긴 것. 스위치·라우터는 빠진다.
+    const sec = (s.network_devices || []).filter(d => DEVICE_TIERS[d.kind] === "edge");
     if (sec.length) {
-      push({ key: `cd:edgesec:${s.id}`, lane: "edge", label: "보안 경계",
+      push({ key: `cd:edgesec:${s.id}`, lane: "edge", label: "네트워크 경계",
              sub: `${s.name} · ${[...new Set(sec.map(d => d.kind.toUpperCase()))].join(" · ")}`,
              ..._cdSecurity, ref: { kind: "site", id: s.id } });
     }
@@ -15482,9 +15493,15 @@ function buildConceptModel(p) {
   // --- 외부 연동 ---
   for (const s of sites) {
     for (const ex of (s.external_services || [])) {
+      // 관리형 Redis는 "밖에 있는 Caching 계층"이지 정체불명의 외부 서비스가 아니다.
+      // 레인은 외부 연동에 두되 범례는 계층으로 읽히게 한다.
+      const et = EXT_SERVICE_TIERS[ex.kind] || null;
       push({ key: `cd:ext:${ex.id}`, lane: "external", label: ex.name,
-             sub: [ex.kind, ex.provider].filter(Boolean).join(" · ") || s.name,
-             ..._cdExternal, lk: "external", ll: "외부 서비스", ref: { kind: "site", id: s.id } });
+             sub: [et ? tierLabel(et) : ex.kind, ex.provider].filter(Boolean).join(" · ") || s.name,
+             ..._cdExternal,
+             lk: et ? `ext:${et}` : "external",
+             ll: et ? `${tierLabel(et)} (외부)` : "외부 서비스",
+             ref: { kind: "site", id: s.id } });
     }
   }
   for (const lk of (p.site_links || [])) {

@@ -352,7 +352,7 @@
 - **when**: 어느 규칙으로도 계층이 정해지지 않음 (보통 `category: "Other"` + 비표준 네임스페이스)
 - **msg**: `{cluster.name}/{workload.name}: 아키텍처 계층 미분류 — 개념도에서 서비스 계층으로 묶입니다`
 
-### `LAYER_DATA_EXPOSED` — block
+### `LAYER_DATA_EXPOSED` — warn
 - **scope**: workload
 - **when**: `tier ∈ {data, caching}` 이고 `network.service.type ∈ {LoadBalancer, NodePort}`
 - **msg**: `{cluster.name}/{workload.name}: {tier} 계층이 {type}로 외부 노출 — Entry 계층을 우회합니다`
@@ -369,5 +369,5 @@
 
 ### `LAYER_NO_ENTRY` — warn
 - **scope**: cluster
-- **when**: `ingress_rules`가 있거나 LoadBalancer/NodePort 서비스가 있는데 Entry 계층 워크로드도 `addons.ingress`도 없음
+- **when**: `ingress_rules`가 있거나 LoadBalancer/NodePort 서비스가 있는데, Entry 계층 워크로드도 `addons.ingress`도 이 클러스터를 가리키는 `site.l4_balancers`도 없음
 - **msg**: `{cluster.name}: 외부 노출이 있는데 Entry 계층(Ingress·게이트웨이)이 없음`
