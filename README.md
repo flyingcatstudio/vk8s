@@ -296,26 +296,51 @@ Export(§12)가 기계가 먹는 산출물(kubectl / helm / docker compose)이�
 
 ### 11.1 아키텍처 개념도
 
-워크로드를 전부 나열하는 Architecture 뷰(§5)의 한 단계 위 추상. 6개 레인으로 접어 그린다.
+워크로드를 전부 나열하는 Architecture 뷰(§5)의 한 단계 위 추상. **행 = 아키텍처 계층(§13.2),
+열 = 구역 또는 클러스터**인 격자로 그린다. 두 축은 직교한다 — 관리형 RDS는 "Data 계층인데 외부
+구역"이지 정체불명의 외부 서비스가 아니다.
 
-| 레인 | 도출 기준 |
+#### 행 — 계층
+
+행 목록·순서는 `TIERS` 하나가 정한다. 흐름/보조 계층은 order 순으로 쌓되 같은 order에서는
+흐름을 먼저 둔다(Application → Data 화살표가 중간에 낀 캐시·큐에 끊기지 않게). 횡단 계층은
+열로 쪼개지 않고 전체 폭 밴드로 그리고 흐름 화살표도 붙이지 않는다.
+
+```
+사용자 · 채널            (액터 — 계층 아님)
+  ↓
+Network & Edge          network_devices(cdn·dns·waf·ddos·firewall·vpn) · site_links
+  ↓
+Entry / Routing         l4_balancers · Entry 계층 워크로드 (없으면 addons.ingress)
+  ↓
+Presentation            category로 묶어 `Frontend ×3`
+  ↓
+Application             `API/WAS ×7` — 미분류 워크로드도 여기 남겨 눈에 보이게 둔다
+  ↓
+Data                    + PVC가 실제로 가리키는 사이트 스토리지
+Caching / Messaging     (보조 — 화살표 없이 아래에 나란히)
+─────
+Security & Auth         (횡단 — 전체 폭)
+Observability & Mgmt
+Delivery & Operations
+```
+
+횡단 계층 박스는 네임스페이스 역할(`PLATFORM_NS_ROLES`)로 색·라벨을 매기고, 역할이 안 잡히면
+계층 이름으로 묶는다(`Platform` 뭉텅이가 되지 않게).
+
+`kube-system` 등 클러스터 런타임 워크로드는 그리지 않는다 — CoreDNS·kube-proxy는 아키텍처가
+고른 계층이 아니라 쿠버네티스가 그렇게 동작하는 방식이라, 클러스터가 그 역할을 대신한다.
+
+#### 열 — `열 구분 [구역 | 클러스터]`
+
+| 모드 | 열 |
 |---|---|
-| 사용자 · 채널 | ingress_rules / LoadBalancer·NodePort Service / L4 존재 → 외부 사용자, `site_links` → 전용망 사용자, 플랫폼 워크로드 → 운영자 |
-| 접근 계층 | `site.network_devices`의 firewall·waf·ddos·cdn·vpn 묶음, `site.l4_balancers`, **Entry 계층 워크로드**(없으면 cluster addon의 Ingress) |
-| 서비스 계층 | 클러스터별 컬럼. **Presentation·Application 계층** 워크로드를 `categoryKeyOf`로 묶어 `API/WAS ×7` 형태로 표기 |
-| 데이터 계층 | 클러스터별 컬럼. **Caching·Messaging·Data 계층** 워크로드 + PVC가 실제로 가리키는 사이트 스토리지 (여러 클러스터가 공유하면 컬럼 밖 공용 줄) |
-| 관리 · 운영 | **Security·Observability·Delivery 계층** — 네임스페이스 역할(`PLATFORM_NS_ROLES`)로 색·라벨을 매기고, 역할이 안 잡히면 계층 이름으로 묶는다 |
-| 외부 연동 | `site.external_services`, `site_links` |
+| **구역** (기본) | `외부 구역` · `내부 구역`. **외부 = 우리가 운영하지 않는 것** — `external_services`와 `site_links`. 나머지는 전부 내부 |
+| **클러스터** | 클러스터별 열 + `공용`(여러 클러스터가 쓰는 스토리지 등) + `외부` |
 
-레인 배치는 **아키텍처 계층(§13.2)** 하나를 기준으로 한다. 계층 판단이 흩어져 있으면 같은
-워크로드가 뷰마다 다른 자리에 나타나므로, 계층 → 레인 매핑 표 하나만 두고 모든 레인이 그것을 읽는다.
-
-`kube-system` 등 클러스터 런타임 워크로드는 개념도에 그리지 않는다 — CoreDNS·kube-proxy는
-아키텍처가 고른 계층이 아니라 쿠버네티스가 그렇게 동작하는 방식이라, 클러스터 프레임이 그 역할을 한다.
-
-레인 목록·순서·배치는 `CONCEPT_LANES` 하나가 정한다 (`scope: "global" | "column"`,
-`flow`가 true면 앞뒤 구간 사이에 흐름 화살표). 레인을 늘릴 때도 배열에 한 줄이면 그림·편집
-패널·Markdown에 모두 반영된다.
+열 폭은 내용에 맞춰 정해진다 — 외부 구역은 대개 좁고 내부가 넓다. 열이 둘 이상일 때만 상단에
+열 머리글이 붙고, 흐름 화살표도 양쪽 행에 내용이 있는 열마다 따로 그린다(앱은 내부인데 DB는
+외부인 경우처럼 한 열도 못 그리면 가운데 화살표 하나로 대신한다).
 
 ### 11.2 검토 · 수정
 
@@ -324,7 +349,8 @@ Export(§12)가 기계가 먹는 산출물(kubectl / helm / docker compose)이�
 - **체크 해제** — 개념도에서 제외 (도출 항목은 삭제 대신 숨김).
 - **라벨 · 비고** — 입력 즉시 다이어그램에 반영. 비고를 적으면 박스 아래 설명이 그 값으로 바뀐다.
   두 칸 모두 **비워두면 도출값으로 되돌아간다** (도출값은 placeholder로 보인다).
-- **+ 요소** — 레인에 직접 요소 추가 (점선 테두리로 구분). 아직 구성에 없는 목표 요소를 얹을 때 사용.
+- **+ 요소** — 계층 행에 직접 요소 추가 (점선 테두리로 구분). 아직 구성에 없는 목표 요소를 얹을 때 사용.
+  직접 추가한 요소만 구역(내부/외부)을 고를 수 있다 — 도출 요소의 구역은 데이터가 정한다.
 - **제목 · 부제** — 산출물 표지 문구. 비워두면 `<프로젝트명> 목표 아키텍처 개념도`.
 - **↺ 재도출** — 손댄 내용을 전부 지우고 현재 구성에서 다시 도출.
 
@@ -332,6 +358,7 @@ Export(§12)가 기계가 먹는 산출물(kubectl / helm / docker compose)이�
 
 수정 내용은 `project.concept`에 **엔티티 id 기반 안정 키**로 저장된다(Checklist와 동일한 방식).
 요소 자체는 매번 config에서 다시 도출되므로, 구성이 바뀌어도 손댄 라벨·비고·숨김은 그대로 유지된다.
+6레인 시절에 추가한 요소는 새 계층 행으로 자동 이동한다(`service`→Application, `platform`→Observability).
 
 ### 11.3 내보내기
 
