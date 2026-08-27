@@ -371,3 +371,27 @@
 - **scope**: cluster
 - **when**: `ingress_rules`가 있거나 LoadBalancer/NodePort 서비스가 있는데, Entry 계층 워크로드도 `addons.ingress`도 이 클러스터를 가리키는 `site.l4_balancers`도 없음
 - **msg**: `{cluster.name}: 외부 노출이 있는데 Entry 계층(Ingress·게이트웨이)이 없음`
+
+---
+
+## 13. VM · 베어메탈 그룹
+
+`cluster.platform === "vm"` 인 그룹에서만 실행된다. 반대로 이 그룹에서는 k8s 룰
+(`CLUSTER_NO_CONTROL_PLANE` · `NO_CNI_SELECTED` · `GPU_NODE_NO_GPU_OPERATOR` ·
+`WORKLOAD_NAMESPACE_NOT_DECLARED` · `NETPOL_*` · `NS_*` · `WORKLOAD_STATEFUL_NO_ANTI_AFFINITY`)이
+실행되지 않는다 — 고칠 수 없는 경고만 쌓이기 때문이다.
+
+### `VM_NODE_NO_OS` — info
+- **scope**: node
+- **when**: vm 그룹에 속한 노드에 `node.os.distro` 미설정
+- **msg**: `{cluster.name}/{node.name}: OS 미기재 — 발주서·설치 목록에 필요합니다`
+
+### `VM_SERVICE_NO_SOFTWARE` — info
+- **scope**: workload
+- **when**: vm 그룹의 서비스에 `workload.software[]`가 비었거나 이름이 없음
+- **msg**: `{cluster.name}/{workload.name}: 설치 소프트웨어 미기재 — 계층 판정이 category에만 의존합니다`
+
+### `VM_HA_NO_VIP` — warn
+- **scope**: workload
+- **when**: `ha.mode ∈ {active-standby, active-active}` 인데 `ha.vip` 미설정
+- **msg**: `{cluster.name}/{workload.name}: {mode}인데 VIP 미기재 — 절체 대상 주소가 없으면 구성이 성립하지 않습니다`

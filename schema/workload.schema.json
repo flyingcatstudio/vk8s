@@ -22,6 +22,34 @@
                "data", "security", "observability", "delivery"],
       "description": "아키텍처 계층 override. 비우면 이름(제품) → 네임스페이스 → category 순으로 자동 도출. 개념도 배치와 '계층 규칙' validator가 이 값을 쓴다. flow=edge/entry/presentation/application/data, support=caching/messaging, crosscut=security/observability/delivery."
     },
+    "software": {
+      "type": "array",
+      "description": "이 서비스로 설치되는 소프트웨어·미들웨어 (VM 그룹에서 주로 사용). 예: Apache 2.4 + Tomcat 9. 계층 판정과 제품 식별에도 쓰인다.",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "description": "예: Tomcat, Oracle, Apache, JEUS, WebLogic" },
+          "version": { "type": "string" },
+          "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+          "notes": { "type": "string" }
+        }
+      }
+    },
+    "ha": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "HA 토폴로지. k8s stateful은 primary-replica/sentinel/sharded-cluster, VM 그룹은 active-standby/active-active(VIP)를 쓴다.",
+      "properties": {
+        "mode": { "enum": ["none", "primary-replica", "sentinel", "sharded-cluster", "active-standby", "active-active"] },
+        "primaries": { "type": "integer", "minimum": 1 },
+        "replicas_per_primary": { "type": "integer", "minimum": 0 },
+        "quorum_count": { "type": "integer", "minimum": 0 },
+        "operator": { "type": "string", "description": "k8s Operator/Chart 이름 (문서용)" },
+        "vip": { "type": "string", "description": "VM HA에서 페일오버 대상 VIP" }
+      }
+    },
     "hide_from_dep_graph": {
       "type": "boolean",
       "default": false,

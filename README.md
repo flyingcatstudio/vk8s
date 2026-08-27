@@ -62,6 +62,7 @@ Project Dashboard에 들어가면 바로 Sites · Nodes · Clusters · Workloads
 Project ──┬── Sites       ── Storage / L4 LB / NetworkDevice / ExternalService
           ├── Nodes       (spec: form_factor, vcpu, memory_gb, disks, gpu, gpu_chassis, power)
           ├── Clusters    ── Namespaces / NetworkPolicies / Workloads / Addons
+          │                  (platform=vm 이면 서버 그룹 — Namespaces·NetPol·Addons 없음, §13.3)
           ├── site_links  (사이트 간 VPN / leased line — 대역폭·지연·암호화)
           └── (catalog)   ── 사전정의된 node-spec, gpu-model, runtime-profile
 ```
@@ -69,7 +70,7 @@ Project ──┬── Sites       ── Storage / L4 LB / NetworkDevice / Ext
 - **Site** — 물리 IDC 또는 클라우드 리전. onprem이면 `capacity.rack_units / power_kw / cooling_kw`를 갖는다. 사이트는 `storages` · `l4_balancers` · `network_devices` · `external_services`를 보유.
 - **site_links** — 프로젝트 최상위 배열. 두 사이트를 VPN/leased line으로 연결(대역폭·지연·암호화) — Hybrid/Multi-site 토폴로지에서 사용.
 - **Node** — 단일 서버. `cluster_roles`에 `control-plane` / `worker` 부여. site에 속하고 cluster에 멤버로 들어감.
-- **Cluster** — k8s 클러스터. `node_ids`로 노드 멤버 관리. CNI / CSI / GPU Operator / Local PV / Ingress 등 addon, HA 옵션, 네임스페이스, 네트워크 정책, 워크로드 보유.
+- **Cluster** — 배포 그룹. `platform: k8s | vm` (§13.3). `node_ids`로 노드 멤버 관리. CNI / CSI / GPU Operator / Local PV / Ingress 등 addon, HA 옵션, 네임스페이스, 네트워크 정책, 워크로드 보유.
 - **Workload** — Deployment / StatefulSet / DaemonSet / Job / CronJob 단위. replicas, requests/limits, GPU 요청, PVC, runtime(언어·프레임워크·동시성 모델), 네트워크(Service · Ingress), `depends_on`, **HA 토폴로지(stateful)**.
 
 스키마 정의: [`schema/`](./schema/) · 자세한 설명: [`schema/README.md`](./schema/README.md).
@@ -484,6 +485,52 @@ DB / Cache / Queue 카테고리에서만 Basic 탭에 노출 (`workload.ha`). re
 
 ---
 
+### 13.3 VM · 베어메탈 그룹 (`cluster.platform`)
+
+온프레미스 설계에는 k8s 밖의 요소가 늘 섞인다 — 레거시 WAS, Oracle, 배치 서버, 파일 서버.
+이를 가짜 클러스터 + 가짜 파드로 욱여넣으면 네임스페이스·Ingress·Deployment 같은 무의미한
+필드가 따라붙는다. `cluster.platform`을 `vm`으로 두면 그 필드들이 데이터에서도 UI에서도 빠지고,
+나머지 축(노드 · 서비스 · 의존 · 계층 · 용량)은 그대로 공유한다.
+
+| | `platform: "k8s"` | `platform: "vm"` |
+|---|---|---|
+| 트리 · 인스펙터 | ⎈ Cluster | ▤ VM Group |
+| 하위 항목 | Workloads (pod) | **서비스** (서버에 설치되는 것) |
+| 갖는 것 | k8s_version · addons · namespaces · network_policies · ingress_rules · pod/service CIDR | node_subnet만 |
+| 노드 행 | control-plane / worker / etcd 역할 | **OS 표시** (`node.os`) |
+| 워크로드 필드 | kind(Deployment/StatefulSet) · namespace · HPA | **설치 소프트웨어** · 서버 대수 |
+| HA | primary-replica · sentinel · sharded-cluster | **active-standby · active-active + VIP** |
+| Quick Deploy | pod 템플릿 | 같은 템플릿이 **설치 미들웨어**로 들어감 (kind·namespace 제거) |
+| Export | K8s YAML · Helm · Compose 대상 | **제외** (리포트·개념도·체크리스트에는 포함) |
+| Namespace 뷰 | 대상 | 제외 |
+| Validator | k8s 룰 전체 | k8s 룰 제외 + VM 룰 (§16) |
+
+플랫폼을 되돌려도 기존 k8s 설정은 지워지지 않는다 — vm인 동안 UI·검증·export가 그 필드를
+읽지 않을 뿐이다.
+
+#### 설치 소프트웨어가 계층을 정한다
+
+`workload.software[]`(이름 · 버전 · 포트)는 단순 기록이 아니라 **계층 판정의 입력**이다(§13.2).
+워크로드 이름이 업무명이라 제품 신호가 없을 때 여기서 잡힌다.
+
+```
+정산서비스  [WAS]  software: Tomcat 9.0 · Apache 2.4   → Application (설치 SW)
+원장DB      [DB]   software: Oracle 19c                → Data       (설치 SW)
+```
+
+#### 이중화
+
+`active-standby`(운영 1 + 대기 1)와 `active-active`(N대 동시)는 VIP 페일오버가 전제라
+VIP를 비우면 `VM_HA_NO_VIP` 경고가 뜬다. 대수는 Capacity 시뮬레이션에 그대로 반영된다.
+
+#### 산출물
+
+- **개념도** — VM 서비스도 계층 행에 그대로 들어간다. 열 구분을 `클러스터`로 두면 `▤ 그룹명`으로 표시된다.
+- **Project Report** — Deployment Groups 섹션에 플랫폼 · 서버 OS · 설치 소프트웨어 · 이중화가 나간다. Node Specs 표에 OS 열 추가.
+- **Checklist** — VM 그룹은 전용 3개 그룹(서버·OS 준비 / 미들웨어 설치·기동 / 이중화·절체 시험)이 나온다. k8s 부트스트랩·인그레스·오토스케일 항목은 나오지 않는다.
+
+---
+
 ## 14. GPU 모델링 — chassis · 실장착 · VRAM 소비 · MIG
 
 세 계층으로 나뉘어 검증된다.
@@ -591,6 +638,7 @@ VRAM 모드 워크로드는 `ceil(vram_gb / 카드 VRAM)`장으로 환산되어 
 | **Dependency** | `DEPENDS_ON_TARGET_NOT_FOUND` · `DEPENDS_ON_CYCLE` · `DEPENDS_ON_CROSS_CLUSTER` |
 | **정적 병목** | `THREAD_POOL_SATURATION` · `EVENT_LOOP_CPU_BOUND` · `WORKER_POOL_SATURATION` · `DB_CONNECTION_POOL_EXHAUSTED` · `DB_MAX_CONNECTIONS_EXCEEDED` · `TIMEOUT_CASCADE_RISK` · `JVM_HEAP_TOO_SMALL` · `JVM_HEAP_GT_REQUEST` · `SPOF_RISK` · `STATEFUL_NO_PVC` · `RPS_NEVER_REACHED_BY_DEPS` · `KEEPALIVE_HIGH_RPS_DISABLED` |
 | **Helm Export** | `HELM_DUPLICATE_CHART_NAME` · `HELM_INGRESS_NO_HOST` · `HELM_NO_IMAGE_REPO` |
+| **VM 그룹** | `VM_NODE_NO_OS` · `VM_SERVICE_NO_SOFTWARE` · `VM_HA_NO_VIP` — platform=vm 그룹 전용. 대신 control-plane·CNI·GPU Operator·네임스페이스·NetworkPolicy 룰은 이 그룹에서 실행되지 않는다 |
 | **계층 규칙** | `LAYER_UNCLASSIFIED` · `LAYER_DATA_EXPOSED` · `LAYER_SKIP_CALL` · `LAYER_UPWARD_CALL` · `LAYER_NO_ENTRY` — 아키텍처 계층(§13.2) 기반. 프론트가 DB를 직접 부르거나 Data 계층이 외부 노출되는 구성을 잡는다. 전부 `warn`/`info` — 계층은 설계 판단이라 저장을 막지 않는다 |
 
 각 룰은 `error(block)` / `warn` / `info` 중 하나의 severity를 갖는다.

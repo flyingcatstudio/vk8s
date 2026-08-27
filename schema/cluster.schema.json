@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.vk8s.aiotool.net/v0.2/cluster.json",
   "title": "Cluster",
-  "description": "단일 k8s 클러스터. 노드 ID들을 묶고 워크로드를 호스트.",
+  "description": "배포 그룹. platform=k8s면 쿠버네티스 클러스터, vm이면 VM/베어메탈 서버 그룹. 노드 ID들을 묶고 워크로드(vm에서는 '서비스')를 호스트.",
   "type": "object",
   "required": ["id", "name", "node_ids"],
   "additionalProperties": false,
@@ -12,6 +12,11 @@
       "pattern": "^[a-z0-9][a-z0-9-]*$"
     },
     "name": { "type": "string" },
+    "platform": {
+      "enum": ["k8s", "vm"],
+      "default": "k8s",
+      "description": "배포 그룹의 종류. k8s=쿠버네티스 클러스터. vm=VM/베어메탈 서버 그룹 — 네임스페이스·NetworkPolicy·Ingress·애드온이 없고, workloads는 서버에 설치되는 '서비스'를 뜻한다. 값이 없으면 k8s."
+    },
     "locked": {
       "type": "boolean",
       "default": false,

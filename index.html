@@ -1357,6 +1357,24 @@ const HELP = {
     body: "Little's Law (in-flight = RPS × avg_ms / 1000) 기반. 5개 룰: (1) compute capacity (thread-pool/replica), (2) caller connection pool 고갈, (3) downstream RPS budget 초과, (4) DB max_connections oversubscription, (5) p99 latency budget 누적 초과.",
     reco: "BLOCK은 즉시 SLA 위반 — replicas/pool/threads 조정 필요. WARN은 트래픽 폭증 시 위험. 정적 룰이라 retry/circuit-breaker 등 동적 효과는 미반영. traffic_profile + runtime + depends_on이 채워져야 정확함.",
   },
+  "cluster.platform": {
+    cat: "클러스터",
+    title: "Platform — 배포 그룹의 종류",
+    body: "k8s = 쿠버네티스 클러스터. vm = VM/베어메탈 서버 그룹. 온프레미스 설계에는 k8s 밖의 요소(레거시 WAS·Oracle·배치 서버)가 늘 섞이는데, 이를 가짜 클러스터로 욱여넣으면 네임스페이스·Ingress·Deployment 같은 무의미한 필드가 따라붙습니다. vm을 고르면 그 필드들이 UI·검증·export에서 모두 빠지고, 노드·서비스·의존·계층·용량 축은 그대로 공유합니다.",
+    reco: "vm 그룹의 workloads는 pod가 아니라 '서버에 설치되는 서비스'입니다. 설치 소프트웨어 목록과 이중화 방식(Active-Standby / Active-Active + VIP)을 채우면 개념도·리포트에 그대로 반영됩니다. 플랫폼을 되돌리면 기존 k8s 설정은 지워지지 않고 다시 보입니다.",
+  },
+  "node.os": {
+    cat: "노드",
+    title: "OS — 설치 운영체제",
+    body: "배포판·버전·커널. VM/베어메탈 산출물(발주서·설치 목록·이행 계획)에 필요한 항목이고, k8s 노드에도 동일하게 씁니다.",
+    reco: "커널 버전은 GPU 드라이버·CSI·커널 파라미터 요구사항이 있는 구성에서 특히 중요합니다. 프로젝트 리포트의 Node Specs 섹션에 함께 나갑니다.",
+  },
+  "workload.software": {
+    cat: "워크로드",
+    title: "설치 소프트웨어 · 미들웨어",
+    body: "이 서비스로 서버에 설치되는 소프트웨어 목록 (예: Apache 2.4 + Tomcat 9). VM 그룹에서 주로 쓰지만 k8s 워크로드에도 기록할 수 있습니다.",
+    reco: "제품명을 그대로 적으세요 — 아키텍처 계층(§13.2) 판정이 이름을 먼저 봅니다. `Oracle`이라 적으면 Data 계층, `Tomcat`이면 Application으로 잡힙니다. 워크로드 이름이 업무명(예: 정산서비스)일 때 특히 유용합니다.",
+  },
   "workload.tier": {
     cat: "워크로드",
     title: "Architecture tier — 아키텍처 계층",
@@ -1910,6 +1928,15 @@ const svgNode = (tag, attrs = {}, children = []) => {
   }
   return node;
 };
+// 배포 그룹(project.clusters[])의 종류. k8s = 쿠버네티스 클러스터, vm = VM/베어메탈 서버 그룹.
+// 온프레미스 설계에는 k8s 밖의 요소(레거시 WAS, Oracle, 배치 서버)가 늘 섞이는데, 이들을 가짜
+// 클러스터 + 가짜 파드로 욱여넣으면 네임스페이스·Ingress·Deployment 같은 무의미한 필드가 따라붙는다.
+// platform 하나로 갈라서 vm일 때는 k8s 전용 필드를 데이터에서도 UI에서도 빼고, 나머지 축
+// (노드·서비스·의존·계층·용량)은 그대로 공유한다. 값이 없으면 k8s — 기존 프로젝트는 마이그레이션 없이 읽힌다.
+const isVmGroup = (c) => c?.platform === "vm";
+const groupIcon = (c) => (isVmGroup(c) ? "▤" : "⎈");
+const groupKindLabel = (c) => (isVmGroup(c) ? "VM Group" : "Cluster");
+const wlKindLabel = (c) => (isVmGroup(c) ? "서비스" : "Workload");
 const slug = s => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 const uid  = () => Math.random().toString(36).slice(2, 8);
 function clsLevel(pct) {
@@ -2267,31 +2294,41 @@ function addCluster(seed) {
   if (!state.project) return;
   if (!state.project.clusters) state.project.clusters = [];
   const id = slug(seed.name) + "-" + uid();
+  const vm = seed.platform === "vm";
   const cluster = {
     id,
-    name: seed.name || "cluster",
+    name: seed.name || (vm ? "vm-group" : "cluster"),
+    platform: vm ? "vm" : "k8s",
     environment_tag: seed.environment_tag || "",
-    k8s_version: seed.k8s_version || "1.30",
-    ha_control_plane: !!seed.ha_control_plane,
     node_ids: [],
-    network: {
-      pod_cidr: seed.pod_cidr || "10.244.0.0/16",
-      service_cidr: seed.service_cidr || "10.96.0.0/12",
-      node_subnet: seed.node_subnet || "192.168.10.0/24",
-      dns_domain: seed.dns_domain || "cluster.local",
-    },
-    ingress_rules: [],
-    addons: {
-      cni: seed.cni || "Calico",
-      ingress: seed.ingress || "NGINX",
-      metrics_server: true,
-      gpu_operator: !!seed.gpu_operator,
-      service_mesh: "None",
-    },
-    namespaces: [],
-    network_policies: [],
     workloads: [],
   };
+  // k8s 전용 필드는 vm 그룹에 만들지 않는다 — 빈 채로 남겨두면 export·검증이 헛돈다.
+  if (!vm) {
+    Object.assign(cluster, {
+      k8s_version: seed.k8s_version || "1.30",
+      ha_control_plane: !!seed.ha_control_plane,
+      network: {
+        pod_cidr: seed.pod_cidr || "10.244.0.0/16",
+        service_cidr: seed.service_cidr || "10.96.0.0/12",
+        node_subnet: seed.node_subnet || "192.168.10.0/24",
+        dns_domain: seed.dns_domain || "cluster.local",
+      },
+      ingress_rules: [],
+      addons: {
+        cni: seed.cni || "Calico",
+        ingress: seed.ingress || "NGINX",
+        metrics_server: true,
+        gpu_operator: !!seed.gpu_operator,
+        service_mesh: "None",
+      },
+      namespaces: [],
+      network_policies: [],
+    });
+  } else {
+    // vm 그룹도 서브넷 정보는 쓸모 있다 (발주서·네트워크 계획).
+    cluster.network = { node_subnet: seed.node_subnet || "192.168.10.0/24" };
+  }
   state.project.clusters.push(cluster);
   // assign initial nodes
   for (const nid of (seed.node_ids || [])) {
@@ -2646,6 +2683,18 @@ function quickDeployWorkload(clusterId, frameworkKey, ha = false) {
   if (!wl) return;
 
   let changed = false;
+  // VM 그룹에서는 같은 템플릿이 "서버에 설치되는 미들웨어"를 뜻한다 — pod 개념(kind/namespace)을
+  // 떼고 설치 소프트웨어로 기록해서 계층 판정이 제품명을 그대로 읽게 한다.
+  if (isVmGroup(c)) {
+    delete wl.kind;
+    delete wl.namespace;
+    wl.software = [{
+      name: tmpl.label,
+      version: preset?.version || undefined,
+      port: tmpl.servicePort?.port || undefined,
+    }];
+    changed = true;
+  }
   // Resource limits (max) — from template seed
   if (tmpl.seed.cpu_limit != null || tmpl.seed.memory_limit_gb != null) {
     wl.resources.limits = wl.resources.limits || {};
@@ -3817,6 +3866,9 @@ function runValidator(project) {
 
   // 4. Cluster checks
   for (const c of project.clusters || []) {
+    // VM/베어메탈 그룹에는 control-plane · CNI · GPU Operator 개념이 없다. k8s 룰을 그대로 돌리면
+    // 고칠 수 없는 경고만 쌓이므로 해당 룰만 건너뛴다 (노드 없음·환경 혼재 같은 일반 룰은 유지).
+    const vmG = isVmGroup(c);
     const nodes = (c.node_ids || []).map(id => project.nodes.find(n => n.id === id)).filter(Boolean);
     if (!nodes.length) {
       // A cluster with workloads but zero nodes can't schedule anything — surface it in the
@@ -3830,7 +3882,7 @@ function runValidator(project) {
     }
     const roleOf = n => Array.isArray(n.cluster_roles) ? n.cluster_roles : [];
     const cp = nodes.filter(n => roleOf(n).includes("control-plane")).length;
-    if (cp === 0) {
+    if (!vmG && cp === 0) {
       F("CLUSTER_NO_CONTROL_PLANE", "error",
         `${c.name}: control plane 노드 없음`, { kind: "cluster", id: c.id });
     }
@@ -3844,7 +3896,7 @@ function runValidator(project) {
     }
     // GPU node + no operator
     const hasGpu = nodes.some(n => (n.spec?.gpu || []).length > 0 || (n.spec?.gpu_chassis?.max_count || 0) > 0);
-    if (hasGpu && !c.addons?.gpu_operator) {
+    if (!vmG && hasGpu && !c.addons?.gpu_operator) {
       F("GPU_NODE_NO_GPU_OPERATOR", "warn",
         `${c.name}: GPU 노드 보유 — GPU Operator 권장`, { kind: "cluster", id: c.id }, "cluster.gpu_operator");
     }
@@ -3855,7 +3907,7 @@ function runValidator(project) {
         `${c.name}: cloud+onprem 양쪽에 걸침`, { kind: "cluster", id: c.id });
     }
     // No CNI
-    if (!c.addons?.cni || c.addons.cni === "None") {
+    if (!vmG && (!c.addons?.cni || c.addons.cni === "None")) {
       F("NO_CNI_SELECTED", "warn",
         `${c.name}: CNI 미선택 — Pod 네트워킹 불가`, { kind: "cluster", id: c.id }, "cluster.cni");
     }
@@ -3978,7 +4030,7 @@ function runValidator(project) {
             { kind: "workload", id: w.id }, "workload.ha.mode");
         }
         // HA topology set but anti-affinity missing — pods can still land on the same node.
-        if (haMode !== "none" && (w.scheduling?.anti_affinity || "none") === "none") {
+        if (!vmG && haMode !== "none" && (w.scheduling?.anti_affinity || "none") === "none") {
           F("WORKLOAD_STATEFUL_NO_ANTI_AFFINITY", "warn",
             `${w.name}: HA mode=${haMode}인데 anti-affinity 없음 — 같은 노드에 몰리면 HA 효과 없음`,
             { kind: "workload", id: w.id }, "workload.scheduling.anti_affinity");
@@ -4168,6 +4220,7 @@ function runValidator(project) {
 
   // 7. Namespace + NetworkPolicy
   for (const c of project.clusters || []) {
+    if (isVmGroup(c)) continue;   // 네임스페이스·NetworkPolicy는 k8s 개념
     const declared = new Set((c.namespaces || []).map(n => n.name));
     declared.add("default"); // implicit
     // Workload namespace declared?
@@ -4209,6 +4262,32 @@ function runValidator(project) {
             `NP '${np.name}': from-ns '${fns}' 없음`,
             { kind: "cluster", id: c.id });
         }
+      }
+    }
+  }
+
+  // N. VM · 베어메탈 그룹
+  // k8s 룰이 안 도는 대신, 산출물(발주서·설치 목록·이행 계획)에 필요한 항목이 비었는지 본다.
+  for (const c of project.clusters || []) {
+    if (!isVmGroup(c)) continue;
+    for (const nid of (c.node_ids || [])) {
+      const n = (project.nodes || []).find(x => x.id === nid);
+      if (n && !n.os?.distro) {
+        F("VM_NODE_NO_OS", "info",
+          `${c.name}/${n.name}: OS 미기재 — 발주서·설치 목록에 필요합니다`,
+          { kind: "node", id: n.id }, "node.os");
+      }
+    }
+    for (const w of (c.workloads || [])) {
+      if (!(w.software || []).some(sw => sw.name)) {
+        F("VM_SERVICE_NO_SOFTWARE", "info",
+          `${c.name}/${w.name}: 설치 소프트웨어 미기재 — 계층 판정이 category에만 의존합니다`,
+          { kind: "workload", id: w.id }, "workload.software");
+      }
+      if (HA_VM_MODES.has(w.ha?.mode) && !w.ha?.vip) {
+        F("VM_HA_NO_VIP", "warn",
+          `${c.name}/${w.name}: ${w.ha.mode}인데 VIP 미기재 — 절체 대상 주소가 없으면 구성이 성립하지 않습니다`,
+          { kind: "workload", id: w.id }, "workload.ha.mode");
       }
     }
   }
@@ -4504,20 +4583,22 @@ function renderTree() {
   // Clusters section
   const clusters = p.clusters || [];
   const clustersSec = el("div", { class: "tree-section" });
+  const vmCount = clusters.filter(isVmGroup).length;
   clustersSec.appendChild(el("div", { class: "tree-section-header" }, [
-    "Clusters ", el("span", { class: "count" }, [`(${clusters.length})`]),
+    "Groups ", el("span", { class: "count" },
+      [vmCount ? `(${clusters.length - vmCount} k8s / ${vmCount} vm)` : `(${clusters.length})`]),
   ]));
   if (!clusters.length) {
-    clustersSec.appendChild(el("div", { class: "empty-hint" }, ["클러스터를 추가하세요."]));
+    clustersSec.appendChild(el("div", { class: "empty-hint" }, ["클러스터 또는 VM 그룹을 추가하세요."]));
   }
   for (const c of clusters) {
     const wlCount = (c.workloads || []).length;
-    const meta = `${(c.node_ids || []).length}n / ${wlCount}w`;
+    const meta = `${(c.node_ids || []).length}n / ${wlCount}${isVmGroup(c) ? "s" : "w"}`;
     clustersSec.appendChild(el("div", {
       class: "tree-item" + (state.ui.selectedKind === "cluster" && state.ui.selectedId === c.id ? " selected" : ""),
       onclick: () => selectEntity("cluster", c.id),
     }, [
-      el("span", { class: "icon" }, ["⎈"]),
+      el("span", { class: "icon" }, [groupIcon(c)]),
       el("span", { class: "label" }, [c.name]),
       c.locked ? el("span", { class: "lock-dot", title: "Locked" }, ["●"]) : null,
       el("span", { class: "meta" }, [meta]),
@@ -4542,7 +4623,7 @@ function renderTree() {
     actions.appendChild(el("button", { class: "add-btn", onclick: openAddSite }, ["＋ Add Site"]));
   }
   actions.appendChild(el("button", { class: "add-btn", onclick: openAddNode }, ["＋ Add Node"]));
-  actions.appendChild(el("button", { class: "add-btn", onclick: openAddCluster }, ["＋ Add Cluster"]));
+  actions.appendChild(el("button", { class: "add-btn", onclick: openAddCluster }, ["＋ Add Group"]));
   // Workloads are cluster-scoped; this is a shortcut from the global tree so users
   // don't have to navigate into a Cluster Inspector first.
   actions.appendChild(el("button", {
@@ -4982,6 +5063,34 @@ function renderNodeInspector(root, id) {
       onchange: e => updateNodeField(id, "purpose", e.target.value),
     }, ["compute", "bastion", "storage", "edge", "management", "ci-runner"].map(p =>
       el("option", { value: p, selected: p === (n.purpose || "compute") ? "" : null }, [p]))),
+  ]));
+
+  // OS — VM/베어메탈 산출물(발주서·설치 목록)에 필요하고 k8s 노드에도 그대로 쓴다.
+  root.appendChild(el("div", { class: "field-row" }, [
+    el("div", { class: "field" }, [
+      lbl("OS", "node.os"),
+      el("input", {
+        "data-focus-key": `node.${id}.os.distro`,
+        value: n.os?.distro || "", placeholder: "RHEL · Rocky · Ubuntu",
+        oninput: e => updateNodeField(id, "os.distro", e.target.value),
+      }),
+    ]),
+    el("div", { class: "field" }, [
+      el("label", {}, ["OS version"]),
+      el("input", {
+        "data-focus-key": `node.${id}.os.version`,
+        value: n.os?.version || "", placeholder: "8.8 · 22.04",
+        oninput: e => updateNodeField(id, "os.version", e.target.value),
+      }),
+    ]),
+  ]));
+  root.appendChild(el("div", { class: "field" }, [
+    el("label", {}, ["Kernel"]),
+    el("input", {
+      "data-focus-key": `node.${id}.os.kernel`,
+      value: n.os?.kernel || "", placeholder: "4.18.0-477.27.1.el8_8",
+      oninput: e => updateNodeField(id, "os.kernel", e.target.value),
+    }),
   ]));
 
   // Network IP
@@ -5437,9 +5546,10 @@ function renderClusterInspector(root, id) {
   if (!c) return;
 
   const cLocked = isClusterLocked(c);
+  const vm = isVmGroup(c);
   if (cLocked) root.classList.add("inspector-locked");
   root.appendChild(el("div", { class: "insp-header" }, [
-    el("span", { class: "kind" }, [cLocked ? "🔒 Cluster" : "Cluster"]),
+    el("span", { class: "kind" }, [(cLocked ? "🔒 " : "") + groupIcon(c) + " " + groupKindLabel(c)]),
     el("span", { class: "name" }, [c.name]),
     el("button", {
       class: "duplicate", title: cLocked ? "Unlock cluster" : "Lock cluster (편집/삭제 보호)",
@@ -5475,12 +5585,15 @@ function renderClusterInspector(root, id) {
 
   root.appendChild(el("div", { class: "field-row" }, [
     el("div", { class: "field" }, [
-      lbl("k8s version", "cluster.k8s_version"),
-      el("input", {
-        "data-focus-key": `cluster.${id}.k8s_version`,
-        value: c.k8s_version || "", placeholder: "1.30",
-        oninput: e => updateClusterField(id, "k8s_version", e.target.value),
-      }),
+      lbl("Platform", "cluster.platform"),
+      el("select", {
+        // 플랫폼을 바꿔도 기존 k8s 필드는 지우지 않는다 — 되돌렸을 때 설정이 살아 있어야 한다.
+        // vm 동안에는 UI·검증·export가 그 필드들을 아예 읽지 않는다.
+        onchange: e => updateClusterField(id, "platform", e.target.value),
+      }, [
+        el("option", { value: "k8s", selected: vm ? null : "" }, ["⎈ Kubernetes"]),
+        el("option", { value: "vm", selected: vm ? "" : null }, ["▤ VM · 베어메탈"]),
+      ]),
     ]),
     el("div", { class: "field" }, [
       lbl("Environment tag", "cluster.environment_tag"),
@@ -5490,6 +5603,16 @@ function renderClusterInspector(root, id) {
         oninput: e => updateClusterField(id, "environment_tag", e.target.value),
       }),
     ]),
+  ]));
+
+  if (!vm) {
+  root.appendChild(el("div", { class: "field" }, [
+    lbl("k8s version", "cluster.k8s_version"),
+    el("input", {
+      "data-focus-key": `cluster.${id}.k8s_version`,
+      value: c.k8s_version || "", placeholder: "1.30",
+      oninput: e => updateClusterField(id, "k8s_version", e.target.value),
+    }),
   ]));
 
   // HA control plane
@@ -5642,15 +5765,22 @@ function renderClusterInspector(root, id) {
   }
 
   // Nodes assigned
+  }   // end k8s-only: 버전 · HA control plane · 애드온 · 프리셋 · CIDR · Ingress 룰
+
   const assignedNodes = (c.node_ids || []).map(nid => state.project.nodes.find(n => n.id === nid)).filter(Boolean);
-  root.appendChild(el("div", { class: "section-title" }, [`Nodes in cluster (${assignedNodes.length})`]));
+  root.appendChild(el("div", { class: "section-title" }, [
+    vm ? `Servers in group (${assignedNodes.length})` : `Nodes in cluster (${assignedNodes.length})`,
+  ]));
   if (!assignedNodes.length) {
     root.appendChild(el("div", { class: "empty-hint" }, ["할당된 노드가 없습니다. 아래에서 추가하세요."]));
   } else {
     const list = el("div", { class: "row-list" });
     for (const n of assignedNodes) {
       const roles = Array.isArray(n.cluster_roles) ? n.cluster_roles : [];
-      const roleChips = el("div", { style: { display: "flex", gap: "4px" } }, ["control-plane", "worker", "etcd"].map(r => {
+      const roleChips = vm
+        ? el("span", { style: { fontSize: "10px", color: "var(--text3)", fontFamily: "JetBrains Mono" } },
+            [[n.os?.distro, n.os?.version].filter(Boolean).join(" ") || "OS 미기재"])
+        : el("div", { style: { display: "flex", gap: "4px" } }, ["control-plane", "worker", "etcd"].map(r => {
         const checked = roles.includes(r);
         const label = r === "control-plane" ? "cp" : r === "worker" ? "w" : "etcd";
         return el("label", {
@@ -5716,13 +5846,14 @@ function renderClusterInspector(root, id) {
     return acc;
   }, { cpu: 0, mem: 0, gpu: 0 });
   if (assignedNodes.length) {
-    root.appendChild(el("div", { class: "section-title" }, ["Cluster totals"]));
+    root.appendChild(el("div", { class: "section-title" }, [vm ? "Group totals" : "Cluster totals"]));
     root.appendChild(el("div", { class: "compat-result" }, [
       el("div", {}, [`Total: ${totals.cpu} vCPU · ${totals.mem} GB RAM · ${totals.gpu} GPUs`]),
     ]));
   }
 
   // Namespaces
+  if (!vm) {
   const namespaces = c.namespaces || [];
   const nsTitle = el("div", { class: "section-title" }, [`Namespaces (${namespaces.length})`]);
   nsTitle.appendChild(helpIcon("namespace.name"));
@@ -5800,8 +5931,12 @@ function renderClusterInspector(root, id) {
   }
 
   // Workloads
+  }   // end k8s-only: 네임스페이스 · NetworkPolicy
+
   const workloads = c.workloads || [];
-  root.appendChild(el("div", { class: "section-title" }, [`Workloads (${workloads.length})`]));
+  root.appendChild(el("div", { class: "section-title" }, [
+    vm ? `서비스 (${workloads.length})` : `Workloads (${workloads.length})`,
+  ]));
   if (workloads.length === 0) {
     root.appendChild(el("div", { class: "empty-hint" }, ["워크로드가 없습니다."]));
   } else {
@@ -5825,7 +5960,7 @@ function renderClusterInspector(root, id) {
     el("button", {
       class: "add-btn",
       onclick: () => openAddWorkload(c.id),
-    }, ["＋ Add Workload"]),
+    }, [vm ? "＋ 서비스 추가" : "＋ Add Workload"]),
     el("button", {
       class: "add-btn",
       title: "Paste workload from clipboard",
@@ -6399,6 +6534,61 @@ function renderSiteLinkInspector(root, id) {
   ]));
 }
 
+// VM 그룹 서비스의 설치 소프트웨어·미들웨어 목록. 이름은 계층 판정(tierFromName)에도 쓰이므로
+// 제품명을 그대로 적는 편이 좋다 (Tomcat · Oracle · Apache · JEUS …).
+function _swEditor(id, w) {
+  const list = Array.isArray(w.software) ? w.software : [];
+  const save = (next) => updateWorkloadField(id, "software", next.length ? next : undefined);
+  const box = el("div", { style: { margin: "10px 0" } });
+  const title = el("div", { class: "section-title" }, [`설치 소프트웨어 (${list.length})`]);
+  title.appendChild(helpIcon("workload.software"));
+  box.appendChild(title);
+  if (!list.length) {
+    box.appendChild(el("div", { style: { fontSize: "11px", color: "var(--text3)", marginBottom: "6px" } },
+      ["없음 — 이 서버에 설치되는 미들웨어를 적으면 개념도·산출물의 계층 판정에 쓰입니다."]));
+  }
+  list.forEach((sw, i) => {
+    box.appendChild(el("div", {
+      style: { display: "grid", gridTemplateColumns: "1.4fr 0.8fr 0.7fr 22px", gap: "6px", alignItems: "center", marginBottom: "4px" },
+    }, [
+      el("input", {
+        "data-focus-key": `workload.${id}.sw.${i}.name`,
+        value: sw.name || "", placeholder: "Tomcat",
+        style: { fontSize: "11px", padding: "3px 6px" },
+        oninput: e => { const n = list.slice(); n[i] = { ...n[i], name: e.target.value }; save(n); },
+      }),
+      el("input", {
+        "data-focus-key": `workload.${id}.sw.${i}.version`,
+        value: sw.version || "", placeholder: "9.0",
+        style: { fontSize: "11px", padding: "3px 6px" },
+        oninput: e => { const n = list.slice(); n[i] = { ...n[i], version: e.target.value }; save(n); },
+      }),
+      el("input", {
+        "data-focus-key": `workload.${id}.sw.${i}.port`,
+        value: sw.port != null ? sw.port : "", placeholder: "8080",
+        type: "text", inputmode: "numeric",
+        style: { fontSize: "11px", padding: "3px 6px" },
+        oninput: e => {
+          const v = parseIntInput(e.target.value);
+          const n = list.slice();
+          n[i] = { ...n[i] };
+          if (v != null && v > 0) n[i].port = v; else delete n[i].port;
+          save(n);
+        },
+      }),
+      el("span", {
+        style: { cursor: "pointer", fontSize: "11px", color: "var(--text3)" }, title: "삭제",
+        onclick: () => save(list.filter((_, k) => k !== i)),
+      }, ["🗑"]),
+    ]));
+  });
+  box.appendChild(el("button", {
+    class: "add-btn", style: { width: "100%", fontSize: "11px" },
+    onclick: () => save([...list, { name: "" }]),
+  }, ["＋ 소프트웨어 추가"]));
+  return box;
+}
+
 function renderWorkloadInspector(root, id) {
   const found = findWorkload(id);
   if (!found) return;
@@ -6414,7 +6604,7 @@ function renderWorkloadInspector(root, id) {
   const wlLocked = isWorkloadLocked(w);
   if (wlLocked) root.classList.add("inspector-locked");
   root.appendChild(el("div", { class: "insp-header" }, [
-    el("span", { class: "kind" }, [wlLocked ? "🔒 Workload" : "Workload"]),
+    el("span", { class: "kind" }, [(wlLocked ? "🔒 " : "") + wlKindLabel(cluster)]),
     el("span", { class: "name" }, [w.name]),
     el("button", {
       class: "duplicate", title: wlLocked ? "Unlock workload" : "Lock workload (편집/삭제 보호)",
@@ -6469,7 +6659,7 @@ function renderWorkloadInspector(root, id) {
           ["Frontend","API","WAS","DB","Cache","Queue","ML-Inference","ML-Training","Video","Batch","Other"].map(v =>
             el("option", { value: v, selected: v === w.category ? "" : null }, [v]))),
       ]),
-      el("div", { class: "field" }, [
+      isVmGroup(cluster) ? null : el("div", { class: "field" }, [
         lbl("Kind", "workload.kind"),
         el("select", { onchange: e => updateWorkloadField(id, "kind", e.target.value) },
           ["Deployment","StatefulSet","DaemonSet","Job","CronJob"].map(v =>
@@ -6480,7 +6670,7 @@ function renderWorkloadInspector(root, id) {
     // 첫 항목에 도출 결과를 그대로 보여줘서, 잘못 잡혔을 때만 손대면 되게 한다 (dep_layer와 같은 방식).
     {
       const auto = resolveTier({ ...w, tier: null });
-      const srcLabel = { name: "이름", namespace: "네임스페이스", category: "category", runtime: "클러스터 런타임", none: "" }[auto.source] || "";
+      const srcLabel = { name: "이름", software: "설치 SW", namespace: "네임스페이스", category: "category", runtime: "클러스터 런타임", none: "" }[auto.source] || "";
       root.appendChild(el("div", { class: "field" }, [
         lbl("Architecture tier", "workload.tier"),
         el("select", {
@@ -6509,7 +6699,7 @@ function renderWorkloadInspector(root, id) {
     if (!cnsNames.includes(currentNs)) cnsNames.push(currentNs);
     root.appendChild(el("div", { class: "field-row" }, [
       el("div", { class: "field" }, [
-        lbl("Replicas (min)", "workload.replicas"),
+        isVmGroup(cluster) ? el("label", {}, ["서버 대수"]) : lbl("Replicas (min)", "workload.replicas"),
         el("input", {
           "data-focus-key": `workload.${id}.replicas`,
           type: "text", inputmode: "numeric", pattern: "[0-9]*",
@@ -6538,7 +6728,7 @@ function renderWorkloadInspector(root, id) {
           },
         }),
       ]),
-      el("div", { class: "field" }, [
+      isVmGroup(cluster) ? null : el("div", { class: "field" }, [
         lbl("Namespace", "namespace.name"),
         el("select", {
           "data-focus-key": `workload.${id}.namespace`,
@@ -6547,9 +6737,11 @@ function renderWorkloadInspector(root, id) {
       ]),
     ]));
     root.appendChild(el("div", { class: "field" }, [
-      el("label", {}, ["Cluster"]),
-      el("div", { class: "field-readonly" }, [cluster.name]),
+      el("label", {}, [isVmGroup(cluster) ? "Group" : "Cluster"]),
+      el("div", { class: "field-readonly" }, [`${groupIcon(cluster)} ${cluster.name}`]),
     ]));
+    // VM 그룹 서비스는 "서버에 무엇이 설치되는가"가 핵심이다 — 계층 판정·제품 식별에도 쓰인다.
+    if (isVmGroup(cluster)) root.appendChild(_swEditor(id, w));
     // Visibility toggle — exclude this workload (and its edges) from the Dependency graph view.
     const hideInput = el("input", {
       type: "checkbox",
@@ -6568,7 +6760,7 @@ function renderWorkloadInspector(root, id) {
     // Captures the operational HA shape (mode + primaries + replicas-per-primary + quorum) so
     // the capacity sim, validator, and YAML/Helm export all see one consistent picture instead
     // of guessing from `replicas` alone. Only shown for stateful categories (DB / Cache / Queue).
-    if (HA_STATEFUL_CATS.has(w.category)) {
+    if (HA_STATEFUL_CATS.has(w.category) || isVmGroup(cluster)) {
       const ha = w.ha || { mode: "none" };
       const haMode = ha.mode || "none";
       const haPrimaries = ha.primaries ?? HA_DEFAULTS[haMode].primaries;
@@ -6591,8 +6783,9 @@ function renderWorkloadInspector(root, id) {
 
       root.appendChild(el("div", { class: "section-title", style: { marginTop: "8px" } }, ["HA mode"]));
       root.appendChild(el("div", { style: { fontSize: "11px", color: "var(--text2)", marginBottom: "6px" } }, [
-        "Stateful 워크로드(DB/Cache/Queue)의 운영 토폴로지. ",
-        "Capacity 시뮬레이션(quorum vs data pod 구분)과 K8s/Helm export 주석에 반영됩니다.",
+        isVmGroup(cluster)
+          ? "VM 서비스의 이중화 방식. Active-Standby는 VIP 페일오버, Active-Active는 L4 분산이 전제입니다. 대수는 Capacity 시뮬레이션에 그대로 반영됩니다."
+          : "Stateful 워크로드(DB/Cache/Queue)의 운영 토폴로지. Capacity 시뮬레이션(quorum vs data pod 구분)과 K8s/Helm export 주석에 반영됩니다.",
       ]));
       root.appendChild(el("div", { class: "field", style: { margin: 0 } }, [
         el("select", {
@@ -6608,6 +6801,18 @@ function renderWorkloadInspector(root, id) {
         }, HA_MODES.map(m =>
           el("option", { value: m.v, selected: haMode === m.v ? "" : null }, [m.label]))),
       ]));
+
+      // VIP — Active-Standby/Active-Active는 절체 대상 주소가 있어야 구성이 성립한다.
+      if (HA_VM_MODES.has(haMode)) {
+        root.appendChild(el("div", { class: "field", style: { marginTop: "8px" } }, [
+          el("label", {}, ["VIP (페일오버 주소)"]),
+          el("input", {
+            "data-focus-key": `workload.${id}.ha.vip`,
+            value: ha.vip || "", placeholder: "10.0.0.100",
+            oninput: e => setHa({ vip: e.target.value || undefined }),
+          }),
+        ]));
+      }
 
       if (haMode !== "none") {
         const isSharded = haMode === "sharded-cluster";
@@ -10103,7 +10308,8 @@ function renderNamespace() {
     ]));
     return;
   }
-  for (const c of p.clusters) root.appendChild(renderNamespaceCluster(c));
+  // 네임스페이스·NetworkPolicy는 k8s 개념 — VM 그룹은 이 뷰의 대상이 아니다.
+  for (const c of p.clusters) if (!isVmGroup(c)) root.appendChild(renderNamespaceCluster(c));
 }
 
 function renderNamespaceCluster(c) {
@@ -10221,13 +10427,19 @@ const HA_MODES = [
   { v: "primary-replica", label: "Primary-Replica — 1 primary + N replica (Postgres 류)" },
   { v: "sentinel",        label: "Sentinel — primary + replicas + 별도 quorum (Redis Sentinel)" },
   { v: "sharded-cluster", label: "Sharded Cluster — N shard × (primary+replica) (Redis Cluster, MongoDB)" },
+  // VM/베어메탈 그룹의 이중화 — k8s의 컨트롤러 재기동이 아니라 VIP 페일오버로 절체된다.
+  { v: "active-standby",  label: "Active-Standby — 운영 1 + 대기 1, VIP 페일오버 (VM)" },
+  { v: "active-active",   label: "Active-Active — N대 동시 서비스 + VIP/L4 분산 (VM)" },
 ];
 const HA_DEFAULTS = {
   "none":             { primaries: 1, replicas_per_primary: 0, quorum_count: 0 },
   "primary-replica":  { primaries: 1, replicas_per_primary: 2, quorum_count: 0 },
   "sentinel":         { primaries: 1, replicas_per_primary: 2, quorum_count: 3 },
   "sharded-cluster":  { primaries: 3, replicas_per_primary: 1, quorum_count: 0 },
+  "active-standby":   { primaries: 1, replicas_per_primary: 1, quorum_count: 0 },
+  "active-active":    { primaries: 2, replicas_per_primary: 0, quorum_count: 0 },
 };
+const HA_VM_MODES = new Set(["active-standby", "active-active"]);
 // Free-text field with these suggestions so reviewers can see at a glance which Operator/Chart
 // is intended. Not used by the sim — just documentation that survives export round-trips.
 const HA_OPERATORS = [
@@ -10516,6 +10728,11 @@ function resolveTier(w) {
   if (isClusterRuntime(w)) return { tier: null, source: "runtime" };
   const byName = tierFromName(w.name);
   if (byName) return { tier: byName, source: "name" };
+  // 워크로드 이름이 업무명(정산서비스 등)이면 설치 소프트웨어가 제품 신호를 준다.
+  for (const sw of (w.software || [])) {
+    const t = tierFromName(sw.name);
+    if (t) return { tier: t, source: "software" };
+  }
   const byNs = NS_TIERS.get(nsNormalize(w.namespace));
   if (byNs) return { tier: byNs, source: "namespace" };
   const byCat = CATEGORY_TIERS[w.category];
@@ -13421,12 +13638,15 @@ function _yArr(arr, indent = 0) {
 }
 
 //============ Export: K8s manifests ============
+// VM/베어메탈 그룹은 매니페스트로 나갈 것이 없다 — 여기서 한 번 걸러 아래 생성기들이
+// 빈 Deployment·Namespace를 만들지 않게 한다.
+const k8sClusters = (p) => (p?.clusters || []).filter(c => !isVmGroup(c));
 function generateK8sManifests(p) {
   const docs = [];
   const head = (txt) => `# ${txt}\n# Generated by vk8s · ${new Date().toISOString()}`;
   docs.push(head(`Project: ${p.name} (mode: ${p.mode})`));
 
-  for (const c of (p.clusters || [])) {
+  for (const c of k8sClusters(p)) {
     docs.push(`# ──────────────────────────────────────\n# Cluster: ${c.name} (${c.id})\n# ──────────────────────────────────────`);
 
     // Namespaces + ResourceQuota
@@ -13744,7 +13964,7 @@ ${_yObj(spec, 1)}`);
 //============ Export: Helm values.yaml ============
 function generateHelmValues(p) {
   const out = { workloads: {} };
-  for (const c of (p.clusters || [])) {
+  for (const c of k8sClusters(p)) {
     for (const w of (c.workloads || [])) {
       const name = slug(w.name);
       const v = {
@@ -13899,7 +14119,7 @@ helm install ${chartName} ./${chartName} -f overrides.yaml
 - Set \`workloads.<name>.enabled: false\` to skip a workload without deleting the file.
 ${(() => {
   const localPvProvisioners = new Set();
-  for (const c of (p.clusters || [])) {
+  for (const c of k8sClusters(p)) {
     const lpv = c.addons?.local_pv;
     if (lpv && lpv !== "None") localPvProvisioners.add(lpv);
   }
@@ -13942,7 +14162,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 ` });
 
   // Per-cluster, per-workload templates
-  for (const c of (p.clusters || [])) {
+  for (const c of k8sClusters(p)) {
     for (const w of (c.workloads || [])) {
       files.push({
         path: `${chartName}/templates/${slug(w.name)}-deployment.yaml`,
@@ -13994,7 +14214,8 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 function _composeMemMB(gb) { return Math.max(1, Math.round((gb || 0) * 1024)); }
 
 function generateDockerCompose(p) {
-  const clusters = p.clusters || [];
+  // VM 그룹은 컨테이너가 아니라 서버에 설치되는 서비스라 compose 변환 대상이 아니다.
+  const clusters = k8sClusters(p);
 
   // Globally-unique service name per workload id (compose service names share one namespace).
   // On collision across clusters/namespaces, qualify with the cluster slug, then a numeric suffix.
@@ -14497,8 +14718,8 @@ function _secNodes(p) {
   if (!nodes.length) { out.push("_(none)_"); return out; }
   const gm = state.catalog?.gpuModels || {};
   const n2c = _reportNodeIdToCluster(p);
-  out.push("| Node | Cluster | Site | Source | Roles | vCPU | RAM (GB) | Disk | GPU | Power (W) |");
-  out.push("|---|---|---|---|---|---|---|---|---|---|");
+  out.push("| Node | Group | Site | OS | Source | Roles | vCPU | RAM (GB) | Disk | GPU | Power (W) |");
+  out.push("|---|---|---|---|---|---|---|---|---|---|---|");
   for (const n of nodes) {
     const site = (p.sites || []).find(s => s.id === n.site_id);
     const roles = Array.isArray(n.cluster_roles) && n.cluster_roles.length ? n.cluster_roles.join("+") : "—";
@@ -14509,7 +14730,8 @@ function _secNodes(p) {
     const gpu = (n.spec?.gpu || []).map(g =>
       `${g.model}×${g.count}${g.mig_enabled && g.mig_profile ? ` [MIG ${g.mig_profile}]` : ""}`).join(", ") || "—";
     const powerW = Math.round(computeNodePowerW(n, gm));
-    out.push(`| ${_mdCell(n.name)} | ${_mdCell(n2c.get(n.id))} | ${_mdCell(site?.name)} | ${_mdCell(n.source)} | ${_mdCell(roles)} | ${_mdCell(n.spec?.vcpu)} | ${_mdCell(n.spec?.memory_gb)} | ${_mdCell(diskStr)} | ${_mdCell(gpu)} | ${powerW} |`);
+    const osStr = [n.os?.distro, n.os?.version].filter(Boolean).join(" ") || "—";
+    out.push(`| ${_mdCell(n.name)} | ${_mdCell(n2c.get(n.id))} | ${_mdCell(site?.name)} | ${_mdCell(osStr)} | ${_mdCell(n.source)} | ${_mdCell(roles)} | ${_mdCell(n.spec?.vcpu)} | ${_mdCell(n.spec?.memory_gb)} | ${_mdCell(diskStr)} | ${_mdCell(gpu)} | ${powerW} |`);
   }
   return out;
 }
@@ -14573,7 +14795,7 @@ function _secNetwork(p) {
 }
 
 function _secClusters(p) {
-  const out = ["## Cluster Configuration", ""];
+  const out = ["## Deployment Groups", ""];
   const clusters = p.clusters || [];
   if (!clusters.length) { out.push("_(none)_"); return out; }
   for (const c of clusters) {
@@ -14581,10 +14803,24 @@ function _secClusters(p) {
     const nodeDesc = nodes.map(n =>
       `${n.name}${Array.isArray(n.cluster_roles) && n.cluster_roles.length ? ` (${n.cluster_roles.join("+")})` : ""}`).join(", ") || "—";
     const ns = (c.namespaces || []).map(x => x.name).join(", ") || "—";
-    out.push(`### ${_mdCell(c.name)}`, "");
-    out.push(`- **k8s:** ${_mdCell(c.k8s_version || "—")} · **CNI:** ${_mdCell(c.addons?.cni || "—")} · **GPU operator:** ${c.addons?.gpu_operator ? "yes" : "no"} · **HA control plane:** ${c.ha_control_plane ? "yes" : "no"}`);
-    out.push(`- **Nodes (${nodes.length}):** ${_mdCell(nodeDesc)}`);
-    out.push(`- **Namespaces:** ${_mdCell(ns)}`);
+    out.push(`### ${groupIcon(c)} ${_mdCell(c.name)}`, "");
+    if (isVmGroup(c)) {
+      // VM 그룹에는 k8s 항목 자리에 설치 스택이 들어간다.
+      out.push(`- **Platform:** VM · 베어메탈 서버 그룹`);
+      out.push(`- **Servers (${nodes.length}):** ${_mdCell(nodes.map(n => `${n.name}${n.os?.distro ? ` (${n.os.distro}${n.os.version ? " " + n.os.version : ""})` : ""}`).join(", ") || "—")}`);
+      const swAll = [...new Set((c.workloads || []).flatMap(w =>
+        (w.software || []).filter(x => x.name).map(x => `${x.name}${x.version ? " " + x.version : ""}`)))];
+      out.push(`- **설치 소프트웨어:** ${_mdCell(swAll.join(", ") || "—")}`);
+      const haWls = (c.workloads || []).filter(w => HA_VM_MODES.has(w.ha?.mode));
+      if (haWls.length) {
+        out.push(`- **이중화:** ${_mdCell(haWls.map(w => `${w.name} ${w.ha.mode}${w.ha.vip ? ` (VIP ${w.ha.vip})` : ""}`).join(", "))}`);
+      }
+    } else {
+      out.push(`- **Platform:** Kubernetes`);
+      out.push(`- **k8s:** ${_mdCell(c.k8s_version || "—")} · **CNI:** ${_mdCell(c.addons?.cni || "—")} · **GPU operator:** ${c.addons?.gpu_operator ? "yes" : "no"} · **HA control plane:** ${c.ha_control_plane ? "yes" : "no"}`);
+      out.push(`- **Nodes (${nodes.length}):** ${_mdCell(nodeDesc)}`);
+      out.push(`- **Namespaces:** ${_mdCell(ns)}`);
+    }
     if (c.network) out.push(`- **Network:** pod ${_mdCell(c.network.pod_cidr || "—")} · svc ${_mdCell(c.network.service_cidr || "—")} · DNS ${_mdCell(c.network.dns_domain || "cluster.local")}`);
     out.push(`- **Workloads:** ${(c.workloads || []).length}`, "");
   }
@@ -14763,6 +14999,60 @@ function removeCustomCheck(p, key) {
   p.checklist_custom = _ckCustom(p).filter(c => c.key !== key);
   delete _checklistState(p)[key];
 }
+
+// VM/베어메탈 그룹 점검 항목. k8s 그룹의 부트스트랩·인그레스·오토스케일 항목은 적용되지 않으므로
+// (k8sOnly로 표시) 대신 이 그룹이 나간다.
+const CHECKLIST_VM_GROUPS = [
+  {
+    id: "vmbase", label: "서버 · OS 준비", icon: "🖥️",
+    emit: ({ c, nodes }) => {
+      const items = []; const K = s => `chk:c:${c.id}:vmbase:${s}`;
+      items.push(_ckItem(K("os-ready"), `서버 ${nodes.length}대 OS 설치 완료 · 시각 동기화(NTP) 확인`));
+      for (const n of nodes) {
+        if (n.os?.distro) {
+          items.push(_ckItem(K("os-" + n.id), `${n.name} — ${n.os.distro} ${n.os.version || ""} 설치 확인`, { derived: true, ref: { kind: "node", id: n.id } }));
+        }
+      }
+      items.push(_ckItem(K("account"), "운영 계정 · sudo 정책 · SSH 키 배포 확인"));
+      items.push(_ckItem(K("firewall"), "서버 방화벽(firewalld/iptables) 서비스 포트 허용 확인"));
+      return items;
+    },
+  },
+  {
+    id: "vmsw", label: "미들웨어 설치 · 기동", icon: "📦",
+    emit: ({ c, workloads }) => {
+      const items = []; const K = s => `chk:c:${c.id}:vmsw:${s}`;
+      for (const w of workloads) {
+        const sw = (w.software || []).filter(x => x.name);
+        if (sw.length) {
+          items.push(_ckItem(K("sw-" + w.id),
+            `${w.name} — ${sw.map(x => `${x.name}${x.version ? " " + x.version : ""}`).join(" · ")} 설치 및 기동 확인`,
+            { derived: true, ref: { kind: "workload", id: w.id } }));
+        } else {
+          items.push(_ckItem(K("sw-" + w.id), `${w.name} — 설치 소프트웨어 확정 후 기동 확인`, { ref: { kind: "workload", id: w.id } }));
+        }
+      }
+      if (!workloads.length) items.push(_ckItem(K("none"), "이 그룹에 서비스가 없습니다 — 설치 대상 확정 필요"));
+      items.push(_ckItem(K("autostart"), "서버 재부팅 후 서비스 자동 기동(systemd) 확인"));
+      return items;
+    },
+  },
+  {
+    id: "vmha", label: "이중화 · 절체 시험", icon: "🔁",
+    emit: ({ c, workloads }) => {
+      const items = []; const K = s => `chk:c:${c.id}:vmha:${s}`;
+      const haWls = workloads.filter(w => HA_VM_MODES.has(w.ha?.mode));
+      for (const w of haWls) {
+        items.push(_ckItem(K("vip-" + w.id),
+          `${w.name} — ${w.ha.mode}${w.ha.vip ? ` (VIP ${w.ha.vip})` : ""} 절체 시험: 운영 노드 정지 → 서비스 지속 확인`,
+          { derived: true, ref: { kind: "workload", id: w.id } }));
+      }
+      if (!haWls.length) items.push(_ckItem(K("none"), "이중화로 설정된 서비스 없음 — SPoF 여부 검토"));
+      items.push(_ckItem(K("failback"), "절체 후 원복(failback) 절차 문서화 및 시험"));
+      return items;
+    },
+  },
+];
 
 const CHECKLIST_CLUSTER_GROUPS = [
   {
@@ -14995,7 +15285,8 @@ function _buildChecklist(p) {
       workerNodes: nodes.filter(n => hasRole(n, "worker")),
       workloads: c.workloads || [],
     };
-    const groups = CHECKLIST_CLUSTER_GROUPS
+    const groupDefs = isVmGroup(c) ? CHECKLIST_VM_GROUPS : CHECKLIST_CLUSTER_GROUPS;
+    const groups = groupDefs
       .map(g => _ckAssembleGroup(p, "c:" + c.id, g, g.emit(ctx)))
       .filter(keep);
     return { cluster: c, groups };
@@ -15261,7 +15552,7 @@ function renderChecklist() {
   }
   for (const b of clusterBlocks) {
     const cItems = b.groups.flatMap(g => g.items);
-    wrap.appendChild(_checklistScopeHeader(`☸ ${b.cluster.name}${b.cluster.environment_tag ? "  ·  " + b.cluster.environment_tag : ""}`, _checklistProgress(p, cItems), { kind: "cluster", id: b.cluster.id }));
+    wrap.appendChild(_checklistScopeHeader(`${groupIcon(b.cluster)} ${b.cluster.name}${b.cluster.environment_tag ? "  ·  " + b.cluster.environment_tag : ""}`, _checklistProgress(p, cItems), { kind: "cluster", id: b.cluster.id }));
     for (const g of b.groups) wrap.appendChild(_checklistGroupCard(p, "c:" + b.cluster.id, g, opts));
   }
 
@@ -15550,7 +15841,7 @@ function buildConceptModel(p) {
   if (groupBy === "zone") {
     columns = [{ id: ZONE_EXT, label: "외부 구역" }, { id: ZONE_IN, label: "내부 구역" }];
   } else {
-    columns = clusters.map(c => ({ id: c.id, label: `☸ ${c.name}`,
+    columns = clusters.map(c => ({ id: c.id, label: `${groupIcon(c)} ${c.name}`,
                                    sub: `노드 ${(c.node_ids || []).length} · 워크로드 ${(c.workloads || []).length}` }));
     columns.push({ id: "__shared", label: "공용" }, { id: "__ext", label: "외부" });
   }
@@ -15825,7 +16116,7 @@ function renderConceptSvg(p, model, onPick) {
 function conceptMarkdown(p, model) {
   const colLabel = (b) => {
     const key = model.colKeyOf(b);
-    return model.columns.find(c => c.id === key)?.label?.replace(/^☸ /, "") || "-";
+    return model.columns.find(c => c.id === key)?.label?.replace(/^[⎈▤] /, "") || "-";
   };
   const out = [];
   out.push(`# ${conceptTitle(p)}`);
@@ -15886,7 +16177,7 @@ function _cdEditRow(p, b, model) {
   let meta;
   if (b.derived) {
     const colKey = model.colKeyOf(b);
-    const colName = model.columns.find(c => c.id === colKey)?.label?.replace(/^☸ /, "") || colKey;
+    const colName = model.columns.find(c => c.id === colKey)?.label?.replace(/^[⎈▤] /, "") || colKey;
     meta = el("span", {
       style: { fontSize: "10px", color: "var(--text3)", fontFamily: "JetBrains Mono", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
       title: `자동 도출 · ${b.zone} 구역`,
@@ -16809,48 +17100,73 @@ function openAddCluster() {
   if (!state.project) return;
 
   const root = el("div");
-  root.appendChild(el("h2", {}, ["Add Cluster"]));
+  root.appendChild(el("h2", {}, ["Add Deployment Group"]));
 
   const nameInput = el("input", { value: `cluster-${(state.project.clusters?.length || 0) + 1}` });
   const versionInput = el("input", { value: "1.30" });
   const tagInput = el("input", { value: "", placeholder: "prod" });
 
+  // 플랫폼 — VM 그룹은 네임스페이스·애드온·Ingress·CIDR 항목이 아예 필요 없으므로 폼에서 접는다.
+  const platSel = el("select", {}, [
+    el("option", { value: "k8s" }, ["⎈ Kubernetes 클러스터"]),
+    el("option", { value: "vm" }, ["▤ VM · 베어메탈 서버 그룹"]),
+  ]);
+  const k8sOnly = [];
+  const syncPlatform = () => {
+    const vm = platSel.value === "vm";
+    for (const n of k8sOnly) n.style.display = vm ? "none" : "";
+    if (vm && /^cluster-\d+$/.test(nameInput.value)) nameInput.value = `vm-group-${(state.project.clusters?.length || 0) + 1}`;
+    if (!vm && /^vm-group-\d+$/.test(nameInput.value)) nameInput.value = `cluster-${(state.project.clusters?.length || 0) + 1}`;
+  };
+  platSel.addEventListener("change", syncPlatform);
+  root.appendChild(el("div", { class: "field" }, [lbl("Platform", "cluster.platform"), platSel]));
+
   root.appendChild(el("div", { class: "field" }, [el("label", {}, ["Name"]), nameInput]));
-  root.appendChild(el("div", { class: "field-row" }, [
+  const verRow = el("div", { class: "field-row" }, [
     el("div", { class: "field" }, [lbl("k8s version", "cluster.k8s_version"), versionInput]),
-    el("div", { class: "field" }, [lbl("Environment tag", "cluster.environment_tag"), tagInput]),
-  ]));
+  ]);
+  k8sOnly.push(verRow);
+  root.appendChild(verRow);
+  root.appendChild(el("div", { class: "field" }, [lbl("Environment tag", "cluster.environment_tag"), tagInput]));
 
   const haInput = el("input", { type: "checkbox" });
-  root.appendChild(el("label", { style: { display: "flex", alignItems: "center", gap: "8px", margin: "8px 0", fontSize: "12px", color: "var(--text)" } }, [
+  const haRow = el("label", { style: { display: "flex", alignItems: "center", gap: "8px", margin: "8px 0", fontSize: "12px", color: "var(--text)" } }, [
     haInput,
     el("span", {}, ["HA control plane (≥3 control-plane 노드 필요)"]),
     helpIcon("cluster.ha_control_plane"),
-  ]));
+  ]);
+  k8sOnly.push(haRow);
+  root.appendChild(haRow);
 
   // Production preset (default ON)
   const presetInput = el("input", { type: "checkbox", checked: "" });
-  root.appendChild(el("label", { style: { display: "flex", alignItems: "center", gap: "8px", margin: "8px 0", fontSize: "12px", color: "var(--text)" } }, [
+  const presetRow = el("label", { style: { display: "flex", alignItems: "center", gap: "8px", margin: "8px 0", fontSize: "12px", color: "var(--text)" } }, [
     presetInput,
     el("span", {}, ["Apply Production Preset on create"]),
     helpIcon("cluster.preset"),
-  ]));
+  ]);
+  k8sOnly.push(presetRow);
+  root.appendChild(presetRow);
 
   const cniSel = el("select", {}, ["Calico", "Cilium", "Flannel", "AWS-VPC-CNI", "None"].map(v => el("option", { value: v }, [v])));
   const ingressSel = el("select", {}, ["NGINX", "Traefik", "AWS-ALB", "None"].map(v => el("option", { value: v }, [v])));
-  root.appendChild(el("div", { class: "field-row" }, [
+  const addonRow = el("div", { class: "field-row" }, [
     el("div", { class: "field" }, [lbl("CNI", "cluster.cni"), cniSel]),
     el("div", { class: "field" }, [lbl("Ingress", "cluster.ingress"), ingressSel]),
-  ]));
+  ]);
+  k8sOnly.push(addonRow);
+  root.appendChild(addonRow);
 
   // Network CIDRs
   const podCidrInput = el("input", { value: "10.244.0.0/16" });
   const svcCidrInput = el("input", { value: "10.96.0.0/12" });
   const nodeSubnetInput = el("input", { value: "192.168.10.0/24" });
-  root.appendChild(el("div", { class: "field-row" }, [
+  const cidrRow = el("div", { class: "field-row" }, [
     el("div", { class: "field" }, [lbl("Pod CIDR", "cluster.pod_cidr"), podCidrInput]),
     el("div", { class: "field" }, [lbl("Service CIDR", "cluster.service_cidr"), svcCidrInput]),
-  ]));
+  ]);
+  k8sOnly.push(cidrRow);
+  root.appendChild(cidrRow);
   root.appendChild(el("div", { class: "field" }, [lbl("Node Subnet", "cluster.node_subnet"), nodeSubnetInput]));
 
   // Node selection
@@ -16887,7 +17203,8 @@ function openAddCluster() {
     el("button", { class: "btn", onclick: () => {
       const node_ids = Object.entries(checks).filter(([_, cb]) => cb.checked).map(([id]) => id);
       const cluster = addCluster({
-        name: nameInput.value.trim() || "cluster",
+        platform: platSel.value,
+        name: nameInput.value.trim() || (platSel.value === "vm" ? "vm-group" : "cluster"),
         k8s_version: versionInput.value.trim() || "1.30",
         environment_tag: tagInput.value.trim(),
         ha_control_plane: haInput.checked,
@@ -16898,8 +17215,8 @@ function openAddCluster() {
         node_subnet: nodeSubnetInput.value.trim() || "192.168.10.0/24",
         node_ids,
       });
-      // Optional preset bootstrap
-      if (cluster && presetInput.checked) {
+      // Optional preset bootstrap (k8s 전용 — 프리셋은 네임스페이스·애드온을 깐다)
+      if (cluster && presetInput.checked && platSel.value !== "vm") {
         applyClusterPreset(cluster.id);
       }
       closeModal();
