@@ -1121,7 +1121,8 @@ const state = {
     archGroupByZone: true,
     colorBy: "category",   // "category" | "namespace" — node color basis (session-only, not saved)
     deliverable: "concept",
-    conceptGroupBy: "zone",  // "zone" | "cluster" — 개념도 열 축 (계층 행과 직교)
+    conceptGroupBy: "zone",
+    conceptSelected: null,   // 개념도에서 선택된 요소 key (세션 한정)  // "zone" | "cluster" — 개념도 열 축 (계층 행과 직교)
     exportTheme: "screen",   // "screen" | "print" — 다이어그램 내보내기 팔레트 (세션 한정)
     exportTab: "yaml",
     exportSelectedFile: null,
@@ -13467,6 +13468,8 @@ function _exportPalette(mode) {
 }
 function _serializeSvg(svgEl, legendEntries, mode) {
   const clone = svgEl.cloneNode(true);
+  // 화면 편집용 장식(선택 링·드롭 하이라이트)은 산출물에 들어가면 안 된다.
+  for (const n of [...clone.querySelectorAll("[data-editor]")]) n.remove();
   clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
   clone.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
   // Resolve CSS var() in attributes (style/fill/stroke) from the chosen palette
@@ -15587,7 +15590,7 @@ function setConceptBox(p, key, patch) {
   const boxes = _conceptState(p).boxes;
   const next = { ...(boxes[key] || {}), ...patch };
   // 빈 오버라이드는 남기지 않는다 (도출값으로 되돌아감).
-  if (!next.label && !next.note && !next.hidden) delete boxes[key];
+  if (!next.label && !next.note && !next.hidden && !next.row && !next.zone) delete boxes[key];
   else boxes[key] = next;
 }
 function addConceptBox(p, row, colId) {
@@ -15815,20 +15818,31 @@ function buildConceptModel(p) {
   // --- 오버라이드 + 사용자 추가 요소 ---
   // baseLabel = 도출된 기본값(편집 입력의 placeholder), labelOverride = 덮어쓴 값(입력의 value),
   // label = 그림에 그릴 값. 입력이 label을 읽으면 라벨을 다 지운 순간 도출값이 되돌아온다.
+  // 계층(row)·구역(zone)은 그림에서의 자리라 사용자가 옮길 수 있다 — 드래그도 이 오버라이드를 쓴다.
+  // derivedRow/derivedZone을 함께 실어 보내야 패널이 "자동 — Application"을 보여주고 되돌릴 수 있다.
+  const applyPlace = (b, o) => ({
+    ...b,
+    derivedRow: b.row, derivedZone: b.zone,
+    row: (o.row && CONCEPT_ROW_IDS.has(o.row)) ? o.row : b.row,
+    zone: (o.zone === ZONE_IN || o.zone === ZONE_EXT) ? o.zone : b.zone,
+    rowMoved: !!(o.row && CONCEPT_ROW_IDS.has(o.row) && o.row !== b.row),
+    zoneMoved: !!((o.zone === ZONE_IN || o.zone === ZONE_EXT) && o.zone !== b.zone),
+  });
   const boxes = derived.map(b => {
     const o = st.boxes[b.key] || {};
-    return { ...b, derived: true, hidden: !!o.hidden,
+    return applyPlace({ ...b, derived: true, hidden: !!o.hidden,
              baseLabel: b.label, labelOverride: o.label || "",
-             label: o.label || b.label, note: o.note || "" };
+             label: o.label || b.label, note: o.note || "" }, o);
   });
   for (const cb of st.custom) {
     const o = st.boxes[cb.key] || {};
     const row = CONCEPT_ROW_IDS.has(cb.row || cb.lane) ? (cb.row || cb.lane)
               : (LEGACY_LANE_MAP[cb.lane] || "application");
-    boxes.push({ key: cb.key, row, colId: cb.colId || null, zone: cb.zone === ZONE_EXT ? ZONE_EXT : ZONE_IN,
+    boxes.push(applyPlace({ key: cb.key, row, colId: cb.colId || null,
+                 zone: cb.zone === ZONE_EXT ? ZONE_EXT : ZONE_IN,
                  derived: false, hidden: !!o.hidden,
                  baseLabel: "", labelOverride: o.label || "",
-                 label: o.label || "(이름 없음)", sub: "", note: o.note || "", ..._cdNeutral });
+                 label: o.label || "(이름 없음)", sub: "", note: o.note || "", ..._cdNeutral }, o));
   }
 
   // --- 컬럼 축 --- 구역(외부/내부) 또는 클러스터. 둘 다 계층 행과 직교한다.
@@ -15953,16 +15967,21 @@ function _cdArrow(g, cx, y, h) {
   }));
 }
 
-// 개념도 하나를 그려 <svg>를 돌려준다. onPick(box)은 박스 클릭 시 편집 패널을 여는 콜백.
+// 개념도 하나를 그려 <svg>를 돌려준다.
 // 구조: 행 = 계층(§13.2), 열 = 구역 또는 클러스터. 액터 행과 횡단 계층 행은 열로 쪼개지 않는다.
-function renderConceptSvg(p, model, onPick) {
+// 상호작용: 박스 클릭 = 선택(아래 패널이 그 요소만 보여준다), 박스 드래그 = 다른 계층 행으로 이동.
+// 요소가 수십 개가 되면 전체 목록을 훑어 고치는 편집은 못 쓴다 — 그림에서 짚어서 고치게 한다.
+function renderConceptSvg(p, model, opts) {
+  const { onPick, onDropRow } = opts || {};
+  const selKey = state.ui.conceptSelected || null;
   const visible = model.boxes.filter(b => !b.hidden);
   const cols = model.columns;
   const cellOf = (rowId, colId) =>
     visible.filter(b => b.row === rowId && model.colKeyOf(b) === colId);
   const rowAll = (rowId) => visible.filter(b => b.row === rowId);
 
-  // 그릴 행만 남긴다.
+  // 그릴 행만 남긴다. 드롭 대상이 되어야 하므로 비어 있어도 남기는 게 맞지만, 빈 행이 전부
+  // 늘어서면 그림이 못 쓰게 된다 — 드래그 중에만 빈 행을 얇게 펼쳐 보여준다(아래 dropBand).
   const rows = CONCEPT_ROWS
     .map(r => ({ ...r, split: r.kind !== "crosscut", list: rowAll(r.id) }))
     .filter(r => r.list.length);
@@ -15981,7 +16000,6 @@ function renderConceptSvg(p, model, onPick) {
   }));
   let innerW = [...colW.values()].reduce((a, b) => a + b, 0) + Math.max(0, cols.length - 1) * CD.BGAP;
   innerW = Math.max(innerW, CD.BASE_W - CD.PAD * 2);
-  // 남는 폭은 마지막(가장 넓은) 열이 흡수한다.
   const usedW = [...colW.values()].reduce((a, b) => a + b, 0) + Math.max(0, cols.length - 1) * CD.BGAP;
   if (innerW > usedW && cols.length) {
     const widest = cols.reduce((a, b) => (colW.get(a.id) >= colW.get(b.id) ? a : b));
@@ -15992,6 +16010,8 @@ function renderConceptSvg(p, model, onPick) {
   { let x = CD.PAD; for (const c of cols) { colX.set(c.id, x); x += colW.get(c.id) + CD.BGAP; } }
 
   const g = svgNode("g");
+  const rowRects = [];          // 드롭 히트 테스트용 — [{ id, y, h }]
+  const boxHandles = [];        // 드래그 시작용 — [{ key, node }]
   let y = CD.PAD;
 
   // 제목 블록
@@ -16010,7 +16030,6 @@ function renderConceptSvg(p, model, onPick) {
   }, [`${p.mode} · ${_todayStamp()}`]));
   y += 14;
 
-  // 구역/클러스터가 여럿일 때만 열 머리글 — 레퍼런스의 "외부 네트워크 배치 / 내부 네트워크 배치".
   if (hasSplit) {
     for (const c of cols) {
       const x = colX.get(c.id), w = colW.get(c.id);
@@ -16028,7 +16047,60 @@ function renderConceptSvg(p, model, onPick) {
     y += CD.COL_HDR + (cols.some(c => c.sub) ? 10 : 0);
   }
 
-  // 행을 위에서 아래로. 흐름 행 사이에만 화살표를 넣는다.
+  // 박스 그리기 — 선택 강조 + 드래그 핸들 등록을 여기서 함께 한다.
+  const drawBoxes = (list, x, w, by0) => {
+    if (!list.length) return 0;
+    const perRow = _cdPerRow(w);
+    let drawn = 0, rowIdx = 0;
+    while (drawn < list.length) {
+      const slice = list.slice(drawn, drawn + perRow);
+      const rowW = slice.length * CD.BOX_W + (slice.length - 1) * CD.BGAP;
+      let bx = x + (w - rowW) / 2;
+      const by = by0 + rowIdx * (CD.BOX_H + CD.BGAP);
+      for (const b of slice) {
+        const sel = b.key === selKey;
+        const box = svgNode("g", { style: "cursor:grab" });
+        if (sel) {
+          box.appendChild(svgNode("rect", {
+            "data-editor": "1",
+            x: bx - 4, y: by - 4, width: CD.BOX_W + 8, height: CD.BOX_H + 8, rx: 9, ry: 9,
+            fill: "none", stroke: "var(--accent)", "stroke-width": 2,
+          }));
+        }
+        box.appendChild(svgNode("rect", {
+          x: bx, y: by, width: CD.BOX_W, height: CD.BOX_H, rx: 6, ry: 6,
+          fill: b.fill, stroke: b.stroke, "stroke-width": 1.4,
+          "stroke-dasharray": b.derived ? "" : "5 3",
+        }));
+        const title = b.count != null ? `${b.label} ×${b.count}` : b.label;
+        box.appendChild(svgNode("text", {
+          x: bx + CD.BOX_W / 2, y: by + (b.sub || b.note ? 23 : 34), "text-anchor": "middle",
+          fill: "#fff", "font-size": 13, "font-weight": 600,
+        }, [_cdFit(title, CD.BOX_W - 16, 13)]));
+        const sub = b.note || b.sub;
+        if (sub) {
+          box.appendChild(svgNode("text", {
+            x: bx + CD.BOX_W / 2, y: by + 40, "text-anchor": "middle",
+            fill: "#fff", "fill-opacity": 0.72, "font-size": 10.5,
+          }, [_cdFit(sub, CD.BOX_W - 14, 10.5)]));
+        }
+        // 계층 오버라이드 표시 — 도출된 행이 아니라 사람이 옮긴 것임을 그림에서 알 수 있게.
+        if (b.rowMoved) {
+          box.appendChild(svgNode("text", {
+            x: bx + CD.BOX_W - 6, y: by + 12, "text-anchor": "end",
+            fill: "#fff", "fill-opacity": 0.6, "font-size": 9,
+          }, ["✥"]));
+        }
+        g.appendChild(box);
+        boxHandles.push({ key: b.key, node: box });
+        bx += CD.BOX_W + CD.BGAP;
+      }
+      drawn += slice.length;
+      rowIdx++;
+    }
+    return _cdBlockH(list.length, perRow);
+  };
+
   rows.forEach((r, i) => {
     let bodyH = 0;
     if (r.split && cols.length > 1) {
@@ -16041,6 +16113,7 @@ function renderConceptSvg(p, model, onPick) {
     }
     const h = CD.ROW_HDR + bodyH + CD.ROW_PAD;
     _cdRowFrame(g, r.label, CD.PAD, y, innerW, h);
+    rowRects.push({ id: r.id, y, h });
     if (r.split && cols.length > 1) {
       cols.forEach((c, ci) => {
         if (ci > 0) {
@@ -16050,11 +16123,11 @@ function renderConceptSvg(p, model, onPick) {
             stroke: "var(--border)", "stroke-width": 1, "stroke-dasharray": "3 4", "stroke-opacity": 0.7,
           }));
         }
-        _cdDrawBoxes(g, cellOf(r.id, c.id), colX.get(c.id) + CD.COL_PAD,
-          colW.get(c.id) - CD.COL_PAD * 2, y + CD.ROW_HDR, onPick);
+        drawBoxes(cellOf(r.id, c.id), colX.get(c.id) + CD.COL_PAD,
+          colW.get(c.id) - CD.COL_PAD * 2, y + CD.ROW_HDR);
       });
     } else {
-      _cdDrawBoxes(g, r.list, CD.PAD + CD.ROW_PAD, innerW - CD.ROW_PAD * 2, y + CD.ROW_HDR, onPick);
+      drawBoxes(r.list, CD.PAD + CD.ROW_PAD, innerW - CD.ROW_PAD * 2, y + CD.ROW_HDR);
     }
     y += h;
 
@@ -16063,8 +16136,6 @@ function renderConceptSvg(p, model, onPick) {
     const flowPair = (r.kind === "actor" || r.kind === "flow") && next.kind === "flow";
     if (flowPair) {
       if (r.split && next.split && cols.length > 1) {
-        // 열마다 화살표 — 양쪽 다 내용이 있는 열에만. 한 열도 못 그렸다면(앱은 내부인데 DB는
-        // 외부인 경우 등) 흐름이 끊겨 보이므로 가운데 화살표 하나로 대신한다.
         let drew = 0;
         for (const c of cols) {
           if (!cellOf(r.id, c.id).length || !cellOf(next.id, c.id).length) continue;
@@ -16081,8 +16152,7 @@ function renderConceptSvg(p, model, onPick) {
     }
   });
 
-  // 범례 — 다이어그램 안에 굽는다. 내보낸 SVG/PNG가 화면과 정확히 같아야 하므로
-  // diagramExportButtons에는 범례를 넘기지 않는다 (바깥에서 한 번 더 붙이면 중복).
+  // 범례 — 다이어그램 안에 굽는다 (내보낸 SVG/PNG가 화면과 같아야 하므로 export 헬퍼엔 안 넘긴다).
   if (model.legend.length) {
     let lx = CD.PAD, ly = y + 8;
     g.appendChild(svgNode("text", {
@@ -16101,15 +16171,87 @@ function renderConceptSvg(p, model, onPick) {
   }
   g.appendChild(svgNode("text", {
     x: CD.PAD, y: y + 12, fill: "var(--text3)", "font-size": 10, "font-style": "italic",
-  }, ["점선 테두리 = 직접 추가한 요소 · 그 외는 현재 구성에서 자동 도출 · 행 = 아키텍처 계층"]));
+  }, ["박스 클릭 = 아래에서 그 요소만 편집 · 드래그 = 다른 계층으로 이동 · 점선 테두리 = 직접 추가한 요소"]));
   y += 20;
 
-  return svgNode("svg", {
+  const svgRoot = svgNode("svg", {
     viewBox: `0 0 ${W} ${y + CD.PAD}`,
     width: "100%",
     style: `background:var(--bg); border:1px solid var(--border); border-radius:8px; display:block;`,
     preserveAspectRatio: "xMidYMin meet",
   }, [g]);
+
+  // ---- 클릭(선택) · 드래그(계층 이동) ----
+  // 같은 포인터 제스처가 둘 다를 담당하므로 이동 거리로 가른다. 4px 이하면 클릭.
+  const hilite = svgNode("rect", {
+    "data-editor": "1",
+    rx: 8, ry: 8, fill: "var(--accent)", "fill-opacity": 0.12,
+    stroke: "var(--accent)", "stroke-width": 2, style: "display:none; pointer-events:none",
+  });
+  g.appendChild(hilite);
+  const toUser = (ev) => {
+    const ctm = svgRoot.getScreenCTM();
+    if (!ctm) return null;
+    const pt = svgRoot.createSVGPoint();
+    pt.x = ev.clientX; pt.y = ev.clientY;
+    return pt.matrixTransform(ctm.inverse());
+  };
+  const rowAt = (uy) => rowRects.find(r => uy >= r.y && uy <= r.y + r.h) || null;
+
+  for (const { key, node } of boxHandles) {
+    node.addEventListener("mousedown", (ev) => {
+      if (ev.button !== 0) return;
+      ev.preventDefault();
+      const start = toUser(ev);
+      if (!start) return;
+      const box = model.boxes.find(b => b.key === key);
+      let moved = false;
+      let target = null;
+      node.style.cursor = "grabbing";
+      const onMove = (e2) => {
+        const u = toUser(e2);
+        if (!u) return;
+        if (!moved && Math.abs(u.x - start.x) + Math.abs(u.y - start.y) < 4) return;
+        moved = true;
+        node.setAttribute("transform", `translate(${u.x - start.x}, ${u.y - start.y})`);
+        node.style.opacity = "0.75";
+        const r = rowAt(u.y);
+        target = r && r.id !== box.row ? r : null;
+        if (target) {
+          hilite.setAttribute("x", CD.PAD - 2);
+          hilite.setAttribute("y", target.y - 2);
+          hilite.setAttribute("width", innerW + 4);
+          hilite.setAttribute("height", target.h + 4);
+          hilite.style.display = "";
+        } else {
+          hilite.style.display = "none";
+        }
+      };
+      const onUp = () => {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+        node.style.cursor = "grab";
+        node.style.opacity = "";
+        node.removeAttribute("transform");
+        hilite.style.display = "none";
+        if (moved) {
+          if (target && onDropRow) onDropRow(key, target.id);
+          else emit();          // 제자리로 되돌린 그림을 다시 그린다
+        } else if (onPick) {
+          onPick(box);
+        }
+      };
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+    });
+  }
+  // 빈 곳을 누르면 선택 해제.
+  svgRoot.addEventListener("mousedown", (ev) => {
+    if (ev.target === svgRoot || ev.target === g) {
+      if (state.ui.conceptSelected) { state.ui.conceptSelected = null; emit(); }
+    }
+  });
+  return svgRoot;
 }
 
 // 검토 결과를 그대로 문서로 옮긴 Markdown (숨긴 요소는 빠지고, 메모는 비고로 들어간다).
@@ -16124,9 +16266,9 @@ function conceptMarkdown(p, model) {
   if (sub) out.push(`\n${sub}`);
   out.push(`\n- 프로젝트: **${p.name}** (${p.mode})`);
   out.push(`- 작성일: ${_todayStamp()}`);
-  out.push(`- 구분 축: ${model.groupBy === "cluster" ? "클러스터" : "보안 구역"}`);
+  out.push(`- 구분 축: ${model.groupBy === "cluster" ? "배포 그룹" : "보안 구역"}`);
   if ((model.clusters || []).length) {
-    out.push(`- 대상 클러스터: ${model.clusters.map(c => `${c.name} (노드 ${(c.node_ids || []).length} · 워크로드 ${(c.workloads || []).length})`).join(", ")}`);
+    out.push(`- 대상 그룹: ${model.clusters.map(c => `${c.name} (노드 ${(c.node_ids || []).length} · ${isVmGroup(c) ? "서비스" : "워크로드"} ${(c.workloads || []).length})`).join(", ")}`);
   }
   for (const r of CONCEPT_ROWS) {
     const list = model.boxes.filter(b => b.row === r.id && !b.hidden);
@@ -16147,108 +16289,139 @@ function conceptMarkdown(p, model) {
   return out.join("\n") + "\n";
 }
 
-// ---- 편집 패널 ----
-function _cdEditRow(p, b, model) {
-  const rowStyle = {
-    display: "grid", gridTemplateColumns: "20px 1fr 1.2fr 96px 22px",
-    gap: "8px", alignItems: "center", padding: "4px 0",
-    borderBottom: "1px solid var(--border)",
-  };
-  const show = el("input", {
-    type: "checkbox", checked: b.hidden ? null : "",
-    title: b.hidden ? "개념도에 표시" : "개념도에서 제외",
-    onchange: e => { setConceptBox(p, b.key, { hidden: !e.target.checked }); emit(); saveSoon(); },
-  });
-  const labelInput = el("input", {
-    "data-focus-key": `concept.${b.key}.label`,
-    value: b.labelOverride,
-    placeholder: b.baseLabel || "요소 이름",
-    style: { width: "100%", fontSize: "11px", padding: "3px 6px" },
-    oninput: e => { setConceptBox(p, b.key, { label: e.target.value }); emit(); saveSoon(); },
-  });
-  const noteInput = el("input", {
-    "data-focus-key": `concept.${b.key}.note`,
-    value: b.note,
-    placeholder: b.sub || "비고",
-    style: { width: "100%", fontSize: "11px", padding: "3px 6px" },
-    oninput: e => { setConceptBox(p, b.key, { note: e.target.value }); emit(); saveSoon(); },
-  });
-  // 도출 요소의 구역은 데이터가 정한다. 직접 추가한 요소만 구역을 고를 수 있다.
-  let meta;
-  if (b.derived) {
-    const colKey = model.colKeyOf(b);
-    const colName = model.columns.find(c => c.id === colKey)?.label?.replace(/^[⎈▤] /, "") || colKey;
-    meta = el("span", {
-      style: { fontSize: "10px", color: "var(--text3)", fontFamily: "JetBrains Mono", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
-      title: `자동 도출 · ${b.zone} 구역`,
-    }, [colName]);
-  } else {
-    meta = el("select", {
-      style: { fontSize: "10px", padding: "2px 4px", width: "100%" },
-      title: "이 요소의 구역",
-      onchange: e => {
-        const c = _conceptState(p).custom.find(x => x.key === b.key);
-        if (c) { c.zone = e.target.value; emit(); saveSoon(); }
-      },
-    }, [ZONE_IN, ZONE_EXT].map(z =>
-      el("option", { value: z, selected: b.zone === z ? "" : null }, [`${z} 구역`])));
-  }
-  const del = b.derived
-    ? el("span", { style: { fontSize: "11px", color: "var(--text3)" }, title: "자동 도출 요소는 삭제 대신 체크 해제로 숨깁니다" }, ["·"])
-    : el("span", {
-        style: { cursor: "pointer", fontSize: "11px", color: "var(--text3)" }, title: "삭제",
-        onclick: () => { removeConceptBox(p, b.key); emit(); saveSoon(); },
-      }, ["🗑"]);
-  const row = el("div", { style: rowStyle }, [show, labelInput, noteInput, meta, del]);
-  if (b.hidden) row.style.opacity = "0.45";
-  return row;
-}
-
-function _cdEditPanel(p, model) {
+// ---- 선택 편집 패널 ----
+// 요소 전체를 표로 늘어놓으면 수십 줄을 훑어야 한 줄을 고친다. 그림에서 짚은 것 하나만 보여준다.
+function _cdSelectionPanel(p, model) {
   const panel = el("div", {
     style: {
-      marginTop: "16px", border: "1px solid var(--border)", borderRadius: "8px",
+      marginTop: "14px", border: "1px solid var(--border)", borderRadius: "8px",
       background: "var(--surface)", padding: "12px 14px",
     },
   });
-  panel.appendChild(el("div", {
-    style: { display: "flex", alignItems: "baseline", gap: "10px", marginBottom: "8px" },
-  }, [
-    el("h3", { style: { fontSize: "13px", fontWeight: 600, margin: 0 } }, ["요소 검토 · 수정"]),
-    el("span", { style: { fontSize: "11px", color: "var(--text3)" } }, [
-      "체크 해제하면 개념도에서 빠집니다. 라벨·비고는 바로 반영되고 프로젝트에 저장됩니다.",
-    ]),
-  ]));
-  for (const r of CONCEPT_ROWS) {
-    const list = model.boxes.filter(b => b.row === r.id);
-    const t = TIER_BY_ID.get(r.id);
-    const kindTag = t ? ({ flow: "흐름", support: "보조", crosscut: "횡단" })[t.kind] : "액터";
-    const head = el("div", {
-      style: { display: "flex", alignItems: "center", gap: "8px", marginTop: "10px", paddingBottom: "4px" },
-    }, [
-      el("span", { style: { fontSize: "11px", fontWeight: 600, color: "var(--text2)", letterSpacing: "0.05em" } }, [r.label]),
-      el("span", { style: { fontSize: "9px", color: "var(--text3)", border: "1px solid var(--border)", borderRadius: "3px", padding: "0 4px" } }, [kindTag]),
-      el("span", { style: { fontSize: "10px", color: "var(--text3)", fontFamily: "JetBrains Mono" } },
-        [`${list.filter(b => !b.hidden).length}/${list.length}`]),
-      el("span", { style: { flex: 1 } }, []),
-      el("button", {
-        style: {
-          background: "transparent", border: "1px solid var(--border)", color: "var(--text2)",
-          padding: "2px 8px", borderRadius: "4px", cursor: "pointer", fontSize: "10px", fontFamily: "inherit",
-        },
-        title: `${r.label}에 직접 요소를 추가합니다`,
-        onclick: () => { addConceptBox(p, r.id, null); emit(); saveSoon(); },
-      }, ["+ 요소"]),
-    ]);
-    panel.appendChild(head);
-    if (!list.length) {
-      panel.appendChild(el("div", { style: { fontSize: "11px", color: "var(--text3)", padding: "2px 0 6px" } },
-        ["현재 구성에서 도출된 요소 없음"]));
-      continue;
-    }
-    for (const b of list) panel.appendChild(_cdEditRow(p, b, model));
+  const key = state.ui.conceptSelected;
+  const b = key ? model.boxes.find(x => x.key === key) : null;
+  if (key && !b) state.ui.conceptSelected = null;
+
+  if (!b) {
+    panel.appendChild(el("div", { style: { fontSize: "12px", color: "var(--text2)" } }, [
+      "다이어그램에서 요소를 클릭하면 여기서 편집합니다. ",
+      el("span", { style: { color: "var(--text3)" } }, ["박스를 드래그하면 다른 계층으로 옮길 수 있습니다."]),
+    ]));
+    return panel;
   }
+
+  const colKey = model.colKeyOf(b);
+  const colName = model.columns.find(c => c.id === colKey)?.label?.replace(/^[⎈▤] /, "") || colKey;
+  const rowLabel = CONCEPT_ROWS.find(r => r.id === b.row)?.label || b.row;
+  const chip = (txt, title) => el("span", {
+    style: {
+      fontSize: "10px", color: "var(--text3)", border: "1px solid var(--border)",
+      borderRadius: "3px", padding: "1px 6px", fontFamily: "JetBrains Mono",
+    }, title,
+  }, [txt]);
+
+  panel.appendChild(el("div", {
+    style: { display: "flex", alignItems: "center", gap: "8px", marginBottom: "10px", flexWrap: "wrap" },
+  }, [
+    el("span", { style: { width: "12px", height: "12px", borderRadius: "3px", background: b.fill, border: `1px solid ${b.stroke}`, display: "inline-block" } }, []),
+    el("h3", { style: { fontSize: "13px", fontWeight: 600, margin: 0 } },
+      [b.count != null ? `${b.label} ×${b.count}` : b.label]),
+    chip(rowLabel, "계층"),
+    chip(colName, model.groupBy === "cluster" ? "배포 그룹" : "구역"),
+    chip(b.derived ? "자동 도출" : "직접 추가"),
+    b.rowMoved ? chip("✥ 계층 이동됨", `도출 계층: ${CONCEPT_ROWS.find(r => r.id === b.derivedRow)?.label || b.derivedRow}`) : null,
+    el("span", { style: { flex: 1 } }, []),
+    b.ref ? el("button", {
+      style: { background: "transparent", border: "1px solid var(--border)", color: "var(--text2)", padding: "2px 8px", borderRadius: "4px", cursor: "pointer", fontSize: "10px", fontFamily: "inherit" },
+      title: "이 요소의 원본 엔티티로 이동",
+      onclick: () => selectEntity(b.ref.kind, b.ref.id),
+    }, ["원본 보기 →"]) : null,
+    el("span", {
+      style: { cursor: "pointer", fontSize: "12px", color: "var(--text3)" }, title: "선택 해제",
+      onclick: () => { state.ui.conceptSelected = null; emit(); },
+    }, ["✕"]),
+  ]));
+
+  const fieldRow = (label, node) => el("div", {
+    style: { display: "grid", gridTemplateColumns: "72px 1fr", gap: "8px", alignItems: "center", marginBottom: "6px" },
+  }, [
+    el("span", { style: { fontSize: "11px", color: "var(--text3)" } }, [label]),
+    node,
+  ]);
+
+  panel.appendChild(fieldRow("라벨", el("input", {
+    "data-focus-key": `concept.${b.key}.label`,
+    value: b.labelOverride, placeholder: b.baseLabel || "요소 이름",
+    style: { width: "100%", fontSize: "12px", padding: "4px 8px" },
+    oninput: e => { setConceptBox(p, b.key, { label: e.target.value }); emit(); saveSoon(); },
+  })));
+  panel.appendChild(fieldRow("비고", el("input", {
+    "data-focus-key": `concept.${b.key}.note`,
+    value: b.note, placeholder: b.sub || "박스 아래에 표시할 설명",
+    style: { width: "100%", fontSize: "12px", padding: "4px 8px" },
+    oninput: e => { setConceptBox(p, b.key, { note: e.target.value }); emit(); saveSoon(); },
+  })));
+
+  // 계층 · 구역은 그림에서의 자리다 — 워크로드의 의미론적 계층(workload.tier)과는 별개다.
+  const rowSel = el("select", {
+    style: { fontSize: "12px", padding: "3px 6px", width: "100%" },
+    onchange: e => { setConceptBox(p, b.key, { row: e.target.value || undefined }); emit(); saveSoon(); },
+  }, [
+    el("option", { value: "", selected: b.rowMoved ? null : "" },
+      [`자동 — ${CONCEPT_ROWS.find(r => r.id === b.derivedRow)?.label || b.derivedRow}`]),
+    ...CONCEPT_ROWS.map(r => el("option", { value: r.id, selected: b.rowMoved && b.row === r.id ? "" : null }, [r.label])),
+  ]);
+  const zoneSel = el("select", {
+    style: { fontSize: "12px", padding: "3px 6px", width: "100%" },
+    onchange: e => { setConceptBox(p, b.key, { zone: e.target.value || undefined }); emit(); saveSoon(); },
+  }, [
+    el("option", { value: "", selected: b.zoneMoved ? null : "" }, [`자동 — ${b.derivedZone} 구역`]),
+    ...[ZONE_IN, ZONE_EXT].map(z =>
+      el("option", { value: z, selected: b.zoneMoved && b.zone === z ? "" : null }, [`${z} 구역`])),
+  ]);
+  panel.appendChild(el("div", {
+    style: { display: "grid", gridTemplateColumns: "72px 1fr 56px 1fr", gap: "8px", alignItems: "center", marginBottom: "8px" },
+  }, [
+    el("span", { style: { fontSize: "11px", color: "var(--text3)" } }, ["계층"]), rowSel,
+    el("span", { style: { fontSize: "11px", color: "var(--text3)" } }, ["구역"]), zoneSel,
+  ]));
+
+  const btn = (txt, title, onclick, danger) => el("button", {
+    style: {
+      background: "var(--surface2)", border: "1px solid var(--border)",
+      color: danger ? "var(--red)" : "var(--text)", padding: "4px 10px", borderRadius: "4px",
+      cursor: "pointer", fontSize: "11px", fontFamily: "inherit",
+    }, title, onclick,
+  }, [txt]);
+  const actions = el("div", { style: { display: "flex", gap: "6px", flexWrap: "wrap" } }, [
+    btn("👁 개념도에서 제외", "이 요소를 그림에서 뺍니다 (아래 '제외된 요소'에서 되돌릴 수 있습니다)",
+      () => { setConceptBox(p, b.key, { hidden: true }); state.ui.conceptSelected = null; emit(); saveSoon(); }),
+    (b.labelOverride || b.note || b.rowMoved || b.zoneMoved) ? btn("↺ 이 요소 초기화", "라벨·비고·계층·구역 수정을 지우고 도출값으로 되돌립니다",
+      () => { delete _conceptState(p).boxes[b.key]; emit(); saveSoon(); }) : null,
+    b.derived ? null : btn("🗑 삭제", "직접 추가한 요소를 지웁니다",
+      () => { removeConceptBox(p, b.key); state.ui.conceptSelected = null; emit(); saveSoon(); }, true),
+  ]);
+  panel.appendChild(actions);
   return panel;
+}
+
+// 제외한 요소는 그림에서 사라져 클릭할 수 없으므로 되돌릴 자리를 따로 둔다.
+function _cdHiddenBar(p, model) {
+  const hidden = model.boxes.filter(b => b.hidden);
+  if (!hidden.length) return null;
+  return el("div", {
+    style: { display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap", marginTop: "10px" },
+  }, [
+    el("span", { style: { fontSize: "11px", color: "var(--text3)" } }, [`제외된 요소 ${hidden.length}`]),
+    ...hidden.map(b => el("button", {
+      style: {
+        background: "transparent", border: "1px dashed var(--border)", color: "var(--text2)",
+        padding: "2px 8px", borderRadius: "4px", cursor: "pointer", fontSize: "10px", fontFamily: "inherit",
+      },
+      title: "개념도에 다시 표시",
+      onclick: () => { setConceptBox(p, b.key, { hidden: false }); state.ui.conceptSelected = b.key; emit(); saveSoon(); },
+    }, [`${b.label} ↩`])),
+  ]);
 }
 
 // ---- 개념도 산출물 ----
@@ -16260,7 +16433,7 @@ function renderConceptDeliverable(root, p) {
     root.appendChild(el("div", { class: "view-empty" }, [
       el("div", { class: "big" }, ["◇"]),
       el("h2", {}, ["아키텍처 개념도"]),
-      el("p", {}, ["클러스터·워크로드가 있어야 개념도를 도출할 수 있습니다."]),
+      el("p", {}, ["클러스터 또는 VM 그룹이 있어야 개념도를 도출할 수 있습니다."]),
     ]));
     return;
   }
@@ -16271,30 +16444,28 @@ function renderConceptDeliverable(root, p) {
     cursor: "pointer", fontSize: "11px", fontFamily: "inherit",
   };
 
-  // 제목/부제 — 산출물 표지에 그대로 나가는 값이라 다이어그램 위에 둔다.
   const titleInput = el("input", {
     "data-focus-key": "concept.title",
-    value: st.title || "",
-    placeholder: conceptTitle(p),
+    value: st.title || "", placeholder: conceptTitle(p),
     style: { flex: "2 1 260px", fontSize: "12px", padding: "4px 8px" },
     oninput: e => { st.title = e.target.value; emit(); saveSoon(); },
   });
   const subInput = el("input", {
     "data-focus-key": "concept.subtitle",
-    value: st.subtitle || "",
-    placeholder: "부제 (예: 1단계 이행 목표 구성)",
+    value: st.subtitle || "", placeholder: "부제 (예: 1단계 이행 목표 구성)",
     style: { flex: "2 1 220px", fontSize: "12px", padding: "4px 8px" },
     oninput: e => { st.subtitle = e.target.value; emit(); saveSoon(); },
   });
 
   let svgRoot = null;
-  const onPick = (b) => {
-    // 박스를 누르면 편집 패널의 해당 라벨로 포커스를 옮긴다 — 보고 바로 고치는 흐름.
-    const target = root.querySelector(`[data-focus-key="concept.${CSS.escape(b.key)}.label"]`);
-    if (target) { target.scrollIntoView({ block: "center" }); target.focus(); target.select?.(); }
-    else if (b.ref) selectEntity(b.ref.kind, b.ref.id);
-  };
-  svgRoot = renderConceptSvg(p, model, onPick);
+  svgRoot = renderConceptSvg(p, model, {
+    onPick: (b) => { state.ui.conceptSelected = b.key; emit(); },
+    onDropRow: (key, rowId) => {
+      state.ui.conceptSelected = key;
+      setConceptBox(p, key, { row: rowId });
+      emit(); saveSoon();
+    },
+  });
 
   const shown = model.boxes.filter(b => !b.hidden).length;
   const groupBtn = (mode, text, title) => el("button", {
@@ -16305,10 +16476,14 @@ function renderConceptDeliverable(root, p) {
       border: "1px solid var(--border)",
       color: model.groupBy === mode ? "var(--text)" : "var(--text3)",
       borderRadius: "4px",
-    },
-    title,
+    }, title,
     onclick: () => { state.ui.conceptGroupBy = mode; emit(); },
   }, [text]);
+
+  // 요소 추가 — 어느 계층에 넣을지만 고르면 되고, 추가 즉시 그 요소가 선택된다.
+  const addRowSel = el("select", {
+    style: { fontSize: "11px", padding: "3px 6px" },
+  }, CONCEPT_ROWS.map(r => el("option", { value: r.id }, [r.label])));
 
   const wrap = el("div", {});
   wrap.appendChild(el("div", {
@@ -16318,10 +16493,10 @@ function renderConceptDeliverable(root, p) {
     titleInput,
     subInput,
     el("button", {
-      style: btnStyle, title: "직접 수정한 라벨·비고·숨김·추가 요소를 모두 지우고 현재 구성에서 다시 도출합니다",
+      style: btnStyle, title: "직접 수정한 라벨·비고·계층·구역·숨김·추가 요소를 모두 지우고 현재 구성에서 다시 도출합니다",
       onclick: () => {
         if (!confirm("직접 수정한 내용을 모두 지우고 현재 구성에서 다시 도출합니다. 계속할까요?")) return;
-        resetConcept(p); emit(); saveSoon();
+        resetConcept(p); state.ui.conceptSelected = null; emit(); saveSoon();
       },
     }, ["↺ 재도출"]),
   ]));
@@ -16332,15 +16507,24 @@ function renderConceptDeliverable(root, p) {
     el("span", { style: { display: "inline-flex", alignItems: "center", gap: "4px" } }, [
       el("span", { style: { fontSize: "11px", color: "var(--text3)", marginRight: "2px" } }, ["열 구분"]),
       groupBtn("zone", "구역", "외부 / 내부 구역으로 나눕니다 (계층 축과 직교)"),
-      groupBtn("cluster", "클러스터", "클러스터별로 나눕니다"),
+      groupBtn("cluster", "그룹", "클러스터 · VM 그룹별로 나눕니다"),
+    ]),
+    el("span", { style: { display: "inline-flex", alignItems: "center", gap: "4px", marginLeft: "6px" } }, [
+      addRowSel,
+      el("button", {
+        style: btnStyle, title: "고른 계층에 요소를 직접 추가합니다 (점선 테두리로 구분)",
+        onclick: () => {
+          const k = addConceptBox(p, addRowSel.value, null);
+          state.ui.conceptSelected = k;
+          emit(); saveSoon();
+        },
+      }, ["＋ 요소"]),
     ]),
     el("span", { style: { fontSize: "11px", color: "var(--text3)", fontStyle: "italic" } }, [
-      `요소 ${shown}/${model.boxes.length} 표시 · 열 ${model.columns.length}` +
-      (st.custom.length ? ` · 직접 추가 ${st.custom.length}` : ""),
+      `요소 ${shown}/${model.boxes.length} 표시 · 열 ${model.columns.length}`,
     ]),
     el("span", { style: { flex: 1 } }, []),
     el("span", { style: { fontSize: "11px", color: "var(--text3)" } }, ["확인 후 내보내기 →"]),
-    // 범례는 SVG 안에 이미 있으므로 export 헬퍼에는 넘기지 않는다.
     ...diagramExportButtons(() => svgRoot, "concept", () => null),
     el("button", {
       style: btnStyle, title: "표·비고까지 담은 Markdown 산출물",
@@ -16351,7 +16535,9 @@ function renderConceptDeliverable(root, p) {
   ]));
 
   wrap.appendChild(svgRoot);
-  wrap.appendChild(_cdEditPanel(p, model));
+  const hiddenBar = _cdHiddenBar(p, model);
+  if (hiddenBar) wrap.appendChild(hiddenBar);
+  wrap.appendChild(_cdSelectionPanel(p, model));
   root.appendChild(wrap);
 }
 
