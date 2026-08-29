@@ -12468,15 +12468,16 @@ function renderDependency() {
     ]));
   }
 
-  // ---- Focus mode: click a node to fade everything but its 2-hop neighborhood ----
-  // `state.ui.depFocusId` holds the clicked workload id. Reach = every node within
-  // FOCUS_HOPS edges of it (either direction via depends_on). A full transitive walk
-  // lit up nearly the whole connected component in dense projects, so the walk is a
-  // level-by-level BFS capped at FOCUS_HOPS instead.
+  // ---- Focus mode: click a node to fade everything but its direct neighbours ----
+  // `state.ui.depFocusId` holds the clicked workload id. Reach = 클릭한 노드와 **직접**
+  // 연결된 것만 (depends_on 양방향, FOCUS_HOPS = 1).
+  // 처음엔 전이 폐포였다가 2-hop으로 줄였는데도 여전히 넓었다 — A→B→C에서 A를 누르면
+  // C뿐 아니라 B에 붙은 다른 것들까지 전부 켜져서, 정작 A가 무엇과 붙어 있는지가 안 보였다.
+  // 한 칸만 켜면 "이 노드의 직접 연결"이라는 질문에 그림이 정확히 답한다.
   // A stale focus id (filtered out / deleted) is cleared lazily here.
   if (state.ui.depFocusId && !byId.has(state.ui.depFocusId)) state.ui.depFocusId = null;
   const focusId = state.ui.depFocusId || null;
-  const FOCUS_HOPS = 2;
+  const FOCUS_HOPS = 1;
   let reach = null;
   if (focusId) {
     const outAdj = new Map(), inAdj = new Map();
@@ -12579,7 +12580,7 @@ function renderDependency() {
     const nodeInFocus = inFocus(w.id);
     const g = svg("g", {
       style: "cursor:pointer",
-      // First click focuses this node (it and everything within 2 hops stays vivid, the rest fades).
+      // First click focuses this node (it and its direct neighbours stay vivid, the rest fades).
       // Click the same node again to restore. Clicking a different node switches focus to it.
       onclick: () => {
         state.ui.depFocusId = (state.ui.depFocusId === w.id) ? null : w.id;
