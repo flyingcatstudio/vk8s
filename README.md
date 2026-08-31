@@ -24,7 +24,7 @@ K8s YAML / Helm / Docker Compose / Project 리포트 산출을 한 페이지에�
 8. [뷰 5 — Namespace & NetworkPolicy](#8-뷰-5--namespace--networkpolicy)
 9. [뷰 6 — Bottleneck (정적 병목 분석)](#9-뷰-6--bottleneck-정적-병목-분석)
 10. [뷰 7 — Checklist (서비스 준비 점검)](#10-뷰-7--checklist-서비스-준비-점검)
-11. [뷰 8 — 산출물 (SI 납품 문서)](#11-뷰-8--산출물-si-납품-문서)
+11. [뷰 8 — Report (SI 납품 문서)](#11-뷰-8--report-si-납품-문서)
 12. [뷰 9 — Export (K8s YAML / Helm / Compose / Report)](#12-뷰-9--export-k8s-yaml--helm--compose--report)
 13. [Workload Inspector — 5탭 + HA](#13-workload-inspector--5탭--ha)
 14. [GPU 모델링 — chassis · 실장착 · VRAM 소비 · MIG](#14-gpu-모델링--chassis--실장착--vram-소비--mig)
@@ -297,11 +297,11 @@ Markdown·Excel 모두 `_buildChecklist`를 소비하므로 수정/삭제/추가
 
 ---
 
-## 11. 뷰 8 — 산출물 (SI 납품 문서)
+## 11. 뷰 8 — Report (SI 납품 문서)
 
 **현재 구성에서 도출한 납품 문서를 화면에서 검토·수정한 뒤 내보내는 탭.**
-Export(§12)가 기계가 먹는 산출물(kubectl / helm / docker compose)이라면, 이 탭은 사람이 읽고
-납품하는 문서다. 그래서 다운로드 버튼을 이 탭 안에만 둬서 **눈으로 확인한 뒤 내보내는 흐름**을 강제한다.
+Export(§12)가 기계가 먹는 산출물(kubectl / helm / docker compose)이라면, `Report` 탭은 사람이 읽고
+납품하는 문서다 (Export 안의 "Project Report" 파일과는 다르다 — 그쪽은 Markdown 한 벌, 이쪽은 검토 화면이다). 그래서 다운로드 버튼을 이 탭 안에만 둬서 **눈으로 확인한 뒤 내보내는 흐름**을 강제한다.
 
 산출물은 `DELIVERABLES` 레지스트리에 등록된다 — 새 산출물을 추가할 때는 배열에 한 줄과 렌더 함수
 하나면 되고 상단 탭은 늘어나지 않는다 (Export 뷰의 `tabs`, `REPORT_SECTIONS`와 같은 관용구).
@@ -554,6 +554,43 @@ VIP를 비우면 `VM_HA_NO_VIP` 경고가 뜬다. 대수는 Capacity 시뮬레�
 
 ---
 
+### 13.4 물리 / 가상 (`node.virtualization`)
+
+온프레미스 설계에서 "물리 3대 위에 VM 12대"를 표현하려면 노드에 물리/가상 구분이 필요하다.
+없으면 둘 다 노드로 넣었을 때 **사이트 랙 U와 전력이 두 번 세진다.**
+
+```js
+virtualization: {
+  kind: "physical" | "vm",   // 없으면 physical
+  host_node_id: "…"          // kind=vm일 때, 올라가는 물리 노드
+}
+```
+
+| 효과 | 내용 |
+|---|---|
+| **랙 U · 전력** | `kind: "vm"`이면 `siteUsage`에서 제외한다 — 그 몫은 호스트 물리 서버가 이미 낸다. 사이트가 cloud면 통째로 빠지는 기존 논리를 노드 단위로 넓힌 것 |
+| **오버커밋 검증** | 호스트별로 VM의 vCPU·메모리 합계를 검사 (§16) |
+| **발주서** | Node Specs 표에 `Virt` 열, 그리고 "가상화 구성" 절에 호스트별 VM 목록과 오버커밋 비율 |
+
+세 축은 서로 직교한다 — `source(onprem/cloud)` · `purpose(compute/bastion/…)` ·
+`virtualization(physical/vm)`. 클라우드 인스턴스는 `source: cloud` + `kind: vm`,
+온프렘 베어메탈은 `source: onprem` + `kind: physical`이다.
+
+#### k8s 역할과의 관계
+
+`cluster_roles`(control-plane / worker / etcd)는 **k8s 개념**이라 VM 그룹(§13.3) 서버에는 달지 않는다.
+배치 가능 여부는 `isSchedulableNode(node, group)`가 판단한다 — k8s 그룹은 `worker` 역할 기준,
+VM 그룹은 그룹의 모든 서버가 대상이다. 노드 인스펙터에서도 VM 그룹 소속이면 역할 UI가 빠진다.
+
+> 물리 호스트 자체는 어느 배포 그룹에도 넣지 않는 것이 보통이다. 넣으면 그 위의 VM과
+> 호스트 양쪽에 워크로드가 배치되어 자원이 두 번 계산된다.
+
+> **템플릿 버그 수정** — 내장 템플릿 5종 중 4종이 `site.node_ids`와 `cluster.node_ids`를
+> **같은 배열 객체**로 만들고 있었다. 사이트에 노드를 추가하면 클러스터에도 조용히 들어가고,
+> 클러스터에서 빼면 사이트에서도 사라졌다. 각 엔티티가 자기 배열을 갖도록 고쳤다.
+
+---
+
 ## 14. GPU 모델링 — chassis · 실장착 · VRAM 소비 · MIG
 
 세 계층으로 나뉘어 검증된다.
@@ -661,6 +698,7 @@ VRAM 모드 워크로드는 `ceil(vram_gb / 카드 VRAM)`장으로 환산되어 
 | **Dependency** | `DEPENDS_ON_TARGET_NOT_FOUND` · `DEPENDS_ON_CYCLE` · `DEPENDS_ON_CROSS_CLUSTER` |
 | **정적 병목** | `THREAD_POOL_SATURATION` · `EVENT_LOOP_CPU_BOUND` · `WORKER_POOL_SATURATION` · `DB_CONNECTION_POOL_EXHAUSTED` · `DB_MAX_CONNECTIONS_EXCEEDED` · `TIMEOUT_CASCADE_RISK` · `JVM_HEAP_TOO_SMALL` · `JVM_HEAP_GT_REQUEST` · `SPOF_RISK` · `STATEFUL_NO_PVC` · `RPS_NEVER_REACHED_BY_DEPS` · `KEEPALIVE_HIGH_RPS_DISABLED` |
 | **Helm Export** | `HELM_DUPLICATE_CHART_NAME` · `HELM_INGRESS_NO_HOST` · `HELM_NO_IMAGE_REPO` |
+| **물리/가상** | `VM_NO_HOST` · `VM_HOST_NOT_FOUND` · `VM_HOST_IS_VM` · `VM_HOST_DIFFERENT_SITE` · `VM_HOST_MEMORY_OVERCOMMIT`(error — 하이퍼바이저가 스왑하거나 VM이 죽는다) · `VM_HOST_VCPU_OVERCOMMIT_HIGH`(4:1 초과) |
 | **VM 그룹** | `VM_NODE_NO_OS` · `VM_SERVICE_NO_SOFTWARE` · `VM_HA_NO_VIP` — platform=vm 그룹 전용. 대신 control-plane·CNI·GPU Operator·네임스페이스·NetworkPolicy 룰은 이 그룹에서 실행되지 않는다 |
 | **계층 규칙** | `LAYER_UNCLASSIFIED` · `LAYER_DATA_EXPOSED` · `LAYER_SKIP_CALL` · `LAYER_UPWARD_CALL` · `LAYER_NO_ENTRY` — 아키텍처 계층(§13.2) 기반. 프론트가 DB를 직접 부르거나 Data 계층이 외부 노출되는 구성을 잡는다. 전부 `warn`/`info` — 계층은 설계 판단이라 저장을 막지 않는다 |
 

@@ -395,3 +395,41 @@
 - **scope**: workload
 - **when**: `ha.mode ∈ {active-standby, active-active}` 인데 `ha.vip` 미설정
 - **msg**: `{cluster.name}/{workload.name}: {mode}인데 VIP 미기재 — 절체 대상 주소가 없으면 구성이 성립하지 않습니다`
+
+---
+
+## 14. 물리 / 가상 (VM ↔ 호스트)
+
+`node.virtualization.kind === "vm"` 인 노드에 적용. VM은 랙 U·전력 산정에서 빠지므로
+물리 근거(호스트)가 없으면 용량 산정이 공중에 뜬다.
+
+### `VM_NO_HOST` — info
+- **scope**: node
+- **when**: `kind=vm` 인데 `host_node_id` 미설정
+- **msg**: `{node.name}: VM인데 호스트 미지정 — 랙 U·전력 산정에서 빠지며 물리 근거가 문서에 남지 않습니다`
+
+### `VM_HOST_NOT_FOUND` — block
+- **scope**: node
+- **when**: `host_node_id`가 가리키는 노드가 없음
+- **msg**: `{node.name}: 호스트 노드({id})를 찾을 수 없음`
+
+### `VM_HOST_IS_VM` — warn
+- **scope**: node
+- **when**: 호스트로 지정한 노드도 `kind=vm`
+- **msg**: `{node.name}: 호스트로 지정한 {host}도 VM입니다 — 물리 서버를 지정하세요`
+
+### `VM_HOST_DIFFERENT_SITE` — warn
+- **scope**: node
+- **when**: 호스트가 다른 사이트에 있음
+- **msg**: `{node.name}: 호스트 {host}가 다른 사이트에 있습니다`
+
+### `VM_HOST_MEMORY_OVERCOMMIT` — block
+- **scope**: node (호스트)
+- **when**: 호스트에 올라간 VM들의 `memory_gb` 합 > 호스트 `memory_gb`
+- **msg**: `{host}: VM {N}대의 메모리 합 {sum}GB > 호스트 {cap}GB (하이퍼바이저 오버헤드 제외)`
+- 메모리 오버커밋은 하이퍼바이저가 스왑하거나 VM이 죽는다 — vCPU와 달리 정상 구성이 아니다.
+
+### `VM_HOST_VCPU_OVERCOMMIT_HIGH` — warn
+- **scope**: node (호스트)
+- **when**: VM vCPU 합 > 호스트 vCPU × 4
+- **msg**: `{host}: vCPU 오버커밋 {ratio}:1 ({sum}/{cap}) — 4:1 초과`

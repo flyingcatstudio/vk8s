@@ -1120,7 +1120,7 @@ const VIEWS = [
   { id: "namespace",   name: "Namespace",    ready: true  },
   { id: "bottleneck",  name: "Bottleneck",   ready: true  },
   { id: "checklist",   name: "Checklist",    ready: true  },
-  { id: "deliverable", name: "산출물",        ready: true  },
+  { id: "deliverable", name: "Report",       ready: true  },
   { id: "export",      name: "Export",       ready: true  },
 ];
 
@@ -1377,6 +1377,12 @@ const HELP = {
     body: "k8s = 쿠버네티스 클러스터. vm = VM/베어메탈 서버 그룹. 온프레미스 설계에는 k8s 밖의 요소(레거시 WAS·Oracle·배치 서버)가 늘 섞이는데, 이를 가짜 클러스터로 욱여넣으면 네임스페이스·Ingress·Deployment 같은 무의미한 필드가 따라붙습니다. vm을 고르면 그 필드들이 UI·검증·export에서 모두 빠지고, 노드·서비스·의존·계층·용량 축은 그대로 공유합니다.",
     reco: "vm 그룹의 workloads는 pod가 아니라 '서버에 설치되는 서비스'입니다. 설치 소프트웨어 목록과 이중화 방식(Active-Standby / Active-Active + VIP)을 채우면 개념도·리포트에 그대로 반영됩니다. 플랫폼을 되돌리면 기존 k8s 설정은 지워지지 않고 다시 보입니다.",
   },
+  "node.virtualization": {
+    cat: "노드",
+    title: "Virtualization — 물리 / 가상",
+    body: "이 노드가 베어메탈인지 VM인지. VM으로 두면 사이트의 랙 U·전력 산정에서 빠집니다 — 그 몫은 이미 호스트 물리 서버가 내고 있기 때문입니다. 물리 호스트와 그 위의 VM을 둘 다 노드로 모델링해도 용량이 두 번 세지지 않습니다.",
+    reco: "Host를 지정하면 그 물리 서버에 올라간 VM들의 vCPU·메모리 합계를 검증합니다. 메모리 오버커밋은 error(하이퍼바이저가 스왑하거나 VM이 죽음), vCPU는 4:1을 넘으면 warn입니다. 호스트를 비워두면 랙·전력 산정에서 빠진 채 물리 근거가 문서에 남지 않으므로 info로 알립니다.",
+  },
   "node.os": {
     cat: "노드",
     title: "OS — 설치 운영체제",
@@ -1397,7 +1403,7 @@ const HELP = {
   },
   "view.deliverable": {
     cat: "기타",
-    title: "산출물 — SI 납품 문서",
+    title: "Report — SI 납품 문서",
     body: "현재 구성에서 도출한 납품용 문서를 화면에서 검토·수정한 뒤 내보내는 탭. 첫 산출물은 '아키텍처 개념도' — 사용자·채널 / 접근 계층 / 서비스·데이터 계층(클러스터별) / 관리·운영 / 외부 연동 6개 레인으로 접어 그린다. 계층 분류는 Architecture 뷰와 같은 기준(category · namespace 역할 · StatefulSet)을 쓴다.",
     reco: "요소는 매번 config에서 다시 도출된다 — 라벨·비고·숨김·직접 추가한 요소만 프로젝트에 저장되므로 구성이 바뀌어도 수정 내용이 유지된다. 표시 상태를 눈으로 확인한 뒤 SVG/PNG/Markdown으로 내보내면 된다. 처음 상태로 되돌리려면 ↺ 재도출.",
   },
@@ -1948,6 +1954,17 @@ const svgNode = (tag, attrs = {}, children = []) => {
 // platform 하나로 갈라서 vm일 때는 k8s 전용 필드를 데이터에서도 UI에서도 빼고, 나머지 축
 // (노드·서비스·의존·계층·용량)은 그대로 공유한다. 값이 없으면 k8s — 기존 프로젝트는 마이그레이션 없이 읽힌다.
 const isVmGroup = (c) => c?.platform === "vm";
+// 노드가 가상 머신인가. 값이 없으면 물리 — 기존 프로젝트는 마이그레이션 없이 읽힌다.
+// VM은 랙을 차지하지 않고 전력도 호스트가 이미 쓴다. 물리 호스트와 그 위의 VM을 둘 다
+// 노드로 넣었을 때 사이트 U/kW가 두 번 세지는 것을 막는 것이 이 구분의 첫 번째 목적이다.
+const isVmNode = (n) => n?.virtualization?.kind === "vm";
+const vmHostOf = (n, project) => (isVmNode(n) && n.virtualization.host_node_id)
+  ? (project?.nodes || []).find(x => x.id === n.virtualization.host_node_id) || null
+  : null;
+// 배포 그룹에서 이 노드가 워크로드를 받을 수 있는가.
+// k8s는 worker 역할이 기준이지만, VM 그룹에는 control-plane/worker 개념 자체가 없다.
+const isSchedulableNode = (n, group) =>
+  isVmGroup(group) ? true : ((n?.cluster_roles || []).includes("worker"));
 const groupIcon = (c) => (isVmGroup(c) ? "▤" : "⎈");
 const groupKindLabel = (c) => (isVmGroup(c) ? "VM Group" : "Cluster");
 const wlKindLabel = (c) => (isVmGroup(c) ? "서비스" : "Workload");
@@ -2396,9 +2413,13 @@ function assignNodeToCluster(nodeId, clusterId, defaultRole, silent = false) {
     if (other.id !== clusterId) other.node_ids = (other.node_ids || []).filter(nid => nid !== nodeId);
   }
   if (!c.node_ids.includes(nodeId)) c.node_ids.push(nodeId);
-  if (!Array.isArray(n.cluster_roles)) n.cluster_roles = [];
-  if (n.cluster_roles.length === 0) {
-    n.cluster_roles = [defaultRole || "worker"];
+  // cluster_roles(control-plane/worker/etcd)는 k8s 개념이다. VM 그룹 서버에 달면
+  // 고칠 수 없는 역할이 트리·인스펙터에 남으므로 붙이지 않는다 — 배치는 isSchedulableNode가 판단한다.
+  if (isVmGroup(c)) {
+    if (Array.isArray(n.cluster_roles) && n.cluster_roles.length) n.cluster_roles = [];
+  } else {
+    if (!Array.isArray(n.cluster_roles)) n.cluster_roles = [];
+    if (n.cluster_roles.length === 0) n.cluster_roles = [defaultRole || "worker"];
   }
   // Auto-allocate node IP from cluster.network.node_subnet if not in subnet
   if (!n.network) n.network = {};
@@ -3959,7 +3980,7 @@ function runValidator(project) {
     // 5. Workload checks (per cluster)
     // Worker capacity: nodes with 'worker' role (so control-plane+worker dual-role contributes)
     const wls = c.workloads || [];
-    const workerNodes = nodes.filter(n => roleOf(n).includes("worker"));
+    const workerNodes = nodes.filter(n => isSchedulableNode(n, c));
     const totalCpu = workerNodes.reduce((a, n) => a + (n.spec?.vcpu || 0), 0);
     const totalMem = workerNodes.reduce((a, n) => a + (n.spec?.memory_gb || 0), 0);
     const wlCpu = wls.reduce((a, w) => a + (w.resources?.requests?.cpu || 0) * (w.replicas ?? 1), 0);
@@ -4336,6 +4357,61 @@ function runValidator(project) {
     }
   }
 
+  // N. 물리 / 가상 (VM ↔ 호스트)
+  // VM은 랙 U·전력에서 빠지므로, 물리 근거(호스트)가 없으면 용량 산정이 공중에 뜬다.
+  // 호스트를 지정하면 그 물리 서버의 vCPU·메모리 오버커밋을 정적으로 검사할 수 있다.
+  {
+    const byHost = new Map();   // hostNodeId → vm[]
+    for (const n of project.nodes || []) {
+      if (!isVmNode(n)) continue;
+      const hid = n.virtualization.host_node_id;
+      if (!hid) {
+        F("VM_NO_HOST", "info",
+          `${n.name}: VM인데 호스트 미지정 — 랙 U·전력 산정에서 빠지며 물리 근거가 문서에 남지 않습니다`,
+          { kind: "node", id: n.id }, "node.virtualization");
+        continue;
+      }
+      const host = (project.nodes || []).find(x => x.id === hid);
+      if (!host) {
+        F("VM_HOST_NOT_FOUND", "error",
+          `${n.name}: 호스트 노드(${hid})를 찾을 수 없음`,
+          { kind: "node", id: n.id }, "node.virtualization");
+        continue;
+      }
+      if (isVmNode(host)) {
+        F("VM_HOST_IS_VM", "warn",
+          `${n.name}: 호스트로 지정한 ${host.name}도 VM입니다 — 물리 서버를 지정하세요`,
+          { kind: "node", id: n.id }, "node.virtualization");
+      }
+      if (host.site_id !== n.site_id) {
+        F("VM_HOST_DIFFERENT_SITE", "warn",
+          `${n.name}: 호스트 ${host.name}가 다른 사이트에 있습니다`,
+          { kind: "node", id: n.id }, "node.virtualization");
+      }
+      if (!byHost.has(hid)) byHost.set(hid, []);
+      byHost.get(hid).push(n);
+    }
+    for (const [hid, vms] of byHost) {
+      const host = (project.nodes || []).find(x => x.id === hid);
+      if (!host) continue;
+      const hCpu = host.spec?.vcpu || 0, hMem = host.spec?.memory_gb || 0;
+      const vCpu = vms.reduce((a, x) => a + (x.spec?.vcpu || 0), 0);
+      const vMem = vms.reduce((a, x) => a + (x.spec?.memory_gb || 0), 0);
+      // 메모리는 오버커밋하면 안 된다 — 하이퍼바이저가 스왑하거나 VM이 죽는다.
+      if (hMem > 0 && vMem > hMem) {
+        F("VM_HOST_MEMORY_OVERCOMMIT", "error",
+          `${host.name}: VM ${vms.length}대의 메모리 합 ${vMem}GB > 호스트 ${hMem}GB (하이퍼바이저 오버헤드 제외)`,
+          { kind: "node", id: host.id }, "node.virtualization");
+      }
+      // vCPU는 오버커밋이 정상이지만 비율이 높으면 성능 예측이 무너진다.
+      if (hCpu > 0 && vCpu > hCpu * 4) {
+        F("VM_HOST_VCPU_OVERCOMMIT_HIGH", "warn",
+          `${host.name}: vCPU 오버커밋 ${(vCpu / hCpu).toFixed(1)}:1 (${vCpu}/${hCpu}) — 4:1 초과`,
+          { kind: "node", id: host.id }, "node.virtualization");
+      }
+    }
+  }
+
   // N. 아키텍처 계층 규칙
   // 계층(workload.tier, 비었으면 도출)이 정해지면 호출 방향과 노출을 정적으로 검사할 수 있다.
   // 계층을 못 정한 워크로드는 개념도에서도 조용히 사라지므로 미분류 자체를 알려준다.
@@ -4455,7 +4531,10 @@ function siteFormFactorU(formFactor) {
 }
 function siteUsage(site, project, gpuModels) {
   if (site.kind !== "onprem") return null;
-  const nodes = (site.node_ids || []).map(id => project.nodes.find(n => n.id === id)).filter(Boolean);
+  // VM은 랙을 차지하지도, 별도로 전기를 먹지도 않는다 — 그 몫은 호스트 물리 서버가 이미 낸다.
+  // 물리 호스트와 VM을 둘 다 노드로 모델링했을 때 U/kW가 두 번 세지던 것을 여기서 막는다.
+  const nodes = (site.node_ids || []).map(id => project.nodes.find(n => n.id === id))
+    .filter(n => n && !isVmNode(n));
   const u = nodes.reduce((a, n) => a + siteFormFactorU(n.spec?.form_factor), 0);
   const w = nodes.reduce((a, n) => a + computeNodePowerW(n, gpuModels), 0);
   return {
@@ -4561,7 +4640,11 @@ function renderTree() {
       const cluster = getNodeCluster(n.id);
       const roles = Array.isArray(n.cluster_roles) ? n.cluster_roles : [];
       const roleAbbr = roles.map(r => r === "control-plane" ? "cp" : r === "worker" ? "w" : r).join("+");
-      const meta = cluster ? `${cluster.name}${roleAbbr ? ` ${roleAbbr}` : ""}` : (n.spec?.form_factor || "");
+      // VM은 랙을 안 잡으므로 form_factor 대신 가상 여부를 보여준다 (호스트가 있으면 호스트 이름).
+      const vmTag = isVmNode(n) ? `vm${vmHostOf(n, p) ? `→${vmHostOf(n, p).name}` : ""}` : "";
+      const meta = cluster
+        ? `${cluster.name}${roleAbbr ? ` ${roleAbbr}` : ""}${vmTag ? ` ${vmTag}` : ""}`
+        : (vmTag || n.spec?.form_factor || "");
       sitesSec.appendChild(el("div", {
         class: "tree-item child" + (state.ui.selectedKind === "node" && state.ui.selectedId === n.id ? " selected" : ""),
         onclick: () => selectEntity("node", n.id),
@@ -5145,6 +5228,53 @@ function renderNodeInspector(root, id) {
       el("option", { value: p, selected: p === (n.purpose || "compute") ? "" : null }, [p]))),
   ]));
 
+  // 물리 / 가상. VM은 랙 U·전력 산정에서 빠지고(호스트가 이미 낸다), 호스트를 지정하면
+  // 그 물리 서버의 vCPU·메모리 오버커밋을 검증할 수 있다.
+  {
+    const vz = n.virtualization || {};
+    const isVm = vz.kind === "vm";
+    const setVz = (patch) => {
+      const next = { ...(n.virtualization || {}), ...patch };
+      for (const k of Object.keys(next)) if (next[k] == null || next[k] === "") delete next[k];
+      if (next.kind === "physical") delete next.kind;      // 기본값은 저장하지 않는다
+      if (!isVm) delete next.host_node_id;
+      updateNodeField(id, "virtualization", Object.keys(next).length ? next : undefined);
+    };
+    const hostCandidates = (state.project.nodes || [])
+      .filter(x => x.id !== id && !isVmNode(x) && x.site_id === n.site_id);
+    root.appendChild(el("div", { class: "field-row" }, [
+      el("div", { class: "field" }, [
+        lbl("Virtualization", "node.virtualization"),
+        el("select", {
+          onchange: e => setVz({ kind: e.target.value }),
+        }, [
+          el("option", { value: "physical", selected: isVm ? null : "" }, ["물리 (베어메탈)"]),
+          el("option", { value: "vm", selected: isVm ? "" : null }, ["VM (가상 머신)"]),
+        ]),
+      ]),
+      isVm ? el("div", { class: "field" }, [
+        el("label", {}, ["Host (물리 서버)"]),
+        el("select", {
+          onchange: e => setVz({ host_node_id: e.target.value || undefined }),
+        }, [
+          el("option", { value: "", selected: vz.host_node_id ? null : "" }, ["(미지정)"]),
+          ...hostCandidates.map(h =>
+            el("option", { value: h.id, selected: vz.host_node_id === h.id ? "" : null },
+              [`${h.name} — ${h.spec?.vcpu || 0}c / ${h.spec?.memory_gb || 0}GB`])),
+        ]),
+      ]) : null,
+    ]));
+    if (isVm) {
+      const host = vmHostOf(n, state.project);
+      const siblings = (state.project.nodes || []).filter(x => isVmNode(x) && x.virtualization.host_node_id === vz.host_node_id);
+      root.appendChild(el("div", { style: { fontSize: "11px", color: "var(--text3)", padding: "2px 0 8px" } }, [
+        host
+          ? `${host.name} 위 VM ${siblings.length}대 · vCPU ${siblings.reduce((a, x) => a + (x.spec?.vcpu || 0), 0)}/${host.spec?.vcpu || 0} · RAM ${siblings.reduce((a, x) => a + (x.spec?.memory_gb || 0), 0)}/${host.spec?.memory_gb || 0}GB`
+          : "호스트 미지정 — 랙 U·전력 산정에서 빠지며 물리 근거가 문서에 남지 않습니다.",
+      ]));
+    }
+  }
+
   // OS — VM/베어메탈 산출물(발주서·설치 목록)에 필요하고 k8s 노드에도 그대로 쓴다.
   root.appendChild(el("div", { class: "field-row" }, [
     el("div", { class: "field" }, [
@@ -5426,6 +5556,12 @@ function renderNodeInspector(root, id) {
       ]);
     })),
   ]);
+  // VM 그룹 서버에는 control-plane/worker/etcd 개념이 없다 — 배치는 isSchedulableNode가 판단한다.
+  if (isVmGroup(myCluster)) {
+    root.appendChild(el("div", { style: { fontSize: "11px", color: "var(--text3)", padding: "4px 0", fontStyle: "italic" } }, [
+      `▤ VM 그룹 '${myCluster.name}' 소속 — k8s 역할 없이 그룹의 모든 서버가 서비스를 받습니다.`,
+    ]));
+  } else {
   root.appendChild(rolesField);
   if (!myCluster) {
     root.appendChild(el("div", { class: "empty-hint" }, ["클러스터 할당 후 역할 지정 가능"]));
@@ -5438,6 +5574,7 @@ function renderNodeInspector(root, id) {
       `💡 ${roles.join(" + ")} 겸용 — dev/단일노드 클러스터에서 일반적인 패턴`,
     ]));
   }
+  }   // end k8s-only: Cluster Roles
 
   // Spec — vcpu/memory_gb are editable; modifying them flags the node as 'custom'
   // so users can pick a similar catalog model and dial in the exact spec.
@@ -6982,7 +7119,7 @@ function renderWorkloadInspector(root, id) {
       const clusterNodes = (cluster.node_ids || [])
         .map(nid => (state.project.nodes || []).find(n => n.id === nid))
         .filter(Boolean);
-      const workerNodes = clusterNodes.filter(n => (n.cluster_roles || []).includes("worker"));
+      const workerNodes = clusterNodes.filter(n => isSchedulableNode(n, cluster));
       const workerCount = workerNodes.length;
       const zoneSet = new Set();
       for (const n of workerNodes) {
@@ -7259,7 +7396,7 @@ function renderWorkloadInspector(root, id) {
     const installedVramByModel = new Map();
     for (const nid of (cluster.node_ids || [])) {
       const nd = state.project.nodes.find(x => x.id === nid);
-      if (!nd || !(nd.cluster_roles || []).includes("worker")) continue;
+      if (!nd || !isSchedulableNode(nd, cluster)) continue;
       for (const g of (nd.spec?.gpu || [])) {
         if (g.model && (g.count || 0) > 0) {
           installedModels.add(g.model);
@@ -9575,8 +9712,16 @@ function simulateScheduling(project) {
   // Per-node remaining capacity (worker nodes only)
   const remaining = new Map();
   const cardsByNode = new Map();   // nodeId → GPU card ledger (rendered by the Capacity view)
+  // 배치 대상 = k8s 그룹의 worker + VM 그룹의 모든 서버. 그룹 문맥이 있어야 판단되므로 먼저 모은다.
+  const schedulableIds = new Set();
+  for (const c of project.clusters || []) {
+    for (const nid of (c.node_ids || [])) {
+      const n = (project.nodes || []).find(x => x.id === nid);
+      if (n && isSchedulableNode(n, c)) schedulableIds.add(nid);
+    }
+  }
   for (const n of project.nodes || []) {
-    if (!(n.cluster_roles || []).includes("worker")) continue;
+    if (!schedulableIds.has(n.id)) continue;
     const cards = buildNodeGpuCards(n, gpuModels);
     cardsByNode.set(n.id, cards);
     remaining.set(n.id, {
@@ -9592,7 +9737,7 @@ function simulateScheduling(project) {
   for (const c of project.clusters || []) {
     const workers = (c.node_ids || [])
       .map(id => project.nodes.find(n => n.id === id))
-      .filter(n => n && (n.cluster_roles || []).includes("worker"));
+      .filter(n => n && isSchedulableNode(n, c));
     for (const w of c.workloads || []) {
       const reqs = w.resources?.requests || {};
       const cpuReq = reqs.cpu || 0;
@@ -9905,7 +10050,7 @@ function renderCapacityNsCluster(c, project, gpuModels) {
 
   // 2) Cluster worker totals (used as reference when a quota is missing).
   const workers = (c.node_ids || []).map(id => project.nodes.find(n => n.id === id))
-    .filter(n => n && (n.cluster_roles || []).includes("worker"));
+    .filter(n => n && isSchedulableNode(n, c));
   const totCpu  = workers.reduce((a, n) => a + (n.spec?.vcpu || 0), 0);
   const totMem  = workers.reduce((a, n) => a + (n.spec?.memory_gb || 0), 0);
   const totVram = workers.reduce((a, n) => a + (n.spec?.gpu || []).reduce((aa, g) =>
@@ -10013,7 +10158,7 @@ function renderCapacityNsCluster(c, project, gpuModels) {
 function renderCapacityCluster(c, sim, project, gpuModels) {
   const card = el("div", { class: "topo-site" });
   const allNodes = (c.node_ids || []).map(id => project.nodes.find(n => n.id === id)).filter(Boolean);
-  const workers = allNodes.filter(n => (n.cluster_roles || []).includes("worker"));
+  const workers = allNodes.filter(n => isSchedulableNode(n, c));
   const cpOnly = allNodes.filter(n => (n.cluster_roles || []).length > 0 && !(n.cluster_roles || []).includes("worker"));
 
   card.appendChild(el("div", { class: "topo-site-header" }, [
@@ -14801,8 +14946,8 @@ function _secNodes(p) {
   if (!nodes.length) { out.push("_(none)_"); return out; }
   const gm = state.catalog?.gpuModels || {};
   const n2c = _reportNodeIdToCluster(p);
-  out.push("| Node | Group | Site | OS | Source | Roles | vCPU | RAM (GB) | Disk | GPU | Power (W) |");
-  out.push("|---|---|---|---|---|---|---|---|---|---|---|");
+  out.push("| Node | Group | Site | Virt | OS | Source | Roles | vCPU | RAM (GB) | Disk | GPU | Power (W) |");
+  out.push("|---|---|---|---|---|---|---|---|---|---|---|---|");
   for (const n of nodes) {
     const site = (p.sites || []).find(s => s.id === n.site_id);
     const roles = Array.isArray(n.cluster_roles) && n.cluster_roles.length ? n.cluster_roles.join("+") : "—";
@@ -14814,7 +14959,32 @@ function _secNodes(p) {
       `${g.model}×${g.count}${g.mig_enabled && g.mig_profile ? ` [MIG ${g.mig_profile}]` : ""}`).join(", ") || "—";
     const powerW = Math.round(computeNodePowerW(n, gm));
     const osStr = [n.os?.distro, n.os?.version].filter(Boolean).join(" ") || "—";
-    out.push(`| ${_mdCell(n.name)} | ${_mdCell(n2c.get(n.id))} | ${_mdCell(site?.name)} | ${_mdCell(osStr)} | ${_mdCell(n.source)} | ${_mdCell(roles)} | ${_mdCell(n.spec?.vcpu)} | ${_mdCell(n.spec?.memory_gb)} | ${_mdCell(diskStr)} | ${_mdCell(gpu)} | ${powerW} |`);
+    const host = vmHostOf(n, p);
+    const virt = isVmNode(n) ? `VM${host ? ` → ${host.name}` : ""}` : "물리";
+    out.push(`| ${_mdCell(n.name)} | ${_mdCell(n2c.get(n.id))} | ${_mdCell(site?.name)} | ${_mdCell(virt)} | ${_mdCell(osStr)} | ${_mdCell(n.source)} | ${_mdCell(roles)} | ${_mdCell(n.spec?.vcpu)} | ${_mdCell(n.spec?.memory_gb)} | ${_mdCell(diskStr)} | ${_mdCell(gpu)} | ${powerW} |`);
+  }
+
+  // 가상화 구성 — 물리 호스트 N대 위에 VM M대. 발주서에서 "실제로 사는 장비"를 가르는 표다.
+  const vms = nodes.filter(isVmNode);
+  if (vms.length) {
+    const byHost = new Map();
+    for (const v of vms) {
+      const hid = v.virtualization.host_node_id || "__none";
+      if (!byHost.has(hid)) byHost.set(hid, []);
+      byHost.get(hid).push(v);
+    }
+    out.push("", "### 가상화 구성", "");
+    out.push(`- 물리 ${nodes.length - vms.length}대 · VM ${vms.length}대 (VM은 랙 U·전력 산정에서 제외)`);
+    out.push("", "| 호스트 | VM | vCPU (VM합/호스트) | RAM (VM합/호스트) |");
+    out.push("|---|---|---|---|");
+    for (const [hid, list] of byHost) {
+      const h = hid === "__none" ? null : nodes.find(x => x.id === hid);
+      const vc = list.reduce((a, x) => a + (x.spec?.vcpu || 0), 0);
+      const vm = list.reduce((a, x) => a + (x.spec?.memory_gb || 0), 0);
+      const hc = h?.spec?.vcpu || 0, hm = h?.spec?.memory_gb || 0;
+      const ratio = hc ? ` (${(vc / hc).toFixed(1)}:1)` : "";
+      out.push(`| ${_mdCell(h ? h.name : "(호스트 미지정)")} | ${_mdCell(list.map(x => x.name).join(", "))} | ${vc}${hc ? ` / ${hc}${ratio}` : ""} | ${vm}${hm ? ` / ${hm}` : ""} |`);
+    }
   }
   return out;
 }
@@ -16638,7 +16808,7 @@ function renderDeliverables() {
     style: { display: "flex", alignItems: "center", gap: "12px", marginBottom: "12px", flexWrap: "wrap" },
   }, [
     el("h2", { style: { fontSize: "16px", fontWeight: 600, margin: 0 } }, [
-      "산출물", helpIcon("view.deliverable"),
+      "Report", helpIcon("view.deliverable"),
     ]),
     el("span", { style: { fontSize: "11px", color: "var(--text3)", fontStyle: "italic" } }, [
       "화면에서 검토·수정한 뒤 내보내는 납품 문서",
@@ -18323,7 +18493,7 @@ function buildTpl3TierHA(projectName) {
     clusters: [{
       id: clusterId, name: "prod", environment_tag: "prod",
       k8s_version: "1.30", ha_control_plane: true,
-      node_ids: nodeIds,
+      node_ids: [...nodeIds],
       network: { pod_cidr: "10.244.0.0/16", service_cidr: "10.96.0.0/12", node_subnet: "192.168.10.0/24", dns_domain: "cluster.local", lb_pool: "192.168.20.0/24" },
       ingress_rules: [
         { id: ing1Id, name: "web", host: "web.example.com", tls: true,
@@ -18421,7 +18591,7 @@ function buildTplMicroservices(projectName) {
     clusters: [{
       id: clusterId, name: "prod", environment_tag: "prod",
       k8s_version: "1.30", ha_control_plane: true,
-      node_ids: nodeIds,
+      node_ids: [...nodeIds],
       network: { pod_cidr: "10.244.0.0/16", service_cidr: "10.96.0.0/12", node_subnet: "192.168.10.0/24", dns_domain: "cluster.local", lb_pool: "192.168.20.0/24" },
       ingress_rules: [{ id: ing1, name: "shop", host: "shop.example.com", tls: true,
                         paths: [{ path: "/", path_type: "Prefix", workload_id: ids.frontend, port: 80 }] }],
@@ -18552,7 +18722,7 @@ function buildTplMLInference(projectName) {
     clusters: [{
       id: clusterId, name: "ai-prod", environment_tag: "ai",
       k8s_version: "1.30", ha_control_plane: true,
-      node_ids: allNodeIds,
+      node_ids: [...allNodeIds],
       network: { pod_cidr: "10.244.0.0/16", service_cidr: "10.96.0.0/12", node_subnet: "192.168.10.0/24", dns_domain: "cluster.local", lb_pool: "192.168.20.0/24" },
       ingress_rules: [{ id: ing1, name: "llm", host: "llm.example.com", tls: true,
                         paths: [{ path: "/v1/chat", path_type: "Prefix", workload_id: ids.api, port: 8080 }] }],
@@ -18694,7 +18864,7 @@ function buildTplHybridCloud(projectName) {
       {
         id: onpremClusterId, name: "data-cluster", environment_tag: "data",
         k8s_version: "1.30", ha_control_plane: true,
-        node_ids: onpremNodeIds,
+        node_ids: [...onpremNodeIds],
         network: { pod_cidr: "10.244.0.0/16", service_cidr: "10.96.0.0/12", node_subnet: "10.0.0.0/24", dns_domain: "cluster.local", lb_pool: "10.0.10.0/24" },
         ingress_rules: [],
         addons: { cni: "Calico", ingress: "NGINX", metrics_server: true, gpu_operator: false, service_mesh: "None" },
@@ -18714,7 +18884,7 @@ function buildTplHybridCloud(projectName) {
       {
         id: awsClusterId, name: "web-cluster", environment_tag: "prod",
         k8s_version: "1.30", ha_control_plane: true,
-        node_ids: awsNodeIds,
+        node_ids: [...awsNodeIds],
         network: { pod_cidr: "10.245.0.0/16", service_cidr: "10.97.0.0/12", node_subnet: "10.1.0.0/24", dns_domain: "cluster.local" },
         ingress_rules: [{ id: ing1, name: "web", host: "www.example.com", tls: true,
                           paths: [{ path: "/", path_type: "Prefix", workload_id: ids.web, port: 80 }] }],
@@ -18837,7 +19007,7 @@ function buildTplMultiZoneHA(projectName) {
     clusters: [{
       id: clusterId, name: "prod-mzha", environment_tag: "prod",
       k8s_version: "1.30", ha_control_plane: true,
-      node_ids: nodeIds,
+      node_ids: [...nodeIds],
       network: { pod_cidr: "10.244.0.0/16", service_cidr: "10.96.0.0/12", node_subnet: "10.0.0.0/8", dns_domain: "cluster.local", lb_pool: "203.0.113.0/24" },
       ingress_rules: [
         { id: ing1, name: "web", host: "www.example.com", tls: true,

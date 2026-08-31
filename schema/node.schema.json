@@ -34,6 +34,22 @@
       "type": "string",
       "description": "이 노드가 속한 Site의 id"
     },
+    "virtualization": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "물리/가상 구분. 없으면 physical. VM은 랙 U·전력 산정에서 빠지고(호스트가 이미 차지한다), host_node_id로 어느 물리 서버 위인지 표현한다.",
+      "properties": {
+        "kind": {
+          "enum": ["physical", "vm"],
+          "default": "physical",
+          "description": "physical=베어메탈 서버. vm=가상 머신 (하이퍼바이저 위)."
+        },
+        "host_node_id": {
+          "type": "string",
+          "description": "kind=vm일 때 이 VM이 올라가는 물리 노드의 id. 호스트의 vCPU/메모리 오버커밋 검증과 '호스트 N대 / VM M대' 구성표에 쓰인다."
+        }
+      }
+    },
     "os": {
       "type": "object",
       "additionalProperties": false,
