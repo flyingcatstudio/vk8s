@@ -200,6 +200,18 @@
     line-height: 1;
     flex-shrink: 0;
   }
+  /* 트리 행 hover 삭제 — 평소엔 자리만 잡고 보이지 않는다. 선택된 행에서는 항상 보인다. */
+  .tree-item .tree-del {
+    flex-shrink: 0;
+    margin-left: 2px;
+    font-size: 11px;
+    line-height: 1;
+    opacity: 0;
+    transition: opacity .12s;
+  }
+  .tree-item:hover .tree-del,
+  .tree-item.selected .tree-del { opacity: 0.55; }
+  .tree-item .tree-del:hover { opacity: 1; }
   .tree-item.child { padding-left: 24px; }
   .tree-actions {
     margin-top: 8px;
@@ -4457,6 +4469,27 @@ function renderViewTabs() {
 }
 
 //============ Render: Tree ============
+// 트리 행 hover 삭제. 지금까지 엔티티를 지우려면 인스펙터를 먼저 열어야 했다 — 트리에서 바로 지운다.
+// 행 클릭(선택)과 겹치지 않게 stopPropagation 하고, 확인은 여기서 한 번만 받는다
+// (노드를 가진 사이트만 예외 — deleteEntity가 "노드 N개도 함께 삭제" 확인을 따로 띄운다).
+function treeDelBtn(kind, id, name, opts = {}) {
+  const locked = !!opts.locked;
+  return el("span", {
+    class: "tree-del",
+    title: locked ? `${name} — 잠겨 있음 (삭제 시 확인)` : `${name} 삭제`,
+    onclick: (e) => {
+      e.stopPropagation();
+      if (!opts.skipConfirm) {
+        const msg = locked
+          ? `'${name}'은(는) 잠겨 있습니다. 정말 삭제할까요?`
+          : `${opts.what || ""} '${name}' 삭제?${opts.hint ? `\n${opts.hint}` : ""}`;
+        if (!confirm(msg)) return;
+      }
+      deleteEntity(kind, id);
+    },
+  }, ["🗑"]);
+}
+
 function renderTree() {
   const root = $("#tree");
   root.innerHTML = "";
@@ -4486,6 +4519,10 @@ function renderTree() {
       el("span", { class: "icon" }, [s.kind === "onprem" ? "🏢" : "☁"]),
       el("span", { class: "label" }, [s.name]),
       el("span", { class: "meta" }, [meta]),
+      // 노드를 가진 사이트는 deleteEntity가 더 구체적인 확인을 띄우므로 여기선 묻지 않는다.
+      treeDelBtn("site", s.id, s.name, {
+        what: "사이트", skipConfirm: (s.node_ids || []).length > 0,
+      }),
     ]));
     // child nodes
     const nodes = (s.node_ids || []).map(id => p.nodes.find(n => n.id === id)).filter(Boolean);
@@ -4501,6 +4538,7 @@ function renderTree() {
         el("span", { class: "icon" }, ["▣"]),
         el("span", { class: "label" }, [n.name]),
         el("span", { class: "meta", style: cluster ? { color: "var(--purple)" } : {} }, [meta]),
+        treeDelBtn("node", n.id, n.name, { what: "노드", hint: "클러스터·사이트에서 함께 제외됩니다." }),
       ]));
     }
     // L4 LBs
@@ -4512,6 +4550,7 @@ function renderTree() {
         el("span", { class: "icon" }, ["⚖"]),
         el("span", { class: "label" }, [l4.name]),
         el("span", { class: "meta" }, [l4.vendor || l4.kind || ""]),
+        treeDelBtn("l4", l4.id, l4.name, { what: "L4" }),
       ]));
     }
     // Storages
@@ -4523,6 +4562,7 @@ function renderTree() {
         el("span", { class: "icon" }, ["💾"]),
         el("span", { class: "label" }, [st.name]),
         el("span", { class: "meta" }, [st.kind || ""]),
+        treeDelBtn("storage", st.id, st.name, { what: "스토리지" }),
       ]));
     }
     // Network devices
@@ -4535,6 +4575,7 @@ function renderTree() {
         el("span", { class: "icon" }, [ndIcon[d.kind] || "▢"]),
         el("span", { class: "label" }, [d.name]),
         el("span", { class: "meta" }, [d.kind || ""]),
+        treeDelBtn("netdev", d.id, d.name, { what: "네트워크 장비" }),
       ]));
     }
     // External services
@@ -4547,6 +4588,7 @@ function renderTree() {
         el("span", { class: "icon" }, [extIcon[e.kind] || "❓"]),
         el("span", { class: "label" }, [e.name]),
         el("span", { class: "meta" }, [e.kind || ""]),
+        treeDelBtn("extsvc", e.id, e.name, { what: "외부 서비스" }),
       ]));
     }
   }
@@ -4569,6 +4611,7 @@ function renderTree() {
         el("span", { class: "icon" }, ["⇆"]),
         el("span", { class: "label" }, [link.name || `${fromSite?.name || "?"}→${toSite?.name || "?"}`]),
         el("span", { class: "meta" }, [link.kind]),
+        treeDelBtn("sitelink", link.id, link.name || "사이트 연결", { what: "사이트 연결" }),
       ]));
     }
     if ((p.sites?.length || 0) > 1) {
@@ -4603,6 +4646,10 @@ function renderTree() {
       el("span", { class: "label" }, [c.name]),
       c.locked ? el("span", { class: "lock-dot", title: "Locked" }, ["●"]) : null,
       el("span", { class: "meta" }, [meta]),
+      treeDelBtn("cluster", c.id, c.name, {
+        what: groupKindLabel(c), locked: isClusterLocked(c),
+        hint: `${(c.workloads || []).length}개 ${wlKindLabel(c)}도 함께 삭제됩니다. 노드는 unassigned로 돌아갑니다.`,
+      }),
     ]));
     for (const w of (c.workloads || [])) {
       clustersSec.appendChild(el("div", {
@@ -4613,6 +4660,7 @@ function renderTree() {
         el("span", { class: "label" }, [w.name]),
         w.locked ? el("span", { class: "lock-dot", title: "Locked" }, ["●"]) : null,
         el("span", { class: "meta" }, [w.category]),
+        treeDelBtn("workload", w.id, w.name, { what: wlKindLabel(c), locked: isWorkloadLocked(w) }),
       ]));
     }
   }
