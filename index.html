@@ -43,7 +43,8 @@
   body {
     background: var(--bg);
     color: var(--text);
-    font-family: 'Pretendard', 'Outfit', -apple-system, sans-serif;
+    font-family: 'Pretendard', 'Outfit', -apple-system, sans-serif,
+                 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji';
     font-size: 13px;
     line-height: 1.5;
   }
@@ -1950,6 +1951,31 @@ const isVmGroup = (c) => c?.platform === "vm";
 const groupIcon = (c) => (isVmGroup(c) ? "▤" : "⎈");
 const groupKindLabel = (c) => (isVmGroup(c) ? "VM Group" : "Cluster");
 const wlKindLabel = (c) => (isVmGroup(c) ? "서비스" : "Workload");
+// 동작 아이콘. 이모지(🗑 📋 📥)는 폰트에 글리프가 없으면 ?/두부로 떨어지는데, 삭제·복사는
+// 뜻이 어긋나면 안 되는 컨트롤이라 폰트에 맡기지 않고 직접 그린다. currentColor라 hover 색이 그대로 먹는다.
+const ACTION_ICON_PATHS = {
+  // 휴지통 — 뚜껑 + 통 + 세로선 2개
+  trash: ["M3 5.5h10", "M6.5 5.5V4a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v1.5",
+          "M4.5 5.5l.6 7.2a1.2 1.2 0 0 0 1.2 1.1h3.4a1.2 1.2 0 0 0 1.2-1.1l.6-7.2",
+          "M6.8 8v3.4", "M9.2 8v3.4"],
+  // 복사 — 겹친 사각형 둘
+  copy:  ["M6 6h6.5v6.5H6z", "M3.5 3.5H10v1.2", "M3.5 3.5v6.6h1.2"],
+  // 붙여넣기 — 클립보드
+  paste: ["M4.5 3.5h7v10h-7z", "M6.5 3.5V2.6h3v.9", "M6.5 7.5h3", "M6.5 10h3"],
+  // 눈 — 표시/숨김
+  eye:   ["M1.8 8s2.4-4 6.2-4 6.2 4 6.2 4-2.4 4-6.2 4S1.8 8 1.8 8z", "M8 9.6a1.6 1.6 0 1 0 0-3.2 1.6 1.6 0 0 0 0 3.2z"],
+};
+function actionIcon(name, size = 15) {
+  const g = svgNode("svg", {
+    width: size, height: size, viewBox: "0 0 16 16", fill: "none",
+    stroke: "currentColor", "stroke-width": 1.3,
+    "stroke-linecap": "round", "stroke-linejoin": "round",
+    style: "display:inline-block; vertical-align:-2px; pointer-events:none",
+    "aria-hidden": "true",
+  });
+  for (const d of (ACTION_ICON_PATHS[name] || [])) g.appendChild(svgNode("path", { d }));
+  return g;
+}
 const slug = s => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 const uid  = () => Math.random().toString(36).slice(2, 8);
 function clsLevel(pct) {
@@ -4487,7 +4513,7 @@ function treeDelBtn(kind, id, name, opts = {}) {
       }
       deleteEntity(kind, id);
     },
-  }, ["🗑"]);
+  }, [actionIcon("trash")]);
 }
 
 function renderTree() {
@@ -4684,7 +4710,7 @@ function renderTree() {
     class: "add-btn",
     title: "클립보드의 클러스터 붙여넣기 (워크로드 + 노드 함께 복제)",
     onclick: pasteClusterIntoProject,
-  }, ["📥 Paste Cluster"]));
+  }, [actionIcon("paste"), " Paste Cluster"]));
   root.appendChild(actions);
 }
 
@@ -4775,7 +4801,7 @@ function renderSiteInspector(root, id) {
     el("button", {
       class: "delete", title: "Delete site",
       onclick: () => { if (confirm(`사이트 '${s.name}' 삭제?`)) deleteEntity("site", id); },
-    }, ["🗑"]),
+    }, [actionIcon("trash")]),
   ]));
 
   const nameField = el("input", {
@@ -5064,7 +5090,7 @@ function renderNodeInspector(root, id) {
     el("button", {
       class: "delete", title: "Delete node",
       onclick: () => { if (confirm(`노드 '${n.name}' 삭제?`)) deleteEntity("node", id); },
-    }, ["🗑"]),
+    }, [actionIcon("trash")]),
   ]));
 
   root.appendChild(el("div", { class: "field" }, [
@@ -5607,7 +5633,7 @@ function renderClusterInspector(root, id) {
     el("button", {
       class: "duplicate", title: "클러스터 복사 (워크로드 + 노드 포함)",
       onclick: () => copyEntityToClipboard("cluster", id),
-    }, ["📋"]),
+    }, [actionIcon("copy")]),
     el("button", {
       class: "delete", title: "Delete cluster",
       onclick: () => {
@@ -5615,7 +5641,7 @@ function renderClusterInspector(root, id) {
         if (!cLocked && !confirm(`클러스터 '${c.name}' 삭제? (노드는 unassigned로 돌아갑니다)`)) return;
         deleteEntity("cluster", id);
       },
-    }, ["🗑"]),
+    }, [actionIcon("trash")]),
   ]));
   if (cLocked) {
     root.appendChild(el("div", { class: "lock-banner" }, [
@@ -6015,7 +6041,7 @@ function renderClusterInspector(root, id) {
       title: "Paste workload from clipboard",
       style: { padding: "0 12px" },
       onclick: () => pasteWorkloadIntoCluster(c.id),
-    }, ["📥 Paste"]),
+    }, [actionIcon("paste"), " Paste"]),
   ]));
 
   // Quick deploy — pre-configured framework/product templates with optional HA mode
@@ -6099,7 +6125,7 @@ function renderL4Inspector(root, id) {
     el("button", {
       class: "delete", title: "Delete",
       onclick: () => { if (confirm(`'${l4.name}' 삭제?`)) deleteL4(id); },
-    }, ["🗑"]),
+    }, [actionIcon("trash")]),
   ]));
 
   root.appendChild(el("div", { class: "field" }, [
@@ -6200,7 +6226,7 @@ function renderStorageInspector(root, id) {
     el("button", {
       class: "delete", title: "Delete",
       onclick: () => { if (confirm(`'${st.name}' 삭제?`)) deleteStorage(id); },
-    }, ["🗑"]),
+    }, [actionIcon("trash")]),
   ]));
 
   root.appendChild(el("div", { class: "field" }, [
@@ -6305,7 +6331,7 @@ function renderNetworkDeviceInspector(root, id) {
     el("button", {
       class: "delete",
       onclick: () => { if (confirm(`'${d.name}' 삭제?`)) deleteNetworkDevice(id); },
-    }, ["🗑"]),
+    }, [actionIcon("trash")]),
   ]));
 
   root.appendChild(el("div", { class: "field" }, [
@@ -6403,7 +6429,7 @@ function renderExternalServiceInspector(root, id) {
     el("button", {
       class: "delete",
       onclick: () => { if (confirm(`'${e.name}' 삭제?`)) deleteExternalService(id); },
-    }, ["🗑"]),
+    }, [actionIcon("trash")]),
   ]));
 
   root.appendChild(el("div", { class: "field" }, [
@@ -6513,7 +6539,7 @@ function renderSiteLinkInspector(root, id) {
     el("button", {
       class: "delete",
       onclick: () => { if (confirm(`'${link.name}' 삭제?`)) deleteSiteLink(id); },
-    }, ["🗑"]),
+    }, [actionIcon("trash")]),
   ]));
 
   root.appendChild(el("div", { class: "field" }, [
@@ -6628,7 +6654,7 @@ function _swEditor(id, w) {
       el("span", {
         style: { cursor: "pointer", fontSize: "11px", color: "var(--text3)" }, title: "삭제",
         onclick: () => save(list.filter((_, k) => k !== i)),
-      }, ["🗑"]),
+      }, [actionIcon("trash")]),
     ]));
   });
   box.appendChild(el("button", {
@@ -6662,7 +6688,7 @@ function renderWorkloadInspector(root, id) {
     el("button", {
       class: "duplicate", title: "Copy workload to clipboard",
       onclick: () => copyEntityToClipboard("workload", id),
-    }, ["📋"]),
+    }, [actionIcon("copy")]),
     el("button", {
       class: "delete", title: "Delete workload",
       onclick: () => {
@@ -6670,7 +6696,7 @@ function renderWorkloadInspector(root, id) {
         if (!wlLocked && !confirm(`'${w.name}' 삭제?`)) return;
         deleteWorkload(id);
       },
-    }, ["🗑"]),
+    }, [actionIcon("trash")]),
   ]));
   if (wlLocked) {
     root.appendChild(el("div", { class: "lock-banner" }, [
@@ -15512,7 +15538,7 @@ function _checklistItemRow(p, item) {
     else setCheck(p, item.key, { hidden: true });
     if (state.ui.checklistEditingKey === item.key) state.ui.checklistEditingKey = null;
     emit(); saveSoon();
-  } }, [item.custom ? "🗑" : "✕"]);
+  } }, [item.custom ? actionIcon("trash") : "✕"]);
   return el("div", { style: { display: "flex", alignItems: "flex-start", gap: "8px", padding: "8px 14px", borderBottom: "1px solid var(--border)" } }, [cb, text, note, editBtn, delBtn]);
 }
 
@@ -16134,11 +16160,13 @@ function renderConceptSvg(p, model, opts) {
           }, [_cdFit(sub, CD.BOX_W - 14, 10.5)]));
         }
         // 계층 오버라이드 표시 — 도출된 행이 아니라 사람이 옮긴 것임을 그림에서 알 수 있게.
+        // 문자가 아니라 도형으로 그린다: 내보낸 SVG를 여는 쪽 폰트에 글리프가 있으리란 보장이 없다.
         if (b.rowMoved) {
-          box.appendChild(svgNode("text", {
-            x: bx + CD.BOX_W - 6, y: by + 12, "text-anchor": "end",
-            fill: "#fff", "fill-opacity": 0.6, "font-size": 9,
-          }, ["✥"]));
+          const mx = bx + CD.BOX_W - 11, my = by + 9;
+          box.appendChild(svgNode("path", {
+            d: `M${mx},${my - 4} l2.6,3 h-5.2 z M${mx},${my + 4} l2.6,-3 h-5.2 z`,
+            fill: "#fff", "fill-opacity": 0.65,
+          }));
         }
         g.appendChild(box);
         boxHandles.push({ key: b.key, node: box });
@@ -16378,7 +16406,7 @@ function _cdSelectionPanel(p, model) {
     chip(rowLabel, "계층"),
     chip(colName, model.groupBy === "cluster" ? "배포 그룹" : "구역"),
     chip(b.derived ? "자동 도출" : "직접 추가"),
-    b.rowMoved ? chip("✥ 계층 이동됨", `도출 계층: ${CONCEPT_ROWS.find(r => r.id === b.derivedRow)?.label || b.derivedRow}`) : null,
+    b.rowMoved ? chip("↕ 계층 이동됨", `도출 계층: ${CONCEPT_ROWS.find(r => r.id === b.derivedRow)?.label || b.derivedRow}`) : null,
     el("span", { style: { flex: 1 } }, []),
     b.ref ? el("button", {
       style: { background: "transparent", border: "1px solid var(--border)", color: "var(--text2)", padding: "2px 8px", borderRadius: "4px", cursor: "pointer", fontSize: "10px", fontFamily: "inherit" },
@@ -16440,14 +16468,15 @@ function _cdSelectionPanel(p, model) {
       background: "var(--surface2)", border: "1px solid var(--border)",
       color: danger ? "var(--red)" : "var(--text)", padding: "4px 10px", borderRadius: "4px",
       cursor: "pointer", fontSize: "11px", fontFamily: "inherit",
+      display: "inline-flex", alignItems: "center", gap: "5px",
     }, title, onclick,
-  }, [txt]);
+  }, [].concat(txt));
   const actions = el("div", { style: { display: "flex", gap: "6px", flexWrap: "wrap" } }, [
-    btn("👁 개념도에서 제외", "이 요소를 그림에서 뺍니다 (아래 '제외된 요소'에서 되돌릴 수 있습니다)",
+    btn([actionIcon("eye"), "개념도에서 제외"], "이 요소를 그림에서 뺍니다 (아래 '제외된 요소'에서 되돌릴 수 있습니다)",
       () => { setConceptBox(p, b.key, { hidden: true }); state.ui.conceptSelected = null; emit(); saveSoon(); }),
     (b.labelOverride || b.note || b.rowMoved || b.zoneMoved) ? btn("↺ 이 요소 초기화", "라벨·비고·계층·구역 수정을 지우고 도출값으로 되돌립니다",
       () => { delete _conceptState(p).boxes[b.key]; emit(); saveSoon(); }) : null,
-    b.derived ? null : btn("🗑 삭제", "직접 추가한 요소를 지웁니다",
+    b.derived ? null : btn([actionIcon("trash"), "삭제"], "직접 추가한 요소를 지웁니다",
       () => { removeConceptBox(p, b.key); state.ui.conceptSelected = null; emit(); saveSoon(); }, true),
   ]);
   panel.appendChild(actions);
