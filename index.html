@@ -1964,6 +1964,11 @@ const ACTION_ICON_PATHS = {
   paste: ["M4.5 3.5h7v10h-7z", "M6.5 3.5V2.6h3v.9", "M6.5 7.5h3", "M6.5 10h3"],
   // 눈 — 표시/숨김
   eye:   ["M1.8 8s2.4-4 6.2-4 6.2 4 6.2 4-2.4 4-6.2 4S1.8 8 1.8 8z", "M8 9.6a1.6 1.6 0 1 0 0-3.2 1.6 1.6 0 0 0 0 3.2z"],
+  // 복제 — 원본 사각형 + "하나 더" 더하기. copy(클립보드로 복사)와 구분되게 그린다.
+  duplicate: ["M2.6 2.8h7v7h-7z", "M12 8.4v5", "M9.5 10.9h5"],
+  // 다이어그램 — 노드 3개 + 연결선
+  diagram: ["M3.4 4.4h3v2.6h-3z", "M9.6 3h3v2.6h-3z", "M9.6 10.4h3V13h-3z",
+            "M6.4 5.7h3.2", "M4.9 7v4.7h4.7", "M9.6 11.7H4.9"],
 };
 function actionIcon(name, size = 15) {
   const g = svgNode("svg", {
@@ -5086,7 +5091,7 @@ function renderNodeInspector(root, id) {
     el("button", {
       class: "duplicate", title: "Duplicate node",
       onclick: () => duplicateNode(id),
-    }, ["⎘"]),
+    }, [actionIcon("duplicate")]),
     el("button", {
       class: "delete", title: "Delete node",
       onclick: () => { if (confirm(`노드 '${n.name}' 삭제?`)) deleteEntity("node", id); },
@@ -8383,7 +8388,7 @@ function renderTopology() {
       class: "view-tab" + (mode === "diagram" ? " active" : ""),
       style: { padding: "5px 14px", fontSize: "12px", borderRadius: "5px", border: "1px solid var(--border)" },
       onclick: () => { state.ui.topologyMode = "diagram"; emit(); },
-    }, ["⛬ Diagram"]),
+    }, [actionIcon("diagram", 13), " Diagram"]),
     el("span", { style: { flex: 1 } }, []),
     el("span", { style: { fontSize: "10px", color: "var(--text3)", fontStyle: "italic" } }, [
       mode === "diagram" ? "여러 연결 레이어를 켜고 끌 수 있습니다" : "사이트별 카드 + 노드 그리드",
@@ -8687,7 +8692,7 @@ function renderTopologyGrid(root, p) {
 function renderTopologyDiagram(root, p) {
   if (!p.sites.length) {
     root.appendChild(el("div", { class: "view-empty" }, [
-      el("div", { class: "big" }, ["⛬"]),
+      el("div", { class: "big" }, [actionIcon("diagram", 40)]),
       el("h2", {}, ["사이트가 없습니다"]),
       el("p", {}, ["트리에서 ＋ Add Site로 첫 사이트를 만드세요."]),
     ]));
