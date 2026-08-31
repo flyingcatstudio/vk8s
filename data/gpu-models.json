@@ -15,21 +15,9 @@
       "nvlink_note": "HGX B300 NVL16 / DGX B300 급 풀스펙 보드 (액냉 고밀도). NVSwitch 5세대. FP16은 B200과 동급, FP4가 ~1.5×",
       "mig_capable": true,
       "mig_profiles": [
-        {
-          "name": "1g.34gb",
-          "count": 7,
-          "vram_gb": 34
-        },
-        {
-          "name": "2g.67gb",
-          "count": 3,
-          "vram_gb": 67
-        },
-        {
-          "name": "7g.269gb",
-          "count": 1,
-          "vram_gb": 269
-        }
+        { "name": "1g.34gb", "count": 7, "vram_gb": 34 },
+        { "name": "2g.67gb", "count": 3, "vram_gb": 67 },
+        { "name": "7g.269gb", "count": 1, "vram_gb": 269 }
       ]
     },
     "B300-SXM": {
@@ -45,21 +33,9 @@
       "nvlink_note": "HGX B300 NVL8 — OEM 공랭 8-GPU 보드(Dell XE9780 / HPE XD690 / Lenovo SR680a V4 / AWS p6-b300)의 270GB·1100W 변종. NVSwitch 5세대",
       "mig_capable": true,
       "mig_profiles": [
-        {
-          "name": "1g.32gb",
-          "count": 7,
-          "vram_gb": 32
-        },
-        {
-          "name": "2g.63gb",
-          "count": 3,
-          "vram_gb": 63
-        },
-        {
-          "name": "7g.252gb",
-          "count": 1,
-          "vram_gb": 252
-        }
+        { "name": "1g.32gb", "count": 7, "vram_gb": 32 },
+        { "name": "2g.63gb", "count": 3, "vram_gb": 63 },
+        { "name": "7g.252gb", "count": 1, "vram_gb": 252 }
       ]
     },
     "B200-SXM": {
@@ -75,36 +51,12 @@
       "nvlink_note": "NVSwitch 5세대 (HGX B200)",
       "mig_capable": true,
       "mig_profiles": [
-        {
-          "name": "1g.23gb",
-          "count": 7,
-          "vram_gb": 23
-        },
-        {
-          "name": "1g.45gb",
-          "count": 4,
-          "vram_gb": 45
-        },
-        {
-          "name": "2g.45gb",
-          "count": 3,
-          "vram_gb": 45
-        },
-        {
-          "name": "3g.90gb",
-          "count": 2,
-          "vram_gb": 90
-        },
-        {
-          "name": "4g.90gb",
-          "count": 1,
-          "vram_gb": 90
-        },
-        {
-          "name": "7g.180gb",
-          "count": 1,
-          "vram_gb": 180
-        }
+        { "name": "1g.23gb", "count": 7, "vram_gb": 23 },
+        { "name": "1g.45gb", "count": 4, "vram_gb": 45 },
+        { "name": "2g.45gb", "count": 3, "vram_gb": 45 },
+        { "name": "3g.90gb", "count": 2, "vram_gb": 90 },
+        { "name": "4g.90gb", "count": 1, "vram_gb": 90 },
+        { "name": "7g.180gb", "count": 1, "vram_gb": 180 }
       ]
     },
     "B100-SXM": {
@@ -120,36 +72,12 @@
       "nvlink_note": "NVSwitch 5세대. B200 대비 가격↓ 전력↓",
       "mig_capable": true,
       "mig_profiles": [
-        {
-          "name": "1g.23gb",
-          "count": 7,
-          "vram_gb": 23
-        },
-        {
-          "name": "1g.45gb",
-          "count": 4,
-          "vram_gb": 45
-        },
-        {
-          "name": "2g.45gb",
-          "count": 3,
-          "vram_gb": 45
-        },
-        {
-          "name": "3g.90gb",
-          "count": 2,
-          "vram_gb": 90
-        },
-        {
-          "name": "4g.90gb",
-          "count": 1,
-          "vram_gb": 90
-        },
-        {
-          "name": "7g.180gb",
-          "count": 1,
-          "vram_gb": 180
-        }
+        { "name": "1g.23gb", "count": 7, "vram_gb": 23 },
+        { "name": "1g.45gb", "count": 4, "vram_gb": 45 },
+        { "name": "2g.45gb", "count": 3, "vram_gb": 45 },
+        { "name": "3g.90gb", "count": 2, "vram_gb": 90 },
+        { "name": "4g.90gb", "count": 1, "vram_gb": 90 },
+        { "name": "7g.180gb", "count": 1, "vram_gb": 180 }
       ]
     },
     "H200-NVL": {
@@ -165,36 +93,12 @@
       "nvlink_note": "NVLink Bridge로 2장 페어링. PCIe 변형",
       "mig_capable": true,
       "mig_profiles": [
-        {
-          "name": "1g.18gb",
-          "count": 7,
-          "vram_gb": 18
-        },
-        {
-          "name": "1g.35gb",
-          "count": 4,
-          "vram_gb": 35
-        },
-        {
-          "name": "2g.35gb",
-          "count": 3,
-          "vram_gb": 35
-        },
-        {
-          "name": "3g.71gb",
-          "count": 2,
-          "vram_gb": 71
-        },
-        {
-          "name": "4g.71gb",
-          "count": 1,
-          "vram_gb": 71
-        },
-        {
-          "name": "7g.141gb",
-          "count": 1,
-          "vram_gb": 141
-        }
+        { "name": "1g.18gb", "count": 7, "vram_gb": 18 },
+        { "name": "1g.35gb", "count": 4, "vram_gb": 35 },
+        { "name": "2g.35gb", "count": 3, "vram_gb": 35 },
+        { "name": "3g.71gb", "count": 2, "vram_gb": 71 },
+        { "name": "4g.71gb", "count": 1, "vram_gb": 71 },
+        { "name": "7g.141gb", "count": 1, "vram_gb": 141 }
       ]
     },
     "H100-NVL": {
@@ -207,29 +111,13 @@
       "fp16_tflops": 1979,
       "released": 2023,
       "nvlink_capable": true,
-      "nvlink_note": "2장을 NVLink 브리지로 묶어 188GB로 쓰는 제품(카드 1장 기준 기재). 짝수 장으로 실장한다.",
+      "nvlink_note": "NVLink Bridge로 2장을 묶어 188GB로 쓰는 제품 — 카드 1장 기준 기재, 짝수 장 실장",
       "mig_capable": true,
       "mig_profiles": [
-        {
-          "name": "1g.12gb",
-          "count": 7,
-          "vram_gb": 12
-        },
-        {
-          "name": "2g.24gb",
-          "count": 3,
-          "vram_gb": 24
-        },
-        {
-          "name": "3g.47gb",
-          "count": 2,
-          "vram_gb": 47
-        },
-        {
-          "name": "7g.94gb",
-          "count": 1,
-          "vram_gb": 94
-        }
+        { "name": "1g.12gb", "count": 7, "vram_gb": 12 },
+        { "name": "2g.24gb", "count": 3, "vram_gb": 24 },
+        { "name": "3g.47gb", "count": 2, "vram_gb": 47 },
+        { "name": "7g.94gb", "count": 1, "vram_gb": 94 }
       ]
     },
     "RTX-PRO-6000-Blackwell-SE": {
@@ -245,21 +133,9 @@
       "nvlink_note": "RTX PRO 6000 Blackwell Server Edition — NVLink 없음(PCIe Gen5 전용). L40S 후속 추론/그래픽 카드",
       "mig_capable": true,
       "mig_profiles": [
-        {
-          "name": "1g.24gb",
-          "count": 4,
-          "vram_gb": 24
-        },
-        {
-          "name": "2g.48gb",
-          "count": 2,
-          "vram_gb": 48
-        },
-        {
-          "name": "4g.96gb",
-          "count": 1,
-          "vram_gb": 96
-        }
+        { "name": "1g.24gb", "count": 4, "vram_gb": 24 },
+        { "name": "2g.48gb", "count": 2, "vram_gb": 48 },
+        { "name": "4g.96gb", "count": 1, "vram_gb": 96 }
       ]
     },
     "L40": {
@@ -280,94 +156,47 @@
       "family": "Hopper",
       "form_factor": "SXM",
       "vram_gb": 141,
+      "vram_type": "HBM3e",
       "tdp_w": 700,
       "fp16_tflops": 1979,
       "released": 2024,
       "nvlink_capable": true,
       "mig_capable": true,
       "mig_profiles": [
-        {
-          "name": "1g.18gb",
-          "count": 7,
-          "vram_gb": 18
-        },
-        {
-          "name": "1g.35gb",
-          "count": 4,
-          "vram_gb": 35
-        },
-        {
-          "name": "2g.35gb",
-          "count": 3,
-          "vram_gb": 35
-        },
-        {
-          "name": "3g.71gb",
-          "count": 2,
-          "vram_gb": 71
-        },
-        {
-          "name": "4g.71gb",
-          "count": 1,
-          "vram_gb": 71
-        },
-        {
-          "name": "7g.141gb",
-          "count": 1,
-          "vram_gb": 141
-        }
-      ],
-      "vram_type": "HBM3e"
+        { "name": "1g.18gb", "count": 7, "vram_gb": 18 },
+        { "name": "1g.35gb", "count": 4, "vram_gb": 35 },
+        { "name": "2g.35gb", "count": 3, "vram_gb": 35 },
+        { "name": "3g.71gb", "count": 2, "vram_gb": 71 },
+        { "name": "4g.71gb", "count": 1, "vram_gb": 71 },
+        { "name": "7g.141gb", "count": 1, "vram_gb": 141 }
+      ]
     },
     "H100-SXM": {
       "vendor": "NVIDIA",
       "family": "Hopper",
       "form_factor": "SXM",
       "vram_gb": 80,
+      "vram_type": "HBM3",
       "tdp_w": 700,
       "fp16_tflops": 1979,
       "released": 2022,
       "nvlink_capable": true,
       "mig_capable": true,
       "mig_profiles": [
-        {
-          "name": "1g.10gb",
-          "count": 7,
-          "vram_gb": 10
-        },
-        {
-          "name": "1g.20gb",
-          "count": 4,
-          "vram_gb": 20
-        },
-        {
-          "name": "2g.20gb",
-          "count": 3,
-          "vram_gb": 20
-        },
-        {
-          "name": "3g.40gb",
-          "count": 2,
-          "vram_gb": 40
-        },
-        {
-          "name": "4g.40gb",
-          "count": 1,
-          "vram_gb": 40
-        },
-        {
-          "name": "7g.80gb",
-          "count": 1,
-          "vram_gb": 80
-        }
-      ],
-      "vram_type": "HBM3"
+        { "name": "1g.10gb", "count": 7, "vram_gb": 10 },
+        { "name": "1g.20gb", "count": 4, "vram_gb": 20 },
+        { "name": "2g.20gb", "count": 3, "vram_gb": 20 },
+        { "name": "3g.40gb", "count": 2, "vram_gb": 40 },
+        { "name": "4g.40gb", "count": 1, "vram_gb": 40 },
+        { "name": "7g.80gb", "count": 1, "vram_gb": 80 }
+      ]
     },
     "H100-PCIe": {
       "vendor": "NVIDIA",
       "family": "Hopper",
       "form_factor": "PCIe-FH",
       "vram_gb": 80,
+      "vram_type": "HBM3",
       "tdp_w": 350,
       "fp16_tflops": 1513,
       "released": 2022,
@@ -375,83 +204,39 @@
       "nvlink_note": "NVLink Bridge로 2장 페어링만 가능",
       "mig_capable": true,
       "mig_profiles": [
-        {
-          "name": "1g.10gb",
-          "count": 7,
-          "vram_gb": 10
-        },
-        {
-          "name": "1g.20gb",
-          "count": 4,
-          "vram_gb": 20
-        },
-        {
-          "name": "2g.20gb",
-          "count": 3,
-          "vram_gb": 20
-        },
-        {
-          "name": "3g.40gb",
-          "count": 2,
-          "vram_gb": 40
-        },
-        {
-          "name": "4g.40gb",
-          "count": 1,
-          "vram_gb": 40
-        },
-        {
-          "name": "7g.80gb",
-          "count": 1,
-          "vram_gb": 80
-        }
-      ],
-      "vram_type": "HBM3"
+        { "name": "1g.10gb", "count": 7, "vram_gb": 10 },
+        { "name": "1g.20gb", "count": 4, "vram_gb": 20 },
+        { "name": "2g.20gb", "count": 3, "vram_gb": 20 },
+        { "name": "3g.40gb", "count": 2, "vram_gb": 40 },
+        { "name": "4g.40gb", "count": 1, "vram_gb": 40 },
+        { "name": "7g.80gb", "count": 1, "vram_gb": 80 }
+      ]
     },
     "A100-SXM-80G": {
       "vendor": "NVIDIA",
       "family": "Ampere",
       "form_factor": "SXM",
       "vram_gb": 80,
+      "vram_type": "HBM2e",
       "tdp_w": 400,
       "fp16_tflops": 624,
       "released": 2020,
       "nvlink_capable": true,
       "mig_capable": true,
       "mig_profiles": [
-        {
-          "name": "1g.10gb",
-          "count": 7,
-          "vram_gb": 10
-        },
-        {
-          "name": "2g.20gb",
-          "count": 3,
-          "vram_gb": 20
-        },
-        {
-          "name": "3g.40gb",
-          "count": 2,
-          "vram_gb": 40
-        },
-        {
-          "name": "4g.40gb",
-          "count": 1,
-          "vram_gb": 40
-        },
-        {
-          "name": "7g.80gb",
-          "count": 1,
-          "vram_gb": 80
-        }
-      ],
-      "vram_type": "HBM2e"
+        { "name": "1g.10gb", "count": 7, "vram_gb": 10 },
+        { "name": "2g.20gb", "count": 3, "vram_gb": 20 },
+        { "name": "3g.40gb", "count": 2, "vram_gb": 40 },
+        { "name": "4g.40gb", "count": 1, "vram_gb": 40 },
+        { "name": "7g.80gb", "count": 1, "vram_gb": 80 }
+      ]
     },
     "A100-PCIe-80G": {
       "vendor": "NVIDIA",
       "family": "Ampere",
       "form_factor": "PCIe-FH",
       "vram_gb": 80,
+      "vram_type": "HBM2e",
       "tdp_w": 300,
       "fp16_tflops": 624,
       "released": 2021,
@@ -459,57 +244,36 @@
       "nvlink_note": "NVLink Bridge로 2장 페어링만 가능",
       "mig_capable": true,
       "mig_profiles": [
-        {
-          "name": "1g.10gb",
-          "count": 7,
-          "vram_gb": 10
-        },
-        {
-          "name": "2g.20gb",
-          "count": 3,
-          "vram_gb": 20
-        },
-        {
-          "name": "3g.40gb",
-          "count": 2,
-          "vram_gb": 40
-        },
-        {
-          "name": "4g.40gb",
-          "count": 1,
-          "vram_gb": 40
-        },
-        {
-          "name": "7g.80gb",
-          "count": 1,
-          "vram_gb": 80
-        }
-      ],
-      "vram_type": "HBM2e"
+        { "name": "1g.10gb", "count": 7, "vram_gb": 10 },
+        { "name": "2g.20gb", "count": 3, "vram_gb": 20 },
+        { "name": "3g.40gb", "count": 2, "vram_gb": 40 },
+        { "name": "4g.40gb", "count": 1, "vram_gb": 40 },
+        { "name": "7g.80gb", "count": 1, "vram_gb": 80 }
+      ]
     },
     "L40S": {
       "vendor": "NVIDIA",
       "family": "Ada Lovelace",
       "form_factor": "PCIe-FH",
       "vram_gb": 48,
+      "vram_type": "GDDR6",
       "tdp_w": 350,
       "fp16_tflops": 362,
       "released": 2023,
       "nvlink_capable": false,
-      "mig_capable": false,
-      "vram_type": "GDDR6"
+      "mig_capable": false
     },
     "L4": {
       "vendor": "NVIDIA",
       "family": "Ada Lovelace",
       "form_factor": "PCIe-LP",
       "vram_gb": 24,
+      "vram_type": "GDDR6",
       "tdp_w": 72,
       "fp16_tflops": 121,
       "released": 2023,
       "nvlink_capable": false,
-      "mig_capable": false,
-      "vram_type": "GDDR6"
+      "mig_capable": false
     }
   }
 }
