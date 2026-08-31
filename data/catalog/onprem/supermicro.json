@@ -12,13 +12,32 @@
       "display_name": "Supermicro AS-4125GS-TNRT",
       "generation": "X13",
       "release_year": 2023,
-      "tags": ["4u", "gpu", "amd-epyc", "pcie", "h200-nvl", "h100-nvl"],
+      "tags": [
+        "4u",
+        "gpu",
+        "amd-epyc",
+        "pcie",
+        "h200-nvl",
+        "h100-nvl"
+      ],
       "notes": "4U AMD EPYC. 8× 더블폭 PCIe GPU. H200 NVL / H100 / L40S / L40 지원. NVLink Bridge 페어링.",
       "spec": {
         "vcpu": 96,
         "memory_gb": 1536,
-        "disks": [{ "size_gb": 3840, "type": "NVMe", "count": 8 }],
-        "nics": [{ "speed_gbps": 200, "count": 4, "interconnect": "InfiniBand" }],
+        "disks": [
+          {
+            "size_gb": 3840,
+            "type": "NVMe",
+            "count": 8
+          }
+        ],
+        "nics": [
+          {
+            "speed_gbps": 200,
+            "count": 4,
+            "interconnect": "InfiniBand"
+          }
+        ],
         "form_factor": "4U",
         "power": {
           "psu_max_w": 6600,
@@ -27,8 +46,17 @@
         },
         "gpu_chassis": {
           "max_count": 8,
-          "supported_form_factors": ["PCIe-FH"],
-          "supported_models": ["H200-NVL", "H100-PCIe", "A100-PCIe-80G", "L40S", "L40"],
+          "supported_form_factors": [
+            "PCIe-FH"
+          ],
+          "supported_models": [
+            "H200-NVL",
+            "H100-NVL",
+            "H100-PCIe",
+            "A100-PCIe-80G",
+            "L40S",
+            "L40"
+          ],
           "nvlink_topology": "bridge-pair"
         },
         "gpu": []
@@ -42,15 +70,37 @@
       "display_name": "Supermicro AS-A21GE-NBRT (HGX B200)",
       "generation": "X14-Blackwell",
       "release_year": 2024,
-      "tags": ["4u", "gpu", "amd-epyc", "sxm", "hgx", "blackwell", "b200", "training"],
+      "tags": [
+        "4u",
+        "gpu",
+        "amd-epyc",
+        "sxm",
+        "hgx",
+        "blackwell",
+        "b200",
+        "training"
+      ],
       "notes": "4U HGX B200 8장 (Blackwell SXM5, NVSwitch 5세대). AMD EPYC 9005. 가장 컴팩트한 8x B200 플랫폼.",
       "spec": {
         "vcpu": 192,
         "memory_gb": 3072,
-        "disks": [{ "size_gb": 3840, "type": "NVMe", "count": 16 }],
+        "disks": [
+          {
+            "size_gb": 3840,
+            "type": "NVMe",
+            "count": 16
+          }
+        ],
         "nics": [
-          { "speed_gbps": 800, "count": 8, "interconnect": "InfiniBand" },
-          { "speed_gbps": 100, "count": 2 }
+          {
+            "speed_gbps": 800,
+            "count": 8,
+            "interconnect": "InfiniBand"
+          },
+          {
+            "speed_gbps": 100,
+            "count": 2
+          }
         ],
         "form_factor": "4U",
         "power": {
@@ -60,8 +110,13 @@
         },
         "gpu_chassis": {
           "max_count": 8,
-          "supported_form_factors": ["SXM"],
-          "supported_models": ["B200-SXM", "B100-SXM"],
+          "supported_form_factors": [
+            "SXM"
+          ],
+          "supported_models": [
+            "B200-SXM",
+            "B100-SXM"
+          ],
           "nvlink_topology": "nvswitch-mesh"
         },
         "gpu": []
@@ -75,15 +130,35 @@
       "display_name": "Supermicro SYS-821GE-TNHR (HGX H100)",
       "generation": "X13",
       "release_year": 2023,
-      "tags": ["8u", "gpu", "sxm", "hgx", "h100", "training"],
+      "tags": [
+        "8u",
+        "gpu",
+        "sxm",
+        "hgx",
+        "h100",
+        "training"
+      ],
       "notes": "8U HGX H100 8장 (SXM5, NVSwitch). Intel Xeon. 대규모 LLM 훈련 표준.",
       "spec": {
         "vcpu": 112,
         "memory_gb": 2048,
-        "disks": [{ "size_gb": 3840, "type": "NVMe", "count": 16 }],
+        "disks": [
+          {
+            "size_gb": 3840,
+            "type": "NVMe",
+            "count": 16
+          }
+        ],
         "nics": [
-          { "speed_gbps": 400, "count": 8, "interconnect": "InfiniBand" },
-          { "speed_gbps": 100, "count": 2 }
+          {
+            "speed_gbps": 400,
+            "count": 8,
+            "interconnect": "InfiniBand"
+          },
+          {
+            "speed_gbps": 100,
+            "count": 2
+          }
         ],
         "form_factor": "8U",
         "power": {
@@ -93,8 +168,12 @@
         },
         "gpu_chassis": {
           "max_count": 8,
-          "supported_form_factors": ["SXM"],
-          "supported_models": ["H100-SXM"],
+          "supported_form_factors": [
+            "SXM"
+          ],
+          "supported_models": [
+            "H100-SXM"
+          ],
           "nvlink_topology": "nvswitch-mesh"
         },
         "gpu": []
@@ -108,15 +187,36 @@
       "display_name": "Supermicro SYS-821GV-TNR (HGX H200)",
       "generation": "X13",
       "release_year": 2024,
-      "tags": ["8u", "gpu", "sxm", "hgx", "h200", "training", "liquid-ready"],
+      "tags": [
+        "8u",
+        "gpu",
+        "sxm",
+        "hgx",
+        "h200",
+        "training",
+        "liquid-ready"
+      ],
       "notes": "8U HGX H200 8장 (SXM5, NVSwitch). H100 대비 VRAM 80GB→141GB. 액냉 옵션.",
       "spec": {
         "vcpu": 112,
         "memory_gb": 2048,
-        "disks": [{ "size_gb": 3840, "type": "NVMe", "count": 16 }],
+        "disks": [
+          {
+            "size_gb": 3840,
+            "type": "NVMe",
+            "count": 16
+          }
+        ],
         "nics": [
-          { "speed_gbps": 400, "count": 8, "interconnect": "InfiniBand" },
-          { "speed_gbps": 100, "count": 2 }
+          {
+            "speed_gbps": 400,
+            "count": 8,
+            "interconnect": "InfiniBand"
+          },
+          {
+            "speed_gbps": 100,
+            "count": 2
+          }
         ],
         "form_factor": "8U",
         "power": {
@@ -126,8 +226,13 @@
         },
         "gpu_chassis": {
           "max_count": 8,
-          "supported_form_factors": ["SXM"],
-          "supported_models": ["H100-SXM", "H200-SXM"],
+          "supported_form_factors": [
+            "SXM"
+          ],
+          "supported_models": [
+            "H100-SXM",
+            "H200-SXM"
+          ],
           "nvlink_topology": "nvswitch-mesh"
         },
         "gpu": []
@@ -141,15 +246,37 @@
       "display_name": "Supermicro SYS-822GS-NB3RT (HGX B300)",
       "generation": "X14",
       "release_year": 2025,
-      "tags": ["8u", "gpu", "sxm", "hgx", "blackwell-ultra", "b300", "training", "inference"],
+      "tags": [
+        "8u",
+        "gpu",
+        "sxm",
+        "hgx",
+        "blackwell-ultra",
+        "b300",
+        "training",
+        "inference"
+      ],
       "notes": "8U 공랭 HGX B300 8장 (Blackwell Ultra SXM, GPU당 288GB HBM3e·1400W, NVSwitch 5세대). Intel Xeon 6 ×2. 액냉 4U 변형(SYS-422GS-NBRT-LCC) 별도.",
       "spec": {
         "vcpu": 172,
         "memory_gb": 3072,
-        "disks": [{ "size_gb": 3840, "type": "NVMe", "count": 16 }],
+        "disks": [
+          {
+            "size_gb": 3840,
+            "type": "NVMe",
+            "count": 16
+          }
+        ],
         "nics": [
-          { "speed_gbps": 800, "count": 8, "interconnect": "InfiniBand" },
-          { "speed_gbps": 100, "count": 2 }
+          {
+            "speed_gbps": 800,
+            "count": 8,
+            "interconnect": "InfiniBand"
+          },
+          {
+            "speed_gbps": 100,
+            "count": 2
+          }
         ],
         "form_factor": "8U",
         "power": {
@@ -159,8 +286,12 @@
         },
         "gpu_chassis": {
           "max_count": 8,
-          "supported_form_factors": ["SXM"],
-          "supported_models": ["B300-SXM-288G"],
+          "supported_form_factors": [
+            "SXM"
+          ],
+          "supported_models": [
+            "B300-SXM-288G"
+          ],
           "nvlink_topology": "nvswitch-mesh"
         },
         "gpu": []
@@ -174,15 +305,36 @@
       "display_name": "Supermicro SYS-522GA-NRT (RTX PRO 6000)",
       "generation": "X14",
       "release_year": 2025,
-      "tags": ["5u", "gpu", "pcie", "blackwell", "rtx-pro-6000", "inference", "vdi"],
+      "tags": [
+        "5u",
+        "gpu",
+        "pcie",
+        "blackwell",
+        "rtx-pro-6000",
+        "inference",
+        "vdi"
+      ],
       "notes": "5U PCIe Gen5 GPU 서버. RTX PRO 6000 Blackwell Server Edition 최대 8장(96GB GDDR7 ×8 = 768GB). Intel Xeon 6900P ×2. NVLink 없음 — 추론/VDI/렌더링용.",
       "spec": {
         "vcpu": 256,
         "memory_gb": 3072,
-        "disks": [{ "size_gb": 3840, "type": "NVMe", "count": 12 }],
+        "disks": [
+          {
+            "size_gb": 3840,
+            "type": "NVMe",
+            "count": 12
+          }
+        ],
         "nics": [
-          { "speed_gbps": 400, "count": 2, "interconnect": "Ethernet" },
-          { "speed_gbps": 10, "count": 2 }
+          {
+            "speed_gbps": 400,
+            "count": 2,
+            "interconnect": "Ethernet"
+          },
+          {
+            "speed_gbps": 10,
+            "count": 2
+          }
         ],
         "form_factor": "5U",
         "power": {
@@ -192,8 +344,14 @@
         },
         "gpu_chassis": {
           "max_count": 8,
-          "supported_form_factors": ["PCIe-FH"],
-          "supported_models": ["RTX-PRO-6000-Blackwell-SE", "L40S", "L40"],
+          "supported_form_factors": [
+            "PCIe-FH"
+          ],
+          "supported_models": [
+            "RTX-PRO-6000-Blackwell-SE",
+            "L40S",
+            "L40"
+          ],
           "nvlink_topology": "none"
         },
         "gpu": []

@@ -12,13 +12,29 @@
       "display_name": "Dell PowerEdge R660",
       "generation": "16G",
       "release_year": 2023,
-      "tags": ["1u", "general", "rack", "dual-socket"],
+      "tags": [
+        "1u",
+        "general",
+        "rack",
+        "dual-socket"
+      ],
       "notes": "범용 1U 서버. GPU 미지원. 일반 워크로드(Web/API/DB) 호스팅에 적합.",
       "spec": {
         "vcpu": 64,
         "memory_gb": 512,
-        "disks": [{ "size_gb": 960, "type": "NVMe", "count": 8 }],
-        "nics": [{ "speed_gbps": 25, "count": 2 }],
+        "disks": [
+          {
+            "size_gb": 960,
+            "type": "NVMe",
+            "count": 8
+          }
+        ],
+        "nics": [
+          {
+            "speed_gbps": 25,
+            "count": 2
+          }
+        ],
         "form_factor": "1U",
         "power": {
           "psu_max_w": 1400,
@@ -42,13 +58,30 @@
       "display_name": "Dell PowerEdge R760",
       "generation": "16G",
       "release_year": 2023,
-      "tags": ["2u", "general", "rack", "dual-socket", "gpu-light"],
+      "tags": [
+        "2u",
+        "general",
+        "rack",
+        "dual-socket",
+        "gpu-light"
+      ],
       "notes": "범용 2U. 라이트 GPU(L4/L40/L40S 1-2장)까지 가능. 고밀도 GPU는 R760xa 권장.",
       "spec": {
         "vcpu": 64,
         "memory_gb": 1024,
-        "disks": [{ "size_gb": 1920, "type": "NVMe", "count": 8 }],
-        "nics": [{ "speed_gbps": 25, "count": 2 }],
+        "disks": [
+          {
+            "size_gb": 1920,
+            "type": "NVMe",
+            "count": 8
+          }
+        ],
+        "nics": [
+          {
+            "speed_gbps": 25,
+            "count": 2
+          }
+        ],
         "form_factor": "2U",
         "power": {
           "psu_max_w": 1800,
@@ -57,8 +90,17 @@
         },
         "gpu_chassis": {
           "max_count": 3,
-          "supported_form_factors": ["PCIe-FH", "PCIe-LP"],
-          "supported_models": ["L40S", "L40", "L4", "H100-PCIe", "A100-PCIe-80G"],
+          "supported_form_factors": [
+            "PCIe-FH",
+            "PCIe-LP"
+          ],
+          "supported_models": [
+            "L40S",
+            "L40",
+            "L4",
+            "H100-PCIe",
+            "A100-PCIe-80G"
+          ],
           "nvlink_topology": "none"
         },
         "gpu": []
@@ -72,13 +114,30 @@
       "display_name": "Dell PowerEdge R770",
       "generation": "17G",
       "release_year": 2025,
-      "tags": ["2u", "general", "rack", "dual-socket", "gpu-light"],
+      "tags": [
+        "2u",
+        "general",
+        "rack",
+        "dual-socket",
+        "gpu-light"
+      ],
       "notes": "17G 범용 2U. Intel Xeon 6 (Granite Rapids). R760 후속. DDR5 대용량. 라이트 GPU(L4/L40/L40S 1-2장, H200-NVL)까지 가능.",
       "spec": {
         "vcpu": 96,
         "memory_gb": 1536,
-        "disks": [{ "size_gb": 1920, "type": "NVMe", "count": 8 }],
-        "nics": [{ "speed_gbps": 25, "count": 2 }],
+        "disks": [
+          {
+            "size_gb": 1920,
+            "type": "NVMe",
+            "count": 8
+          }
+        ],
+        "nics": [
+          {
+            "speed_gbps": 25,
+            "count": 2
+          }
+        ],
         "form_factor": "2U",
         "power": {
           "psu_max_w": 2000,
@@ -87,8 +146,19 @@
         },
         "gpu_chassis": {
           "max_count": 3,
-          "supported_form_factors": ["PCIe-FH", "PCIe-LP"],
-          "supported_models": ["RTX-PRO-6000-Blackwell-SE", "L40S", "L40", "L4", "H100-PCIe", "H200-NVL"],
+          "supported_form_factors": [
+            "PCIe-FH",
+            "PCIe-LP"
+          ],
+          "supported_models": [
+            "RTX-PRO-6000-Blackwell-SE",
+            "L40S",
+            "L40",
+            "L4",
+            "H100-PCIe",
+            "H200-NVL",
+            "H100-NVL"
+          ],
           "nvlink_topology": "none"
         },
         "gpu": []
@@ -102,13 +172,30 @@
       "display_name": "Dell PowerEdge R760xa",
       "generation": "16G",
       "release_year": 2023,
-      "tags": ["2u", "gpu", "pcie", "nvlink-bridge", "inference"],
+      "tags": [
+        "2u",
+        "gpu",
+        "pcie",
+        "nvlink-bridge",
+        "inference"
+      ],
       "notes": "2U GPU 가속 서버. 4× 더블폭 PCIe-FH GPU. NVLink는 Bridge로 2장 페어링. H200-NVL 지원.",
       "spec": {
         "vcpu": 64,
         "memory_gb": 1024,
-        "disks": [{ "size_gb": 1920, "type": "NVMe", "count": 4 }],
-        "nics": [{ "speed_gbps": 100, "count": 2 }],
+        "disks": [
+          {
+            "size_gb": 1920,
+            "type": "NVMe",
+            "count": 4
+          }
+        ],
+        "nics": [
+          {
+            "speed_gbps": 100,
+            "count": 2
+          }
+        ],
         "form_factor": "2U",
         "power": {
           "psu_max_w": 2400,
@@ -117,8 +204,17 @@
         },
         "gpu_chassis": {
           "max_count": 4,
-          "supported_form_factors": ["PCIe-FH"],
-          "supported_models": ["H200-NVL", "H100-PCIe", "A100-PCIe-80G", "L40S", "L40"],
+          "supported_form_factors": [
+            "PCIe-FH"
+          ],
+          "supported_models": [
+            "H200-NVL",
+            "H100-NVL",
+            "H100-PCIe",
+            "A100-PCIe-80G",
+            "L40S",
+            "L40"
+          ],
           "nvlink_topology": "bridge-pair"
         },
         "gpu": []
@@ -132,15 +228,34 @@
       "display_name": "Dell PowerEdge XE8640",
       "generation": "16G",
       "release_year": 2023,
-      "tags": ["4u", "gpu", "sxm", "hgx", "training"],
+      "tags": [
+        "4u",
+        "gpu",
+        "sxm",
+        "hgx",
+        "training"
+      ],
       "notes": "4U HGX H100 4장 (SXM5, NVSwitch). 공냉. 훈련/추론 모두.",
       "spec": {
         "vcpu": 112,
         "memory_gb": 2048,
-        "disks": [{ "size_gb": 3840, "type": "NVMe", "count": 8 }],
+        "disks": [
+          {
+            "size_gb": 3840,
+            "type": "NVMe",
+            "count": 8
+          }
+        ],
         "nics": [
-          { "speed_gbps": 200, "count": 4, "interconnect": "InfiniBand" },
-          { "speed_gbps": 25, "count": 2 }
+          {
+            "speed_gbps": 200,
+            "count": 4,
+            "interconnect": "InfiniBand"
+          },
+          {
+            "speed_gbps": 25,
+            "count": 2
+          }
         ],
         "form_factor": "4U",
         "power": {
@@ -150,8 +265,12 @@
         },
         "gpu_chassis": {
           "max_count": 4,
-          "supported_form_factors": ["SXM"],
-          "supported_models": ["H100-SXM"],
+          "supported_form_factors": [
+            "SXM"
+          ],
+          "supported_models": [
+            "H100-SXM"
+          ],
           "nvlink_topology": "nvswitch-mesh"
         },
         "gpu": []
@@ -165,15 +284,38 @@
       "display_name": "Dell PowerEdge XE9685L (HGX B200)",
       "generation": "17G",
       "release_year": 2024,
-      "tags": ["6u", "gpu", "sxm", "hgx", "blackwell", "b200", "b100", "liquid-ready", "training"],
+      "tags": [
+        "6u",
+        "gpu",
+        "sxm",
+        "hgx",
+        "blackwell",
+        "b200",
+        "b100",
+        "liquid-ready",
+        "training"
+      ],
       "notes": "6U HGX B200 8장 (Blackwell SXM5, NVSwitch 5세대). AMD EPYC 9005. 차세대 LLM 학습용. 액냉 옵션.",
       "spec": {
         "vcpu": 192,
         "memory_gb": 3072,
-        "disks": [{ "size_gb": 3840, "type": "NVMe", "count": 8 }],
+        "disks": [
+          {
+            "size_gb": 3840,
+            "type": "NVMe",
+            "count": 8
+          }
+        ],
         "nics": [
-          { "speed_gbps": 800, "count": 8, "interconnect": "InfiniBand" },
-          { "speed_gbps": 100, "count": 2 }
+          {
+            "speed_gbps": 800,
+            "count": 8,
+            "interconnect": "InfiniBand"
+          },
+          {
+            "speed_gbps": 100,
+            "count": 2
+          }
         ],
         "form_factor": "6U",
         "power": {
@@ -183,8 +325,13 @@
         },
         "gpu_chassis": {
           "max_count": 8,
-          "supported_form_factors": ["SXM"],
-          "supported_models": ["B200-SXM", "B100-SXM"],
+          "supported_form_factors": [
+            "SXM"
+          ],
+          "supported_models": [
+            "B200-SXM",
+            "B100-SXM"
+          ],
           "nvlink_topology": "nvswitch-mesh"
         },
         "gpu": []
@@ -198,15 +345,35 @@
       "display_name": "Dell PowerEdge XE9680",
       "generation": "16G",
       "release_year": 2023,
-      "tags": ["6u", "gpu", "sxm", "hgx", "training", "h200"],
+      "tags": [
+        "6u",
+        "gpu",
+        "sxm",
+        "hgx",
+        "training",
+        "h200"
+      ],
       "notes": "6U HGX 8장 (H100 또는 H200 SXM5). NVSwitch 풀 메시. 대규모 LLM 훈련의 표준 노드.",
       "spec": {
         "vcpu": 112,
         "memory_gb": 2048,
-        "disks": [{ "size_gb": 3840, "type": "NVMe", "count": 8 }],
+        "disks": [
+          {
+            "size_gb": 3840,
+            "type": "NVMe",
+            "count": 8
+          }
+        ],
         "nics": [
-          { "speed_gbps": 400, "count": 8, "interconnect": "InfiniBand" },
-          { "speed_gbps": 100, "count": 2 }
+          {
+            "speed_gbps": 400,
+            "count": 8,
+            "interconnect": "InfiniBand"
+          },
+          {
+            "speed_gbps": 100,
+            "count": 2
+          }
         ],
         "form_factor": "6U",
         "power": {
@@ -216,8 +383,13 @@
         },
         "gpu_chassis": {
           "max_count": 8,
-          "supported_form_factors": ["SXM"],
-          "supported_models": ["H100-SXM", "H200-SXM"],
+          "supported_form_factors": [
+            "SXM"
+          ],
+          "supported_models": [
+            "H100-SXM",
+            "H200-SXM"
+          ],
           "nvlink_topology": "nvswitch-mesh"
         },
         "gpu": []
@@ -231,15 +403,37 @@
       "display_name": "Dell PowerEdge XE9780 (HGX B300)",
       "generation": "17G",
       "release_year": 2025,
-      "tags": ["10u", "gpu", "sxm", "hgx", "blackwell-ultra", "b300", "training", "inference"],
+      "tags": [
+        "10u",
+        "gpu",
+        "sxm",
+        "hgx",
+        "blackwell-ultra",
+        "b300",
+        "training",
+        "inference"
+      ],
       "notes": "10U 공랭 HGX B300 NVL8 8장 (Blackwell Ultra SXM, GPU당 270GB·1100W, NVSwitch 5세대). Intel Xeon 6. 액냉형은 XE9780L(랙당 256 GPU), AMD EPYC 변형은 XE9785. 초대형 LLM 학습·추론용.",
       "spec": {
         "vcpu": 172,
         "memory_gb": 4096,
-        "disks": [{ "size_gb": 3840, "type": "NVMe", "count": 8 }],
+        "disks": [
+          {
+            "size_gb": 3840,
+            "type": "NVMe",
+            "count": 8
+          }
+        ],
         "nics": [
-          { "speed_gbps": 800, "count": 8, "interconnect": "InfiniBand" },
-          { "speed_gbps": 200, "count": 2 }
+          {
+            "speed_gbps": 800,
+            "count": 8,
+            "interconnect": "InfiniBand"
+          },
+          {
+            "speed_gbps": 200,
+            "count": 2
+          }
         ],
         "form_factor": "10U",
         "power": {
@@ -249,8 +443,12 @@
         },
         "gpu_chassis": {
           "max_count": 8,
-          "supported_form_factors": ["SXM"],
-          "supported_models": ["B300-SXM"],
+          "supported_form_factors": [
+            "SXM"
+          ],
+          "supported_models": [
+            "B300-SXM"
+          ],
           "nvlink_topology": "nvswitch-mesh"
         },
         "gpu": []
