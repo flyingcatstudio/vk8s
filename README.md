@@ -597,6 +597,13 @@ VM 그룹은 그룹의 모든 서버가 대상이다. 노드 인스펙터에서�
 
 1. **chassis** (`node.spec.gpu_chassis`): 노드가 *허용*하는 GPU. `max_count`, `supported_form_factors`,
    `supported_models`, `nvlink_topology(none/bridge/nvswitch-mesh)`. 발주 가능한 슬롯 정의.
+> **새시 제약은 권장이지 잠금이 아니다.** `supported_models` · `max_count` · `supported_form_factors`는
+> 카탈로그가 주는 출발값이고, 노드 인스펙터에서 직접 고칠 수 있다(고치면 노드가 `custom`으로 표시).
+> GPU 모델 드롭다운에는 카탈로그 전체가 나오고 `이 새시 권장` / `기타`로만 갈라 보여준다.
+> 목록 밖 모델·정원 초과·폼팩터 불일치는 전부 **warn**이며 저장을 막지 않는다 — 라이저 증설이나
+> 검증되지 않은 조합도 설계할 수 있어야 하기 때문이다. 카탈로그가 "GPU 미지원"(`max_count: 0`)으로
+> 등록한 서버에도 수량을 올려 카드를 달 수 있다.
+
 2. **실장착** (`node.spec.gpu[]`): 실제 꽂혀 있는 카드. `{ model, count, multi_pod_sharing?, mig_enabled?, mig_profile? }[]`.
    - chassis 룰로 검증 (`GPU_CHASSIS_NOT_SUPPORTED` · `GPU_COUNT_EXCEEDS_CHASSIS` · `GPU_FORM_FACTOR_MISMATCH` · `GPU_MODEL_NOT_IN_CHASSIS_LIST`).
    - NVLink 토폴로지가 `none`인데 카드가 NVLink-capable인 경우 `NVLINK_ON_NONE_TOPOLOGY` 등 추가 검증.

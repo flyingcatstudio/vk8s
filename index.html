@@ -1344,8 +1344,8 @@ const HELP = {
   "node.gpu_install": {
     cat: "GPU",
     title: "Onprem GPU 장착",
-    body: "Onprem 서버는 새시가 GPU 무장착으로 출하되며, 사용자가 슬롯에 직접 장착합니다. + Add GPU로 추가하고 모델/수량을 인플레이스 편집.",
-    reco: "선택할 수 있는 모델은 새시의 supported_models, 폼팩터 호환, 잔여 슬롯, 잔여 PSU 전력에 따라 결정됩니다.",
+    body: "Onprem 서버는 새시가 GPU 무장착으로 출하되며, 사용자가 슬롯에 직접 장착합니다. + Add GPU로 추가하고 모델/수량을 인플레이스 편집. 새시 제원(실장 가능 수량 · 지원 폼팩터 · NVLink 토폴로지)도 여기서 직접 고칠 수 있습니다.",
+    reco: "카탈로그의 supported_models는 **권장 목록**이지 잠금이 아닙니다 — 모델 드롭다운에 전체 카탈로그가 나오고, 권장 목록 밖을 고르면 경고로만 알립니다(라이저 증설이나 검증되지 않은 조합을 설계할 수 있어야 하므로). 새시 제원을 고치면 노드가 custom으로 표시됩니다. 수량이 정원을 넘거나 폼팩터가 안 맞아도 막지 않고 Findings에 경고가 뜹니다.",
   },
   "node.gpu_power_budget": {
     cat: "GPU",
@@ -2447,12 +2447,25 @@ function addNodeGpu(nodeId) {
   if (!n || n.source !== "onprem") return;
   const chassis = n.spec.gpu_chassis || {};
   const supported = chassis.supported_models || [];
-  if (!supported.length) return;
   const gpuModels = state.catalog.gpuModels;
-  // Pick the first model whose form factor is in chassis.supported_form_factors
-  const okModel = supported.find(m =>
+  // 권장 목록에서 폼팩터가 맞는 것을 우선 고르고, 목록이 비어 있으면 전체 카탈로그에서 고른다
+  // (카탈로그가 "GPU 미지원"으로 등록한 서버에도 실제로는 카드를 달 수 있어야 한다).
+  let okModel = supported.find(m =>
     !gpuModels[m] || (chassis.supported_form_factors || []).includes(gpuModels[m].form_factor)
   ) || supported[0];
+  if (!okModel) {
+    // 권장 목록이 없으면 카탈로그 전체에서 고른다. 첫 키를 그냥 집으면 일반 1U 서버에
+    // 1400W SXM 카드가 붙는다 — 새시가 받는 폼팩터를 우선하고, 그 안에서 저전력 카드를 고른다.
+    const ffPref = (chassis.supported_form_factors || []).length
+      ? chassis.supported_form_factors
+      : ["PCIe-LP", "PCIe-FH", "SXM"];
+    const cands = Object.entries(gpuModels)
+      .filter(([, v]) => ffPref.includes(v.form_factor))
+      .sort((a, b) => ffPref.indexOf(a[1].form_factor) - ffPref.indexOf(b[1].form_factor)
+                   || (a[1].tdp_w || 0) - (b[1].tdp_w || 0));
+    okModel = (cands[0] || Object.entries(gpuModels)[0] || [])[0];
+  }
+  if (!okModel) return;
   const ginfo = gpuModels[okModel] || {};
   // Default count: nvswitch-mesh fills available slots; bridge-pair = 2; otherwise 1
   if (!n.spec.gpu) n.spec.gpu = [];
@@ -3867,23 +3880,23 @@ function runValidator(project) {
     const gpus = n.spec?.gpu || [];
     const total = gpus.reduce((a, g) => a + (g.count || 0), 0);
     if (total > 0 && (chassis.max_count || 0) === 0) {
-      F("GPU_CHASSIS_NOT_SUPPORTED", "error", `${n.name}: 이 새시는 GPU 미지원`, { kind: "node", id: n.id });
+      F("GPU_CHASSIS_NOT_SUPPORTED", "warn", `${n.name}: 이 새시는 GPU 미지원`, { kind: "node", id: n.id });
     }
     if (total > (chassis.max_count || 0) && (chassis.max_count || 0) > 0) {
-      F("GPU_COUNT_EXCEEDS_CHASSIS", "error",
+      F("GPU_COUNT_EXCEEDS_CHASSIS", "warn",
         `${n.name}: GPU ${total}장 > 새시 max ${chassis.max_count}`, { kind: "node", id: n.id });
     }
     for (const g of gpus) {
       if (g.form_factor && !(chassis.supported_form_factors || []).includes(g.form_factor)) {
-        F("GPU_FORM_FACTOR_MISMATCH", "error",
+        F("GPU_FORM_FACTOR_MISMATCH", "warn",
           `${n.name}: ${g.model} 폼팩터(${g.form_factor}) 미지원`, { kind: "node", id: n.id });
       }
       if (g.model && (chassis.supported_models || []).length && !(chassis.supported_models || []).includes(g.model)) {
-        F("GPU_MODEL_NOT_IN_CHASSIS_LIST", "error",
+        F("GPU_MODEL_NOT_IN_CHASSIS_LIST", "warn",
           `${n.name}: ${g.model}이 새시 목록에 없음`, { kind: "node", id: n.id });
       }
       if (g.nvlink_enabled && chassis.nvlink_topology === "none") {
-        F("NVLINK_ON_NONE_TOPOLOGY", "error",
+        F("NVLINK_ON_NONE_TOPOLOGY", "warn",
           `${n.name}: NVLink 미지원 새시인데 NVLink 활성`, { kind: "node", id: n.id });
       }
       // NVLink Bridge: 2장 페어링만 가능
@@ -4483,6 +4496,8 @@ function runValidator(project) {
 }
 
 //============ Compatibility check (subset for Add Node preview) ============
+// 새시 제약(수량·폼팩터·모델 목록)은 카탈로그 기본값이지 물리 법칙이 아니다 — 라이저 증설이나
+// 검증되지 않은 조합을 설계할 수 있어야 하므로 막지 않고 경고로만 알린다.
 function checkNodeCompatibility(spec, gpuModels) {
   const issues = [];
   const chassis = spec.gpu_chassis || {};
@@ -4490,20 +4505,20 @@ function checkNodeCompatibility(spec, gpuModels) {
   const totalGpu = installed.reduce((a, g) => a + (g.count || 0), 0);
 
   if (totalGpu > 0 && (chassis.max_count || 0) === 0) {
-    issues.push({ sev: "err", msg: "이 새시는 GPU 미지원" });
+    issues.push({ sev: "warn", msg: "이 새시는 GPU 미지원" });
   }
   if (totalGpu > (chassis.max_count || 0)) {
-    issues.push({ sev: "err", msg: `GPU ${totalGpu}장 > 새시 max_count ${chassis.max_count || 0}` });
+    issues.push({ sev: "warn", msg: `GPU ${totalGpu}장 > 새시 max_count ${chassis.max_count || 0}` });
   }
   for (const g of installed) {
     if (g.form_factor && !(chassis.supported_form_factors || []).includes(g.form_factor)) {
-      issues.push({ sev: "err", msg: `${g.model}: 폼팩터 ${g.form_factor} 미지원 (${(chassis.supported_form_factors||[]).join(",") || "none"})` });
+      issues.push({ sev: "warn", msg: `${g.model}: 폼팩터 ${g.form_factor} 미지원 (${(chassis.supported_form_factors||[]).join(",") || "none"})` });
     }
     if (g.model && !(chassis.supported_models || []).includes(g.model)) {
-      issues.push({ sev: "err", msg: `${g.model}: 새시 supported_models에 없음` });
+      issues.push({ sev: "warn", msg: `${g.model}: 새시 supported_models에 없음` });
     }
     if (g.nvlink_enabled && chassis.nvlink_topology === "none") {
-      issues.push({ sev: "err", msg: `${g.model}: NVLink 미지원 새시` });
+      issues.push({ sev: "warn", msg: `${g.model}: NVLink 미지원 새시` });
     }
     if (g.nvlink_enabled && chassis.nvlink_topology === "bridge-pair" && (g.count > 2 || g.count % 2 !== 0)) {
       issues.push({ sev: "warn", msg: `NVLink Bridge는 2장 페어링만` });
@@ -5672,19 +5687,79 @@ function renderNodeInspector(root, id) {
   }
 
   // GPU
-  if ((chassis.max_count || 0) > 0 || gpus.length) {
+  // 카탈로그가 "GPU 미지원"으로 등록한 서버(max_count 0)도 실제로는 라이저를 달아 쓰는 경우가 있다.
+  // onprem이면 항상 열어두고, 새시 제원 자체를 여기서 고칠 수 있게 한다.
+  if (n.source === "onprem" || (chassis.max_count || 0) > 0 || gpus.length) {
     const gpuTitle = el("div", { class: "section-title" }, ["GPU"]);
     gpuTitle.appendChild(helpIcon("gpu.chassis"));
     if (n.source === "onprem") gpuTitle.appendChild(helpIcon("node.gpu_install"));
     root.appendChild(gpuTitle);
-    const chassisDesc = `Chassis: max ${chassis.max_count || 0} · ${(chassis.supported_form_factors || []).join("/") || "—"} · ${chassis.nvlink_topology || "none"}`;
-    const supports = `Supports: ${(chassis.supported_models || []).join(", ") || "—"}`;
-    const chassisInfo = el("div", { class: "chassis-info" }, [
-      el("strong", {}, [chassisDesc]), el("br"), supports,
-    ]);
     const topo = chassis.nvlink_topology || "none";
-    if (topo !== "none") chassisInfo.appendChild(helpIcon("gpu.topology." + topo));
-    root.appendChild(chassisInfo);
+    if (n.source === "onprem") {
+      // 새시 제원은 카탈로그 기본값일 뿐 잠금이 아니다 — 실장 가능한 수량·폼팩터·NVLink 토폴로지를
+      // 직접 고칠 수 있어야 카탈로그에 없는 구성(라이저 증설, 검증되지 않은 조합)을 설계할 수 있다.
+      const setChassis = (k, v) => {
+        if (!n.spec.gpu_chassis) n.spec.gpu_chassis = { max_count: 0, supported_form_factors: [], supported_models: [], nvlink_topology: "none" };
+        n.spec.gpu_chassis[k] = v;
+        n.custom = true;          // 카탈로그 제원을 벗어났음을 표시
+        emit(); saveSoon();
+      };
+      const ffAll = ["SXM", "PCIe-FH", "PCIe-LP"];
+      const ffOn = new Set(chassis.supported_form_factors || []);
+      root.appendChild(el("div", { class: "field-row" }, [
+        el("div", { class: "field" }, [
+          el("label", {}, ["실장 가능 수량 (max)"]),
+          el("input", {
+            "data-focus-key": `node.${id}.chassis.max`,
+            type: "text", inputmode: "numeric", pattern: "[0-9]*",
+            value: chassis.max_count || 0,
+            oninput: e => { const v = parseIntInput(e.target.value); if (v != null && v >= 0) setChassis("max_count", v); },
+          }),
+        ]),
+        el("div", { class: "field" }, [
+          lbl("NVLink 토폴로지", "gpu.chassis"),
+          el("select", { onchange: e => setChassis("nvlink_topology", e.target.value) },
+            ["none", "bridge", "bridge-pair", "nvswitch-mesh"].map(v =>
+              el("option", { value: v, selected: topo === v ? "" : null }, [v]))),
+        ]),
+      ]));
+      root.appendChild(el("div", { class: "field" }, [
+        el("label", {}, ["지원 폼팩터"]),
+        el("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap", padding: "4px 0" } }, ffAll.map(f =>
+          el("label", {
+            style: {
+              display: "inline-flex", alignItems: "center", gap: "6px", padding: "3px 10px",
+              borderRadius: "5px", cursor: "pointer", margin: 0, fontSize: "12px",
+              textTransform: "none", letterSpacing: 0, color: "var(--text)",
+              background: ffOn.has(f) ? "var(--accent-glow)" : "var(--surface2)",
+              border: "1px solid " + (ffOn.has(f) ? "var(--accent)" : "var(--border)"),
+            },
+          }, [
+            el("input", {
+              type: "checkbox", checked: ffOn.has(f) ? "" : null,
+              onchange: e => {
+                const next = new Set(ffOn);
+                if (e.target.checked) next.add(f); else next.delete(f);
+                setChassis("supported_form_factors", ffAll.filter(x => next.has(x)));
+              },
+            }),
+            f,
+          ]))),
+      ]));
+      if ((chassis.supported_models || []).length) {
+        root.appendChild(el("div", { style: { fontSize: "11px", color: "var(--text3)", padding: "0 0 6px" } }, [
+          `카탈로그 권장 모델: ${(chassis.supported_models || []).join(", ")} — 목록 밖 모델도 고를 수 있고, 그때는 경고로만 알립니다.`,
+        ]));
+      }
+    } else {
+      const chassisDesc = `Chassis: max ${chassis.max_count || 0} · ${(chassis.supported_form_factors || []).join("/") || "—"} · ${topo}`;
+      const chassisInfo = el("div", { class: "chassis-info" }, [
+        el("strong", {}, [chassisDesc]), el("br"),
+        `Supports: ${(chassis.supported_models || []).join(", ") || "—"}`,
+      ]);
+      if (topo !== "none") chassisInfo.appendChild(helpIcon("gpu.topology." + topo));
+      root.appendChild(chassisInfo);
+    }
 
     // Slot + power budget bars (onprem only — cloud has fixed GPU)
     const totalGpu = gpus.reduce((a, g) => a + (g.count || 0), 0);
@@ -5722,6 +5797,8 @@ function renderNodeInspector(root, id) {
       }
     } else {
       // Onprem: editable rows
+      // 새시 목록은 "권장"이고 잠금이 아니다 — 전체 모델을 넘기고 renderGpuRowEditable이
+      // optgroup으로 권장/기타를 갈라 보여준다.
       const supportedModels = (chassis.supported_models || []).filter(m =>
         !gpuModels[m] || (chassis.supported_form_factors || []).includes(gpuModels[m].form_factor)
       );
@@ -5732,14 +5809,14 @@ function renderNodeInspector(root, id) {
       if (gpus.length === 0 && maxGpu > 0) {
         root.appendChild(el("div", { class: "empty-hint" }, ["GPU 슬롯 비어있음"]));
       }
-      if (remaining > 0 && supportedModels.length > 0) {
-        root.appendChild(el("button", {
-          class: "add-btn", style: { width: "100%", marginTop: "6px" },
-          onclick: () => addNodeGpu(id),
-        }, ["＋ Add GPU"]));
-      } else if (remaining <= 0 && maxGpu > 0) {
+      // 슬롯이 꽉 찼어도 추가는 막지 않는다 — 초과분은 GPU_COUNT_EXCEEDS_CHASSIS 경고로 알린다.
+      root.appendChild(el("button", {
+        class: "add-btn", style: { width: "100%", marginTop: "6px" },
+        onclick: () => addNodeGpu(id),
+      }, ["＋ Add GPU"]));
+      if (remaining <= 0 && maxGpu > 0) {
         root.appendChild(el("div", { style: { fontSize: "11px", color: "var(--text3)", padding: "4px", fontStyle: "italic", textAlign: "center" } }, [
-          "모든 슬롯 사용 중. 추가하려면 기존 GPU 수를 줄이거나 큰 새시 사용",
+          "슬롯 정원(" + maxGpu + ")을 채웠습니다 — 더 넣으려면 위의 '실장 가능 수량'을 올리세요.",
         ]));
       }
     }
@@ -8299,16 +8376,34 @@ function renderGpuRowEditable(n, idx, supportedModels, gpuModels) {
   const chassis = n.spec.gpu_chassis || {};
   // Max for THIS row = total max - other rows total
   const otherCount = (n.spec.gpu || []).reduce((a, gg, i) => a + (i === idx ? 0 : (gg.count || 0)), 0);
+  // 새시 정원은 상한이 아니라 참고값이다 — 초과는 검증이 경고로 알린다.
   const myMax = Math.max(1, (chassis.max_count || 0) - otherCount);
+  const myCap = Number.MAX_SAFE_INTEGER;
   const showNvlink = chassis.nvlink_topology !== "none" && (ginfo.nvlink_capable !== false);
 
+  // 새시의 supported_models는 권장 목록이지 잠금이 아니다. 전체 모델을 보여주되
+  // 권장/기타를 optgroup으로 갈라 어느 쪽인지 한눈에 보이게 한다.
+  const rec = new Set(supportedModels);
+  const opt = (m) => {
+    const info = gpuModels[m] || {};
+    const label = `${m}${info.vram_gb ? ` · ${info.vram_gb}GB` : ""}${info.tdp_w ? ` · ${info.tdp_w}W` : ""}`;
+    return el("option", { value: m, selected: m === g.model ? "" : null }, [label]);
+  };
+  const others = Object.keys(gpuModels).filter(m => !rec.has(m));
+  const groups = [];
+  if (supportedModels.length) {
+    groups.push(el("optgroup", { label: "이 새시 권장" }, supportedModels.map(opt)));
+  }
+  if (others.length) {
+    groups.push(el("optgroup", { label: supportedModels.length ? "기타 (권장 목록 밖 — 경고만 표시)" : "전체 모델" }, others.map(opt)));
+  }
+  if (g.model && !gpuModels[g.model]) {
+    groups.unshift(el("optgroup", { label: "현재 값 (카탈로그에 없는 모델)" }, [opt(g.model)]));
+  }
   const modelSel = el("select", {
     style: { padding: "5px 8px", background: "var(--surface3)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: "4px", fontSize: "12px" },
     onchange: e => updateNodeGpu(n.id, idx, { model: e.target.value }),
-  }, supportedModels.length
-    ? supportedModels.map(m => el("option", { value: m, selected: m === g.model ? "" : null }, [m]))
-    : [el("option", { value: g.model, selected: "" }, [g.model])]
-  );
+  }, groups.length ? groups : [el("option", { value: g.model, selected: "" }, [g.model])]);
 
   const countInput = el("input", {
     "data-focus-key": `node.${n.id}.gpu.${idx}.count`,
@@ -8317,7 +8412,7 @@ function renderGpuRowEditable(n, idx, supportedModels, gpuModels) {
     style: { padding: "5px 6px", background: "var(--surface3)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: "4px", fontSize: "12px", width: "60px", textAlign: "center" },
     oninput: e => {
       const v = parseIntInput(e.target.value);
-      if (v == null || v < 1 || v > myMax) return;
+      if (v == null || v < 1 || v > myCap) return;
       updateNodeGpu(n.id, idx, { count: v });
     },
   });
