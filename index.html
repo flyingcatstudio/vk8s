@@ -15775,7 +15775,13 @@ function _checklistItemRow(p, item) {
       state.ui.checklistEditingKey = null; emit(); saveSoon();
     };
     const cancel = () => {
-      if (item.custom && !(getCheck(p, item.key).text || "").trim()) removeCustomCheck(p, item.key);
+      // 취소로 빈 커스텀 항목을 지우는 것도 프로젝트 데이터 변경이다. saveSoon 없이 emit만 하면
+      // 화면에서만 사라지고 새로고침하면 되살아난다(추가 시점에는 이미 저장되었기 때문).
+      if (item.custom && !(getCheck(p, item.key).text || "").trim()) {
+        removeCustomCheck(p, item.key);
+        state.ui.checklistEditingKey = null; emit(); saveSoon();
+        return;
+      }
       state.ui.checklistEditingKey = null; emit();
     };
     input.addEventListener("keydown", e => {
